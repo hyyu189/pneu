@@ -23,3 +23,14 @@ dist/
 # Local scratch and release staging
 .tmp/
 artifacts/
+
+# BEGIN Roundtable
+.gstack/
+PAUSE
+.cmux/cache/
+*.log
+.DS_Store
+# END Roundtable
+
+# Local agent runtime state
+.claude/

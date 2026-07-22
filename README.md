@@ -243,3 +243,9 @@ offline release mode, upgrade gates, and precise removal behavior.
 Licensed under the Apache License 2.0. See [LICENSE](LICENSE) and
 [NOTICE](NOTICE). Applicable material retained from the MIT-licensed h2o
 predecessor keeps its full MIT notice there.
+
+<!-- BEGIN Roundtable -->
+## Roundtable status
+
+Agent routing is in [`ROUTING.md`](ROUTING.md). Keep the current shared status in this README so every harness sees the same state.
+<!-- END Roundtable -->

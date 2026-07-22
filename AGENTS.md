@@ -4,19 +4,31 @@ These instructions apply to the entire repository.
 
 ## Mission
 
-Ship a judge-testable Roundtable Messaging v2 developer tool for the 2026
-OpenAI Build Week. Prefer a small, reliable release over speculative features.
+Evolve Roundtable from the Build Week submission (`v0.1.8`, frozen) into a
+dependable product for collocated coding agents. The current cycle is `0.2`;
+its scope lives in `BRIEF.md`. Prefer small, reliable increments over
+speculative features.
 
 ## Collaboration boundary
 
 - Ocean is the human product lead and final decision-maker.
-- New product work in this repository is led, implemented, and reviewed through
-  GPT-5.6 in Codex unless Ocean explicitly changes that boundary.
-- Preserve historical Fable 5 and Hermes attribution exactly as documented in
-  `PROVENANCE.md` and `CREDITS.md`; do not present historical collaboration as
-  new work in this repository.
+- In the current phase, product work in this branch is led, implemented, and
+  reviewed through Claude, with Codex and Hermes as peer reviewers and
+  specialists on request. Ocean may change this boundary at any time.
+- Preserve historical attribution exactly as documented in `PROVENANCE.md` and
+  `CREDITS.md`. The Build Week phase was GPT-5.6/Codex-led; do not restate
+  history to match the current phase.
 - Do not ask another harness to implement new product code without Ocean's
   explicit approval.
+
+## Review-window freeze (until winners announced, conservatively 2026-08-12)
+
+- Do not push to public `main`, move or rebuild the `v0.1.8` tag, or modify
+  Release assets.
+- Development happens on `product/0.2` (this worktree). A remote backup branch,
+  if needed, must be clearly named as post-deadline work.
+- The competition archive worktree (`../2026-OAI-Build-Week`) is not a
+  development surface.
 
 ## Provenance
 
@@ -25,8 +37,8 @@ OpenAI Build Week. Prefer a small, reliable release over speculative features.
   and in `docs/provenance/source-commits.tsv`.
 - Exclude runtime mailboxes, local registries, backups, transcripts, secrets,
   personal paths, and unrelated project material.
-- Do not weaken or rewrite contributor attribution to improve a submission
-  narrative. Describe uncertainty explicitly.
+- Do not weaken or rewrite contributor attribution. Describe uncertainty
+  explicitly.
 
 ## Product constraints
 
@@ -35,10 +47,10 @@ OpenAI Build Week. Prefer a small, reliable release over speculative features.
   cmux. cmux support is an optional adapter.
 - Use one explicit Codex executable resolver for the launcher, daemon, wake
   bridge, and doctor.
-- Fail closed on unsupported Codex protocol behavior. Do not claim support from
-  version-number comparisons or fixtures alone.
-- Cross-host transport and multi-auth switching are out of the Build Week P0
-  scope unless Ocean changes the plan.
+- Fail closed on unsupported harness protocol behavior. Do not claim support
+  from version-number comparisons or fixtures alone.
+- Cross-host transport and multi-auth switching remain out of scope until the
+  roadmap says otherwise.
 
 ## Implementation and tests
 
@@ -54,6 +66,10 @@ OpenAI Build Week. Prefer a small, reliable release over speculative features.
 ## Release claims
 
 - A supported platform/runtime combination needs a real end-to-end smoke test.
-- The judge path must start from a release artifact, require no source rebuild,
-  and finish in five minutes or less.
+- A new user must reach a working install from a release artifact, without a
+  source rebuild, in five minutes or less.
 - Keep README support tables and limitations honest and current.
+
+<!-- BEGIN Roundtable -->
+For Roundtable work, always read `ROUTING.md` and `README.md`. Use the `roundtable` skill for peer-agent messaging.
+<!-- END Roundtable -->
