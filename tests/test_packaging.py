@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import plistlib
+import shlex
 import shutil
 import stat
 import subprocess
@@ -555,6 +556,10 @@ def test_install_and_uninstall_find_versioned_python_after_unsupported_python3(
     (fake_bin / "python3.14").symlink_to(sys.executable)
     environment = packaging_env(home)
     environment.pop("ROUNDTABLE_BOOTSTRAP_PYTHON")
+    # An activated environment now takes priority over the version-name scan,
+    # so clear it here to keep exercising the versioned-command fallback.
+    environment.pop("VIRTUAL_ENV", None)
+    environment.pop("CONDA_PREFIX", None)
     environment["PATH"] = os.pathsep.join(
         (str(fake_bin), "/usr/bin", "/bin")
     )
@@ -698,3 +703,228 @@ def test_owned_launch_agents_are_booted_out_but_foreign_plist_is_preserved(
     assert any(line.startswith("print ") for line in commands)
     assert any("bootout" in line and "com.roundtable.codex-wake" in line for line in commands)
     assert "preserved non-owned LaunchAgent" in removed.stderr
+
+
+def write_identifying_python(
+    path: Path,
+    *,
+    name: str,
+    trace: Path,
+    supported: bool = True,
+    can_build: bool = True,
+) -> Path:
+    """Write a fake interpreter that answers the discovery probes.
+
+    It reports CPython support and setuptools build capability through the
+    exact `-c` probes the installer scripts run, and records its own name into
+    ``trace`` when finally exec'd as the bootstrap (``-m ...``), so a test can
+    assert which candidate discovery selected without a real install.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then\n'
+        '  case "$2" in\n'
+        f"    *sys.implementation*) exit {0 if supported else 1} ;;\n"
+        f"    *setuptools.build_meta*) exit {0 if can_build else 1} ;;\n"
+        "    *) exit 0 ;;\n"
+        "  esac\n"
+        "fi\n"
+        'if [ "$1" = "-m" ]; then\n'
+        f"  printf '%s\\n' {shlex.quote(name)} > {shlex.quote(str(trace))}\n"
+        "  exit 0\n"
+        "fi\n"
+        "exit 0\n"
+    )
+    path.chmod(0o755)
+    return path
+
+
+def discovery_env(home: Path, **overrides: str) -> dict[str, str]:
+    env = packaging_env(home)
+    env.pop("ROUNDTABLE_BOOTSTRAP_PYTHON", None)
+    env.pop("VIRTUAL_ENV", None)
+    env.pop("CONDA_PREFIX", None)
+    env.update(overrides)
+    return env
+
+
+def run_installer(script: Path, *args: str, env: dict[str, str]):
+    return subprocess.run(
+        [str(script), *args],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize("activation_var", ["CONDA_PREFIX", "VIRTUAL_ENV"])
+def test_install_prefers_activated_env_over_higher_version_name(
+    tmp_path,
+    activation_var,
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    trace = tmp_path / "chosen.txt"
+    path_bin = tmp_path / "path-bin"
+    write_identifying_python(
+        path_bin / "python3.14",
+        name="path-python3.14",
+        trace=trace,
+    )
+    activated = tmp_path / "activated"
+    write_identifying_python(
+        activated / "bin" / "python",
+        name="activated-python",
+        trace=trace,
+    )
+
+    env = discovery_env(
+        home,
+        PATH=os.pathsep.join((str(path_bin), "/usr/bin", "/bin")),
+        **{activation_var: str(activated)},
+    )
+    process = run_installer(
+        INSTALL,
+        "--prefix",
+        str(home / ".roundtable"),
+        "--link-dir",
+        str(home / ".local" / "bin"),
+        env=env,
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert trace.read_text().strip() == "activated-python"
+
+
+def test_uninstall_prefers_activated_env_over_higher_version_name(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    trace = tmp_path / "chosen.txt"
+    path_bin = tmp_path / "path-bin"
+    write_identifying_python(
+        path_bin / "python3.14",
+        name="path-python3.14",
+        trace=trace,
+    )
+    activated = tmp_path / "activated"
+    write_identifying_python(
+        activated / "bin" / "python",
+        name="activated-python",
+        trace=trace,
+    )
+
+    env = discovery_env(
+        home,
+        PATH=os.pathsep.join((str(path_bin), "/usr/bin", "/bin")),
+        CONDA_PREFIX=str(activated),
+    )
+    process = run_installer(
+        UNINSTALL,
+        "--prefix",
+        str(home / ".roundtable"),
+        env=env,
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert trace.read_text().strip() == "activated-python"
+
+
+def test_install_source_mode_skips_candidate_without_setuptools(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    trace = tmp_path / "chosen.txt"
+    path_bin = tmp_path / "path-bin"
+    write_identifying_python(
+        path_bin / "python3.14",
+        name="python3.14",
+        trace=trace,
+        can_build=False,
+    )
+    write_identifying_python(
+        path_bin / "python3.13",
+        name="python3.13",
+        trace=trace,
+        can_build=True,
+    )
+
+    env = discovery_env(
+        home,
+        PATH=os.pathsep.join((str(path_bin), "/usr/bin", "/bin")),
+    )
+    process = run_installer(
+        INSTALL,
+        "--prefix",
+        str(home / ".roundtable"),
+        "--link-dir",
+        str(home / ".local" / "bin"),
+        env=env,
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert trace.read_text().strip() == "python3.13"
+    assert "skipping" in process.stderr
+    assert "python3.14" in process.stderr
+    assert "setuptools unavailable" in process.stderr
+
+
+def test_install_explicit_python_fails_closed_when_cannot_build(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    trace = tmp_path / "chosen.txt"
+    explicit = write_identifying_python(
+        tmp_path / "explicit-python",
+        name="explicit-python",
+        trace=trace,
+        can_build=False,
+    )
+
+    env = discovery_env(home, ROUNDTABLE_BOOTSTRAP_PYTHON=str(explicit))
+    process = run_installer(
+        INSTALL,
+        "--prefix",
+        str(home / ".roundtable"),
+        "--link-dir",
+        str(home / ".local" / "bin"),
+        env=env,
+    )
+
+    assert process.returncode == 1
+    assert "cannot build from source" in process.stderr
+    assert "setuptools unavailable" in process.stderr
+    assert not trace.exists()
+    assert not (home / ".roundtable").exists()
+
+
+def test_install_wheel_mode_accepts_python_without_setuptools(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    trace = tmp_path / "chosen.txt"
+    wheel_python = write_identifying_python(
+        tmp_path / "wheel-python",
+        name="wheel-python",
+        trace=trace,
+        can_build=False,
+    )
+    wheel_dir = tmp_path / "wheels"
+    wheel_dir.mkdir()
+
+    env = discovery_env(home, ROUNDTABLE_BOOTSTRAP_PYTHON=str(wheel_python))
+    process = run_installer(
+        INSTALL,
+        "--wheel-dir",
+        str(wheel_dir),
+        "--prefix",
+        str(home / ".roundtable"),
+        "--link-dir",
+        str(home / ".local" / "bin"),
+        env=env,
+    )
+
+    assert process.returncode == 0, process.stderr
+    assert trace.read_text().strip() == "wheel-python"
+    assert "cannot build from source" not in process.stderr
+    assert "skipping" not in process.stderr

@@ -19,7 +19,14 @@ if [ -n "${ROUNDTABLE_BOOTSTRAP_PYTHON:-}" ]; then
   fi
 else
   bootstrap_python=
-  for candidate in python3.14 python3.13 python3.12 python3.11 python3; do
+  # Prefer an already-activated environment before scanning PATH by version
+  # name, matching the installer's discovery order. Uninstall never builds, so
+  # no source-capability check applies here.
+  for candidate in \
+    "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/python}" \
+    "${CONDA_PREFIX:+$CONDA_PREFIX/bin/python}" \
+    python3.14 python3.13 python3.12 python3.11 python3; do
+    [ -n "$candidate" ] || continue
     if candidate_path=$(command -v "$candidate" 2>/dev/null) && supported_python "$candidate_path"; then
       bootstrap_python=$candidate_path
       break

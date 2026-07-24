@@ -25,11 +25,14 @@ Each dependency filename, official `files.pythonhosted.org` URL, and SHA-256
 digest is pinned in `scripts/build_release.py`. Downloads and caller-provided
 offline wheels are verified against those digests.
 
-The archive does not bundle a Python interpreter. Installation searches the
-versioned `python3.14` through `python3.11` commands before generic `python3`,
-requires CPython 3.11 through 3.14, and fails before writing anything if that
-prerequisite is absent or unsupported. This is an explicit candidate support
-boundary, not a claim that stock macOS alone is sufficient.
+The archive does not bundle a Python interpreter. Installation first honors an
+already-activated environment (`VIRTUAL_ENV`, then `CONDA_PREFIX`), then searches
+the versioned `python3.14` through `python3.11` commands before generic
+`python3`, requires CPython 3.11 through 3.14, and fails before writing anything
+if that prerequisite is absent or unsupported. The archive installs from its
+bundled wheels and never builds from source, so it accepts a supported
+interpreter regardless of whether setuptools is present. This is an explicit
+candidate support boundary, not a claim that stock macOS alone is sufficient.
 
 CI uses the exact package versions in `requirements-release.txt`. The builder
 records the active Python, pip, setuptools, and wheel versions in

@@ -72,9 +72,12 @@ between multiple auth homes remains outside the P0 lifecycle contract.
 
 The host must already have CPython 3.11 through 3.14. The archive bundles the
 Roundtable wheel and every Python package dependency, but not the interpreter;
-stock macOS alone does not guarantee this prerequisite. The installer searches
-`python3.14`, `python3.13`, `python3.12`, `python3.11`, and then `python3` on
-PATH. If none is the intended supported interpreter, set
+stock macOS alone does not guarantee this prerequisite. The installer first
+honors an already-activated environment (`VIRTUAL_ENV`, then `CONDA_PREFIX`)
+before scanning `python3.14`, `python3.13`, `python3.12`, `python3.11`, and then
+`python3` on PATH; this keeps a higher-numbered interpreter on PATH from
+shadowing the environment the operator actually activated. If none is the
+intended supported interpreter, set
 `ROUNDTABLE_BOOTSTRAP_PYTHON=/absolute/path/to/python3`.
 
 Then extract the release archive and run its installer. No source checkout,
@@ -126,10 +129,16 @@ mamba run -n general ./scripts/install.sh
 
 The source fallback builds a local project wheel without network access and
 creates its private environment with access to the bootstrap interpreter's
-PyYAML. Installation verifies that the command scripts and their managed
-runtime helpers are both present and records their digests, so a same-version
-reinstall cannot silently reuse a missing or locally modified lease helper.
-This mode is for development and verification.
+PyYAML. Because this mode runs the wheel build backend, interpreter discovery
+additionally requires `setuptools.build_meta` in the candidate: a supported
+interpreter that cannot build (for example a Homebrew `python3.14` without
+setuptools) is skipped with a one-line note and discovery continues to the next
+candidate. An explicit `ROUNDTABLE_BOOTSTRAP_PYTHON` that cannot build fails
+closed instead of falling back. A release `--wheel-dir` install performs no
+build and therefore does not apply this check. Installation verifies that the
+command scripts and their managed runtime helpers are both present and records
+their digests, so a same-version reinstall cannot silently reuse a missing or
+locally modified lease helper. This mode is for development and verification.
 
 Verify the installed maildir core in an isolated HOME and PATH:
 
