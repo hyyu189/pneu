@@ -24,8 +24,13 @@ by people who did not build it.
 4. **Clean-machine and terminal matrix validation.** Fresh-account install,
    Terminal.app / iTerm2 / Ghostty wake UX matrix — the promotion gates the
    Build Week window did not close.
-5. **Onboarding and brand.** First-run polish; evaluate the rename (working
-   name: Orca) — a GitHub repo rename preserves history and redirects.
+5. **Onboarding and brand.** First-run polish; continue the rename search.
+   The earlier working name Orca is rejected (2026-07-23, see decision.md:
+   stablyai/orca occupies the coding-agent category and GNOME Orca owns the
+   `orca` command). A candidate needs an unclaimed command name on
+   brew/apt/PyPI/npm, a clean first search page for "<name> agent" and
+   "<name> CLI", and no collision with an active developer-tool brand. A
+   GitHub repo rename preserves history and redirects.
 6. **README productization.** Product-first front page; Build Week narrative
    moves to a history section. `PROVENANCE.md`, `CREDITS.md`, and `v0.1.8`
    remain untouched.

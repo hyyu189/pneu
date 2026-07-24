@@ -2,6 +2,14 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-07-23: Rename working name "Orca" rejected (Ocean). stablyai/orca —
+  a YC-backed Electron ADE with an `orca` CLI and an orchestration
+  subsystem adjacent to Roundtable's messaging layer — occupies the name
+  in this exact category, and GNOME Orca owns the `orca` command on
+  Linux; the search and trademark positions are unrecoverable. The rename
+  search stays open under hard constraints (unclaimed command name on
+  brew/apt/PyPI/npm, clean "<name> agent"/"<name> CLI" search page, no
+  active developer-tool brand collision); BRIEF roadmap #5 updated.
 - 2026-07-23: `rt-wait-inbox` self-daemonization rejected (findings #5).
   Claude's wake contract needs the hook's own process to exit 2
   (`asyncRewake`); a self-daemonized watcher detaches from the hook process,
