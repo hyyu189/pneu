@@ -1326,23 +1326,24 @@ def _codex_payloads(
         raise SetupError(f"cannot build Codex LaunchAgent configuration: {error}") from error
 
 
-def _require_validated_codex_release(home: Path, prefix: Path) -> str:
-    """Gate on the layered release policy and return the accepted tier.
+def _require_validated_codex_release(home: Path, prefix: Path) -> None:
+    """Gate on the version floor before writing Codex service definitions.
 
     Setup never probes the daemon and never starts one; the live protocol
-    probe for an explicitly allowed unvalidated release runs in the launch
-    preflight and the wake bridge.
+    probe that proves any at-or-above-floor release runs later, in the launch
+    preflight and the wake bridge, once a daemon has answered.  The checker is
+    called only for its fail-closed side effect, so this stays compatible with
+    both the current floor+parse gate and any older module signature.
     """
     try:
         with _codex_context(home, prefix) as module:
             checker = getattr(module, "require_supported_version", None)
             if checker is None:
-                # Older supported artifacts expose only the strict exact-set
-                # gate; their released acceptance policy stays unchanged.
+                # Older supported artifacts expose only the legacy shim; call
+                # it so a mixed-version upgrade still gates on their policy.
                 module.require_validated_version()
-                return "validated"
-            _version, tier = checker()
-            return str(tier)
+            else:
+                checker()
     except SetupError:
         raise
     except Exception as error:

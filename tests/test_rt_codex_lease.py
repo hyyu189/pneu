@@ -217,7 +217,7 @@ def test_bind_command_records_current_lease_and_native_thread(
             pass
 
     monkeypatch.setattr(
-        wake, "require_supported_version", lambda: ((0, 144, 6), "validated")
+        wake, "require_supported_version", lambda: (0, 144, 6)
     )
     monkeypatch.setattr(
         wake,

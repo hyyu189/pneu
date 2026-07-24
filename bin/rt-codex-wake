@@ -32,7 +32,6 @@ from _rtlib import (
 
 from _rtcodex import (
     DEFAULT_SOCKET,
-    RELEASE_TIER_UNVALIDATED,
     RUNTIME_DIR,
     WAKE_LABEL,
     AppServerClient,
@@ -43,7 +42,6 @@ from _rtcodex import (
     require_default_socket,
     require_supported_daemon,
     require_supported_version,
-    validated_releases_text,
     wake_bridge_build_fingerprint,
     wake_plist,
 )
@@ -2226,15 +2224,8 @@ def bind_command(args) -> int:
         raise IdentityError(
             "CODEX_THREAD_ID is unavailable; run bind from the target Codex turn"
         )
-    version, tier = require_supported_version()
+    require_supported_version()
     require_supported_daemon(args.socket)
-    if tier == RELEASE_TIER_UNVALIDATED:
-        rendered = ".".join(str(part) for part in version)
-        print(
-            f"rt-codex-wake: warning: unvalidated Codex {rendered}; protocol "
-            f"probe passed (validated: {validated_releases_text()})",
-            file=sys.stderr,
-        )
     client = AppServerClient(args.socket)
     try:
         thread = validate_thread(project, read_thread(client, thread_id), thread_id)
@@ -2319,13 +2310,12 @@ def run_command(args) -> int:
     try:
         while not stopping:
             try:
-                version, tier = require_supported_version()
+                version = require_supported_version()
                 require_supported_daemon(args.socket)
-                if tier == RELEASE_TIER_UNVALIDATED:
-                    log_event(
-                        "unvalidated_release_probe_passed",
-                        version=".".join(str(part) for part in version),
-                    )
+                log_event(
+                    "protocol_probe_passed",
+                    version=".".join(str(part) for part in version),
+                )
                 client = AppServerClient(args.socket)
                 bridge = WakeBridge(
                     client,

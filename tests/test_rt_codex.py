@@ -1280,7 +1280,7 @@ def test_wake_run_backs_off_without_repairing_daemon(tmp_path, monkeypatch):
     project = write_project(tmp_path / "project")
     repair_calls = []
     monkeypatch.setattr(
-        wake, "require_supported_version", lambda: ((0, 144, 6), "validated")
+        wake, "require_supported_version", lambda: (0, 144, 6)
     )
     monkeypatch.setattr(
         wake,
@@ -1834,54 +1834,20 @@ def test_rebind_during_start_waits_then_resets_wake_state(tmp_path):
     assert "lastWakeGeneration" not in persisted.project_state(project)
 
 
-def test_version_allowlist_is_exact():
-    assert _rtcodex.version_is_validated((0, 144, 6))
-    assert not _rtcodex.version_is_validated((0, 144, 5))
-    assert not _rtcodex.version_is_validated((0, 144, 7))
-    assert not _rtcodex.version_is_validated((0, 145, 0))
-
-
-def test_release_tier_classification():
-    assert _rtcodex.codex_release_tier((0, 144, 6)) == _rtcodex.RELEASE_TIER_VALIDATED
-    assert (
-        _rtcodex.codex_release_tier((0, 144, 5)) == _rtcodex.RELEASE_TIER_BELOW_FLOOR
-    )
-    assert (
-        _rtcodex.codex_release_tier((0, 144, 7)) == _rtcodex.RELEASE_TIER_UNVALIDATED
-    )
-    assert (
-        _rtcodex.codex_release_tier((0, 145, 0)) == _rtcodex.RELEASE_TIER_UNVALIDATED
-    )
-    assert _rtcodex.codex_release_tier((1, 0, 0)) == _rtcodex.RELEASE_TIER_UNVALIDATED
-
-
-def test_unvalidated_release_requires_explicit_valve(monkeypatch):
-    monkeypatch.setattr(
-        _rtcodex, "codex_version", lambda: ((0, 145, 0), "codex-cli 0.145.0")
-    )
+def test_supported_version_accepts_any_release_at_or_above_floor(monkeypatch):
+    # No valve exists any more; every release at or above the floor is a
+    # candidate proven later by the live protocol probe, not an allowlist.
     monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
-    with pytest.raises(
-        _rtcodex.UnsupportedVersion, match="RT_CODEX_ALLOW_UNVALIDATED"
-    ):
-        _rtcodex.require_supported_version()
-
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
-    assert _rtcodex.require_supported_version() == (
-        (0, 145, 0),
-        _rtcodex.RELEASE_TIER_UNVALIDATED,
-    )
-
-    for value in ("true", "yes"):
-        monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", value)
-        with pytest.raises(
-            _rtcodex.CodexRuntimeError,
-            match="invalid RT_CODEX_ALLOW_UNVALIDATED value",
-        ):
-            _rtcodex.require_supported_version()
+    for version in ((0, 144, 6), (0, 144, 7), (0, 145, 0), (1, 0, 0)):
+        monkeypatch.setattr(
+            _rtcodex,
+            "codex_version",
+            lambda version=version: (version, "codex-cli stub"),
+        )
+        assert _rtcodex.require_supported_version() == version
 
 
-def test_below_floor_and_parse_failure_rejected_even_with_valve(monkeypatch):
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+def test_below_floor_and_parse_failure_rejected(monkeypatch):
     monkeypatch.setattr(
         _rtcodex, "codex_version", lambda: ((0, 143, 0), "codex-cli 0.143.0")
     )
@@ -1893,12 +1859,18 @@ def test_below_floor_and_parse_failure_rejected_even_with_valve(monkeypatch):
         _rtcodex.require_supported_version()
 
 
-def test_require_validated_version_shim_stays_strict(monkeypatch):
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+def test_require_validated_version_shim_applies_floor(monkeypatch):
+    # The legacy shim now aliases the floor+parse check for mixed-version
+    # upgrades rather than enforcing an exact allowlist.
     monkeypatch.setattr(
         _rtcodex, "codex_version", lambda: ((0, 145, 0), "codex-cli 0.145.0")
     )
-    with pytest.raises(_rtcodex.UnsupportedVersion, match="not a validated"):
+    assert _rtcodex.require_validated_version() == (0, 145, 0)
+
+    monkeypatch.setattr(
+        _rtcodex, "codex_version", lambda: ((0, 143, 0), "codex-cli 0.143.0")
+    )
+    with pytest.raises(_rtcodex.UnsupportedVersion, match="below the minimum"):
         _rtcodex.require_validated_version()
 
 
@@ -1913,9 +1885,8 @@ def _standalone_daemon(selected_codex, version="0.145.0"):
     }
 
 
-def test_supported_daemon_probes_unvalidated_standalone_release(monkeypatch):
+def test_supported_daemon_probes_standalone_release(monkeypatch):
     selected_codex = Path("/tmp/standalone/current/codex")
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
     monkeypatch.setattr(
         _rtcodex, "codex_version", lambda: ((0, 145, 0), "codex-cli 0.145.0")
     )
@@ -1951,9 +1922,10 @@ def test_supported_daemon_probes_unvalidated_standalone_release(monkeypatch):
         _rtcodex.require_supported_daemon()
 
 
-def test_validated_release_skips_probe(monkeypatch):
+def test_floor_release_is_probed(monkeypatch):
+    # The floor release is a protocol claim, not an allowlist entry, so it is
+    # probed like every other at-or-above-floor release.
     selected_codex = Path("/tmp/standalone/current/codex")
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
     monkeypatch.setattr(
         _rtcodex, "codex_version", lambda: ((0, 144, 6), "codex-cli 0.144.6")
     )
@@ -1968,15 +1940,17 @@ def test_validated_release_skips_probe(monkeypatch):
         "daemon_version",
         lambda _path: (_standalone_daemon(selected_codex, "0.144.6"), ""),
     )
+    probes = []
     monkeypatch.setattr(
         _rtcodex,
         "codex_protocol_probe",
-        lambda _path: pytest.fail("validated releases must not be probed"),
+        lambda _path: probes.append("probe") or (True, "probe passed"),
     )
 
     daemon = _rtcodex.require_supported_daemon()
 
     assert daemon["cliVersion"] == "0.144.6"
+    assert probes == ["probe"]
 
 
 class ProbeClient:
@@ -2034,7 +2008,9 @@ def test_protocol_probe_validates_rpc_surface(monkeypatch):
     assert ProbeClient.closed
 
 
-def test_wake_plist_forwards_unvalidated_valve(tmp_path, monkeypatch):
+def test_wake_plist_never_forwards_a_release_valve(tmp_path, monkeypatch):
+    # The unvalidated-release valve was removed; the wake LaunchAgent must not
+    # carry any such acceptance toggle into its environment.
     fake_codex = tmp_path / "codex"
     fake_codex.write_text("#!/bin/sh\n")
     fake_codex.chmod(0o755)
@@ -2043,10 +2019,6 @@ def test_wake_plist_forwards_unvalidated_valve(tmp_path, monkeypatch):
     monkeypatch.setattr(_rtcodex, "RUNTIME_DIR", runtime)
 
     monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
-    bridge = _rtcodex.wake_plist(tmp_path / "app.sock")
-    assert bridge["EnvironmentVariables"]["RT_CODEX_ALLOW_UNVALIDATED"] == "1"
-
-    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED")
     bridge = _rtcodex.wake_plist(tmp_path / "app.sock")
     assert "RT_CODEX_ALLOW_UNVALIDATED" not in bridge["EnvironmentVariables"]
 
@@ -2241,6 +2213,9 @@ def test_external_daemon_ignores_standalone_management_slot(monkeypatch):
             },
             "",
         ),
+    )
+    monkeypatch.setattr(
+        _rtcodex, "codex_protocol_probe", lambda _path: (True, "probe passed")
     )
 
     daemon = _rtcodex.require_supported_daemon()
@@ -2764,7 +2739,10 @@ def test_doctor_failure_matrix_and_install_fix(monkeypatch, capsys):
     assert "FAIL daemon:" in output
     assert "FAIL socket:" in output
     assert "FAIL rpc:" in output
-    assert "OK version:" in output
+    # With the app-server unreachable, the version can no longer be proven by
+    # a live probe, so it fails closed rather than passing on the version alone.
+    assert "FAIL version:" in output
+    assert "cannot run the app-server protocol probe" in output
     assert "FAIL bridge:" in output
     assert "run `roundtable codex` from a normal terminal" in output
 
@@ -2807,7 +2785,7 @@ def test_doctor_reports_persisted_needs_human_as_warn(tmp_path, monkeypatch, cap
     assert not report.failed
 
 
-def test_doctor_unsupported_version_fails_closed(monkeypatch, capsys):
+def test_doctor_failed_probe_fails_closed(monkeypatch, capsys):
     socket_path = doctor.DEFAULT_SOCKET
     monkeypatch.setattr(doctor, "codex_version", lambda: ((0, 144, 7), "codex-cli 0.144.7"))
     monkeypatch.setattr(
@@ -2825,6 +2803,11 @@ def test_doctor_unsupported_version_fails_closed(monkeypatch, capsys):
     )
     monkeypatch.setattr(doctor, "socket_check", lambda _path: (True, "ok"))
     monkeypatch.setattr(doctor, "probe_handshake", lambda _path: (True, "ok"))
+    monkeypatch.setattr(
+        doctor,
+        "codex_protocol_probe",
+        lambda _path: (False, "hooks/list probe failed: closed"),
+    )
     monkeypatch.setattr(doctor, "bridge_check", lambda *_args: (False, "disabled"))
     monkeypatch.setattr(doctor, "launchd_loaded", lambda _label: False)
     monkeypatch.setattr(sys, "argv", ["rt-doctor"])
@@ -2832,6 +2815,7 @@ def test_doctor_unsupported_version_fails_closed(monkeypatch, capsys):
     assert doctor.main() == 1
     output = capsys.readouterr().out
     assert "FAIL version:" in output
+    assert "failed the app-server protocol probe" in output
     assert "FAIL bridge:" in output
     assert "legacy" not in output
 

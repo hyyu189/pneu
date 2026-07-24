@@ -362,24 +362,16 @@ def preflight_codex_services(*, ready_action=None) -> None:
 
     try:
         from _rtcodex import (
-            RELEASE_TIER_UNVALIDATED,
             CodexRuntimeError,
             codex_launch_preflight,
         )
 
-        status = codex_launch_preflight(
+        codex_launch_preflight(
             confirm_reload=_confirm_codex_reload,
             ready_action=ready_action,
         )
     except CodexRuntimeError as error:
         raise SelectionError(f"rt-codex: {error}") from error
-    if getattr(status, "version_tier", "") == RELEASE_TIER_UNVALIDATED:
-        print(
-            "rt-codex: warning: RT_CODEX_ALLOW_UNVALIDATED accepted an "
-            "unvalidated Codex release after a live protocol probe; wake E2E "
-            f"on this release is not a support claim ({status.detail})",
-            file=sys.stderr,
-        )
 
 
 def project_at_or_above(start: Path) -> Path | None:

@@ -8,7 +8,6 @@ from pathlib import Path
 from _rtcodex import (
     APP_SERVER_LABEL,
     DEFAULT_SOCKET,
-    RELEASE_TIER_UNVALIDATED,
     CodexRuntimeError,
     app_server_plist,
     ensure_daemon,
@@ -18,7 +17,6 @@ from _rtcodex import (
     require_default_socket,
     require_supported_daemon,
     require_supported_version,
-    validated_releases_text,
 )
 
 
@@ -31,15 +29,9 @@ def main() -> int:
     try:
         if args.command == "install":
             require_default_socket(args.socket)
-            version, tier = require_supported_version()
-            if tier == RELEASE_TIER_UNVALIDATED:
-                rendered = ".".join(str(part) for part in version)
-                print(
-                    f"rt-codex-daemon: warning: unvalidated Codex {rendered}; "
-                    "the protocol probe runs once the daemon answers "
-                    f"(validated: {validated_releases_text()})",
-                    file=sys.stderr,
-                )
+            # Pre-start install only checks floor+parse; the protocol probe
+            # runs on the existing daemon paths once the app-server answers.
+            require_supported_version()
             path = install_launch_agent(
                 APP_SERVER_LABEL, app_server_plist(args.socket), reload=args.reload
             )

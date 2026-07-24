@@ -72,16 +72,14 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expandus
 DEFAULT_SOCKET = (CODEX_HOME / "app-server-control" / "app-server-control.sock").expanduser()
 APP_SERVER_LABEL = "com.roundtable.codex-app-server"
 WAKE_LABEL = "com.roundtable.codex-wake"
-# Version numbers alone neither claim nor deny support.  A listed release was
-# proven by the full release gate; an unlisted release at or above the floor
-# may run only after explicit operator consent plus a live protocol probe of
-# the running daemon; anything below the floor fails closed because no gate
+# Version numbers alone neither claim nor deny support.  The floor is the
+# oldest protocol surface a live gate ever exercised, not a per-version
+# allowlist: Roundtable ships far more slowly than the harness, so acceptance
+# is proven by a live read-only protocol probe of the running daemon at each
+# readiness check rather than by enumerating every release.  Any release at or
+# above the floor is probed; anything below it fails closed because no gate
 # ever exercised it.
-VALIDATED_CODEX_RELEASES = frozenset({(0, 144, 6)})
 MINIMUM_CODEX_RELEASE = (0, 144, 6)
-RELEASE_TIER_VALIDATED = "validated"
-RELEASE_TIER_UNVALIDATED = "unvalidated"
-RELEASE_TIER_BELOW_FLOOR = "below_floor"
 WAKE_BRIDGE_BUILD_COMPONENTS = (
     "bin/rt-codex-wake",
     "bin/_rtcodex.py",
@@ -114,7 +112,6 @@ class CodexServiceStatus:
     app_plist: str = "unknown"
     wake_plist: str = "unknown"
     bridge_detail: str = "not checked"
-    version_tier: str = ""
 
 
 @dataclass(frozen=True)
@@ -311,14 +308,6 @@ def wake_plist(
         environment["RT_PROJECTS_FILE"] = str(
             Path(os.environ["RT_PROJECTS_FILE"]).expanduser().resolve()
         )
-    if os.environ.get("RT_CODEX_ALLOW_UNVALIDATED"):
-        # launchd children do not inherit the launching shell environment.
-        # Forward the unvalidated-release valve so the bridge accepts exactly
-        # what the launcher accepted; an invalid value still fails closed in
-        # unvalidated_codex_allowed().
-        environment["RT_CODEX_ALLOW_UNVALIDATED"] = os.environ[
-            "RT_CODEX_ALLOW_UNVALIDATED"
-        ]
     return {
         "Label": WAKE_LABEL,
         "ProgramArguments": arguments,
@@ -1058,8 +1047,7 @@ def inspect_codex_services(
                 wake_plist=wake_state,
             )
         rendered = ".".join(str(part) for part in cli_version)
-        version_tier = codex_release_tier(cli_version)
-        if version_tier == RELEASE_TIER_BELOW_FLOOR:
+        if cli_version < MINIMUM_CODEX_RELEASE:
             return CodexServiceStatus(
                 SERVICE_UNSUPPORTED,
                 f"Codex {rendered} is below the minimum supported app-server "
@@ -1067,22 +1055,6 @@ def inspect_codex_services(
                 cli_version,
                 app_plist=app_state,
                 wake_plist=wake_state,
-                version_tier=version_tier,
-            )
-        if (
-            version_tier == RELEASE_TIER_UNVALIDATED
-            and not unvalidated_codex_allowed()
-        ):
-            return CodexServiceStatus(
-                SERVICE_UNSUPPORTED,
-                f"Codex {rendered} is not a validated app-server wake release "
-                f"(validated: {validated_releases_text()}); set "
-                "RT_CODEX_ALLOW_UNVALIDATED=1 to accept it after a live "
-                "protocol probe",
-                cli_version,
-                app_plist=app_state,
-                wake_plist=wake_state,
-                version_tier=version_tier,
             )
     except UnsupportedVersion as error:
         return CodexServiceStatus(SERVICE_UNSUPPORTED, str(error))
@@ -1185,22 +1157,21 @@ def inspect_codex_services(
             app_state,
             wake_state,
         )
-    if version_tier == RELEASE_TIER_UNVALIDATED:
-        # The probe runs only against an identity-proven Roundtable daemon;
-        # passing it permits launch with loud diagnostics and is not a
-        # validated support claim.
-        probe_ok, probe_detail = codex_protocol_probe(socket_path)
-        if not probe_ok:
-            return CodexServiceStatus(
-                SERVICE_UNSUPPORTED,
-                f"unvalidated Codex {rendered} failed the app-server protocol "
-                f"probe: {probe_detail}",
-                cli_version,
-                daemon,
-                app_state,
-                wake_state,
-                version_tier=version_tier,
-            )
+    # Every identity-proven daemon is probed: the floor is a protocol claim,
+    # not a validated allowlist, so a passing read-only probe is the launch
+    # evidence for any release.  The probe runs only after the daemon identity
+    # is proven, so its target is a confirmed Roundtable daemon.
+    probe_ok, probe_detail = codex_protocol_probe(socket_path)
+    if not probe_ok:
+        return CodexServiceStatus(
+            SERVICE_UNSUPPORTED,
+            f"Codex {rendered} failed the app-server protocol probe: "
+            f"{probe_detail}",
+            cli_version,
+            daemon,
+            app_state,
+            wake_state,
+        )
     if reload_pending:
         return _reload_status(
             "setup recorded a pending reload for the current app-server plist",
@@ -1232,22 +1203,14 @@ def inspect_codex_services(
             wake_state,
             bridge_detail,
         )
-    ready_detail = "Codex app-server and wake bridge are ready"
-    if version_tier == RELEASE_TIER_UNVALIDATED:
-        ready_detail = (
-            "Codex app-server and wake bridge are ready (unvalidated release "
-            f"{rendered}, protocol probe passed; validated: "
-            f"{validated_releases_text()})"
-        )
     return CodexServiceStatus(
         SERVICE_READY,
-        ready_detail,
+        "Codex app-server and wake bridge are ready",
         cli_version,
         daemon,
         app_state,
         wake_state,
         bridge_detail,
-        version_tier=version_tier,
     )
 
 
@@ -2030,12 +1993,12 @@ def require_daemon_identity(
 ) -> CodexDaemonIdentity:
     """Validate protocol shape, versions, and Roundtable lifecycle ownership.
 
-    Validated Codex 0.144.6 was source-verified to report ``managedCodexPath``
-    as a fixed standalone update slot, not as the executable serving the
-    socket.  The actual identity proof therefore comes from the Roundtable
-    launchd job and the kernel-reported Unix-socket peer PID; an unvalidated
-    release must satisfy these same schema and launchd/peer-PID checks at
-    runtime or it fails closed here.
+    The gate-exercised Codex 0.144.6 was source-verified to report
+    ``managedCodexPath`` as a fixed standalone update slot, not as the
+    executable serving the socket.  The actual identity proof therefore comes
+    from the Roundtable launchd job and the kernel-reported Unix-socket peer
+    PID; every release must satisfy these same schema and launchd/peer-PID
+    checks at runtime or it fails closed here.
     """
 
     if daemon.get("status") != "running":
@@ -2119,78 +2082,35 @@ def require_daemon_identity(
     )
 
 
-def version_is_validated(version: tuple[int, int, int]) -> bool:
-    return version in VALIDATED_CODEX_RELEASES
-
-
-def validated_releases_text() -> str:
-    return ", ".join(
-        ".".join(str(part) for part in version)
-        for version in sorted(VALIDATED_CODEX_RELEASES)
-    )
-
-
 def minimum_release_text() -> str:
     return ".".join(str(part) for part in MINIMUM_CODEX_RELEASE)
 
 
-def codex_release_tier(version: tuple[int, int, int]) -> str:
-    if version in VALIDATED_CODEX_RELEASES:
-        return RELEASE_TIER_VALIDATED
-    if version < MINIMUM_CODEX_RELEASE:
-        return RELEASE_TIER_BELOW_FLOOR
-    return RELEASE_TIER_UNVALIDATED
+def require_supported_version() -> tuple[int, int, int]:
+    """Return the selected CLI release, failing closed below the floor.
 
-
-def unvalidated_codex_allowed() -> bool:
-    """Read the explicit unvalidated-release valve; only exact "1" enables."""
-    value = os.environ.get("RT_CODEX_ALLOW_UNVALIDATED")
-    if value is None or value == "":
-        return False
-    if value == "1":
-        return True
-    raise CodexRuntimeError(
-        f"invalid RT_CODEX_ALLOW_UNVALIDATED value {value!r}: only 1 accepts "
-        "unvalidated Codex releases"
-    )
-
-
-def require_supported_version() -> tuple[tuple[int, int, int], str]:
-    """Classify the selected CLI release and fail closed outside its tier."""
+    Version acceptance is a floor plus parse check only; a release at or above
+    the floor is proven by the live protocol probe run against its daemon, not
+    by a per-version allowlist.
+    """
     version, output = codex_version()
     if version is None:
         raise CodexRuntimeError(f"could not parse Codex version: {output}")
-    rendered = ".".join(str(part) for part in version)
-    tier = codex_release_tier(version)
-    if tier == RELEASE_TIER_BELOW_FLOOR:
+    if version < MINIMUM_CODEX_RELEASE:
+        rendered = ".".join(str(part) for part in version)
         raise UnsupportedVersion(
             f"Codex {rendered} is below the minimum supported app-server "
             f"release {minimum_release_text()}"
         )
-    if tier == RELEASE_TIER_UNVALIDATED and not unvalidated_codex_allowed():
-        raise UnsupportedVersion(
-            f"Codex {rendered} is not a validated app-server wake release "
-            f"(validated: {validated_releases_text()}); set "
-            "RT_CODEX_ALLOW_UNVALIDATED=1 to accept it after a live protocol "
-            "probe"
-        )
-    return version, tier
+    return version
 
 
 def require_validated_version() -> tuple[int, int, int]:
-    # Strict exact-set legacy shim: older roundtable_packaging artifacts call
-    # this through _codex_context and must keep their released acceptance
-    # policy.  New callers use require_supported_version().
-    version, output = codex_version()
-    if version is None:
-        raise CodexRuntimeError(f"could not parse Codex version: {output}")
-    if not version_is_validated(version):
-        rendered = ".".join(str(part) for part in version)
-        raise UnsupportedVersion(
-            f"Codex {rendered} is not a validated app-server wake release "
-            f"(validated: {validated_releases_text()})"
-        )
-    return version
+    # Compatibility alias for older roundtable_packaging artifacts that call
+    # this name through _codex_context.  It now applies the same floor+parse
+    # check as require_supported_version instead of an exact-set allowlist, so
+    # a mixed-version upgrade accepts any release at or above the floor.
+    return require_supported_version()
 
 
 def codex_protocol_probe(
@@ -2235,19 +2155,18 @@ def codex_protocol_probe(
 def require_supported_daemon(socket_path: Path = DEFAULT_SOCKET) -> dict:
     """Fail closed when CLI and default-socket app-server versions diverge."""
     require_default_socket(socket_path)
-    cli, tier = require_supported_version()
+    cli = require_supported_version()
     daemon, detail = daemon_version(socket_path)
     if not daemon or daemon.get("status") != "running":
         raise CodexRuntimeError(f"could not validate app-server version: {detail}")
     require_daemon_identity(daemon, socket_path, cli)
-    if tier == RELEASE_TIER_UNVALIDATED:
-        ok, probe_detail = codex_protocol_probe(socket_path)
-        if not ok:
-            rendered = ".".join(str(part) for part in cli)
-            raise UnsupportedVersion(
-                f"unvalidated Codex {rendered} failed the app-server protocol "
-                f"probe: {probe_detail}"
-            )
+    ok, probe_detail = codex_protocol_probe(socket_path)
+    if not ok:
+        rendered = ".".join(str(part) for part in cli)
+        raise UnsupportedVersion(
+            f"Codex {rendered} failed the app-server protocol probe: "
+            f"{probe_detail}"
+        )
     return daemon
 
 

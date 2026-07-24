@@ -156,9 +156,8 @@ because a reply is slow.
 
 Codex wake is ready only when all of the following are true:
 
-- the selected CLI is an explicitly validated release, or an unlisted release
-  at or above the `0.144.6` floor that was explicitly allowed with
-  `RT_CODEX_ALLOW_UNVALIDATED=1` and passed the live read-only protocol probe;
+- the selected CLI is at or above the `0.144.6` floor and its identity-proven
+  daemon passed the live read-only protocol probe run at this readiness check;
 - the daemon reports `running`;
 - the requested and reported Unix sockets match;
 - the daemon response has the validated required fields and does not claim a
@@ -179,30 +178,31 @@ Codex wake is ready only when all of the following are true:
 - the WebSocket-over-Unix-socket `initialize` / `initialized` handshake works.
 
 `managedCodexPath` and `managedCodexVersion` are schema-checked metadata, not a
-general process-identity proof: the validated 0.144.6 implementation was
+general process-identity proof: the gate-exercised 0.144.6 implementation was
 source-verified to always report the fixed
 `$CODEX_HOME/packages/standalone/current/codex` management slot, even when the
-responsive app-server was launched from npm by Roundtable. An unvalidated
-release must satisfy the same runtime schema and launchd/socket-peer identity
-checks or it fails closed. Handshake liveness alone is not readiness. A daemon
-left running after a CLI upgrade fails closed until it is reloaded and
-revalidated.
+responsive app-server was launched from npm by Roundtable. Every release must
+satisfy the same runtime schema and launchd/socket-peer identity checks or it
+fails closed. Handshake liveness alone is not readiness. A daemon left running
+after a CLI upgrade fails closed until it is reloaded and revalidated.
 
-Codex release acceptance is layered, and a version comparison alone neither
-claims nor denies support. Releases below the `0.144.6` floor are always
-rejected because no gate ever exercised them. Explicitly validated releases
-are accepted silently. An unlisted release at or above the floor is accepted
-only when the operator sets `RT_CODEX_ALLOW_UNVALIDATED=1` and the
-identity-proven daemon passes a live protocol probe of the bridge's read-only
-surface (`initialize`/`initialized`, `thread/loaded/list`, `hooks/list`). The
-probe cannot exercise `turn/start` wake semantics, so a passing probe permits
-launch with loud diagnostics but is not a validated support claim; promotion
-into the validated set still requires the full release gate. The valve must be
-present in the same environment for setup and launch: setup forwards it into
-the owned wake LaunchAgent definition, so toggling it is a service-definition
-change that goes through the normal setup-upgrade path. The app-server remains
-an experimental integration surface, so each release joins the validated set
-only after its protocol and end-to-end wake path pass.
+Codex release acceptance is a version floor plus a live protocol handshake, not
+a per-version allowlist. Roundtable ships far more slowly than the harness, so
+enumerating and validating every release number is impractical; the support
+contract is instead the `0.144.6` floor plus a live read-only protocol probe of
+the running daemon at each readiness check. Releases below the floor are always
+rejected because no gate ever exercised that protocol surface. Any release at
+or above the floor is accepted only when its identity-proven daemon passes a
+probe of the bridge's read-only surface (`initialize`/`initialized`,
+`thread/loaded/list`, `hooks/list`); a probe failure fails closed with the probe
+detail. The probe cannot exercise `turn/start` wake semantics, so a passing
+probe is protocol evidence for launch, not a full end-to-end support claim; a
+release still earns a support claim only after its complete wake path passes
+the release gate. Setup applies only the floor-plus-parse check and never
+probes, because it neither starts nor contacts a daemon; the probe runs later,
+in the launch preflight and the wake bridge, once a daemon has answered. The
+app-server remains an experimental integration surface, so live protocol
+evidence, not a version number, is what admits each release.
 
 ## Codex service preflight
 
@@ -217,7 +217,7 @@ lease. Its state machine is deliberately narrower than a generic repair tool:
 | `reload_required_idle` | Explain possible disconnection and ask before coordinated reload |
 | `reload_deferred_busy` | Refuse because the caller or another active, unhealthy-live, or ambiguous Codex lease may be disrupted |
 | `setup_required` | Stop and direct the user to managed setup |
-| `unsupported` | Stop because the selected Codex release is below the floor, was not explicitly allowed, or failed the live protocol probe |
+| `unsupported` | Stop because the selected Codex release is below the floor or its identity-proven daemon failed the live protocol probe |
 | `unsafe` | Stop on foreign plist/socket ownership, permissions, malformed runtime state, or non-liveness protocol failure |
 
 Every launch takes one host-wide repair lock plus the install setup-state lock
@@ -270,13 +270,18 @@ repeat and the complete credentialed send-to-wake-to-drain/ack gate remain.
 
 ## Validation matrix
 
+The `0.144.6` rows record the exact pairings a live gate has exercised. The
+floor rows are the acceptance policy, not exercised pairings: acceptance is
+decided at runtime by the live protocol probe, so any release at or above the
+floor is admitted when its daemon passes that probe and rejected when it fails.
+
 | Codex distribution | CLI | App-server | Result |
 | --- | ---: | ---: | --- |
 | npm | `0.144.6` | isolated `0.144.6` | `initialize`, thread read/list, hooks list, and turn-history protocol smoke passed |
 | npm | `0.144.6` | Roundtable launchd `0.144.6` | RC5 live cutover, cold start, launchd-to-socket-peer ownership, SessionStart thread/lease identity, auto-bind, and isolated upgrade passed; credentialed wake E2E remains pending |
 | standalone | not installed | not installed | resolver and fixtures only; support is not yet claimed |
-| below the `0.144.6` floor | any | any | rejected always |
-| at/above the floor, unlisted (e.g. standalone `0.145.0`) | any | any | policy row, not an exercised pairing: launchable only through `RT_CODEX_ALLOW_UNVALIDATED=1` after the live read-only protocol probe; loudly diagnosed; not a validated support claim — no unlisted release has run a live gate |
+| below the `0.144.6` floor | any | any | rejected always, before any probe |
+| at/above the floor (e.g. standalone `0.145.0`) | any | any | policy row, not an exercised pairing: launchable when its identity-proven daemon passes the live read-only protocol probe, rejected on probe failure; a passing probe permits launch but is not yet an end-to-end support claim until a live gate runs |
 
 Before the Build Week release, npm `0.144.6` still needs a clean-account repeat
 plus the real send-to-wake-to-drain/ack gate.

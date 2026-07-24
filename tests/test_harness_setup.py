@@ -1232,12 +1232,15 @@ def test_partial_codex_unload_never_claims_a_full_rollback(
 
 
 @pytest.mark.parametrize("command", ["plan", "apply"])
-def test_unsupported_codex_release_is_rejected_without_writes(
+def test_at_or_above_floor_codex_release_is_accepted_without_probe(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
+    # Setup gates on the version floor only and never probes; any release at or
+    # above the floor is accepted here and proven later by the launch/wake
+    # protocol probe.
     home, prefix = installation
     monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
     _write_executable(
@@ -1248,7 +1251,6 @@ def test_unsupported_codex_release_is_rejected_without_writes(
         "fi\n"
         "exit 0\n",
     )
-    before = _tree_snapshot(home)
 
     code, result = _run(
         capsys,
@@ -1259,15 +1261,9 @@ def test_unsupported_codex_release_is_rejected_without_writes(
         "codex",
     )
 
-    assert code == 2
-    assert "not a validated app-server wake release" in result["error"]
-    assert "RT_CODEX_ALLOW_UNVALIDATED=1" in result["error"]
-    assert result["writes"] is False
-    assert result["rolled_back"] is False
-    assert result["launchctl_invoked"] is False
-    assert _tree_snapshot(home) == before
-    assert not (prefix / ".runtime").exists()
-    assert not (prefix / "harness-setup.json").exists()
+    assert code == 0
+    expected_state = "configured" if command == "apply" else "planned"
+    assert result["harnesses"]["codex"]["state"] == expected_state
 
 
 @pytest.mark.parametrize("command", ["plan", "apply"])
@@ -1290,11 +1286,12 @@ def test_existing_codex_setup_revalidates_cli_before_plan_or_apply(
     assert code == 0
     assert configured["harnesses"]["codex"]["state"] == "configured"
 
+    # Regressing the CLI below the floor must still fail closed on revalidation.
     _write_executable(
         home / ".npm-global" / "bin" / "codex",
         "#!/bin/sh\n"
         "if [ \"${1:-}\" = \"--version\" ]; then\n"
-        "  printf '%s\\n' 'codex-cli 0.144.7'\n"
+        "  printf '%s\\n' 'codex-cli 0.143.0'\n"
         "fi\n"
         "exit 0\n",
     )
@@ -1310,21 +1307,20 @@ def test_existing_codex_setup_revalidates_cli_before_plan_or_apply(
     )
 
     assert code == 2
-    assert "not a validated app-server wake release" in result["error"]
-    assert "RT_CODEX_ALLOW_UNVALIDATED=1" in result["error"]
+    assert "below the minimum" in result["error"]
     assert result["writes"] is False
     assert result["rolled_back"] is False
     assert result["launchctl_invoked"] is False
     assert _tree_snapshot(home) == before
 
 
-def test_unvalidated_codex_release_with_valve_plans_and_applies(
+def test_above_floor_codex_release_plans_and_applies_without_valve(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home, prefix = installation
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
     _write_executable(
         home / ".npm-global" / "bin" / "codex",
         "#!/bin/sh\n"
@@ -1359,16 +1355,17 @@ def test_unvalidated_codex_release_with_valve_plans_and_applies(
         home / "Library" / "LaunchAgents" / "com.roundtable.codex-wake.plist"
     )
     payload = plistlib.loads(wake_plist_path.read_bytes())
-    assert payload["EnvironmentVariables"]["RT_CODEX_ALLOW_UNVALIDATED"] == "1"
+    # No release valve exists any more, so nothing carries it into the plist.
+    assert "RT_CODEX_ALLOW_UNVALIDATED" not in payload["EnvironmentVariables"]
 
 
-def test_below_floor_codex_release_rejected_despite_valve(
+def test_below_floor_codex_release_is_rejected(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     home, prefix = installation
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
     _write_executable(
         home / ".npm-global" / "bin" / "codex",
         "#!/bin/sh\n"
@@ -1392,6 +1389,8 @@ def test_below_floor_codex_release_rejected_despite_valve(
     assert "below the minimum" in result["error"]
     assert result["writes"] is False
     assert _tree_snapshot(home) == before
+    assert not (prefix / ".runtime").exists()
+    assert not (prefix / "harness-setup.json").exists()
 
 
 def test_apply_preflights_every_mutation_parent_before_writing(

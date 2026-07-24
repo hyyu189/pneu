@@ -64,6 +64,11 @@ def test_ready_probe_is_structured_and_requires_no_output(monkeypatch, capsys):
     monkeypatch.setattr(_rtcodex, "daemon_version", lambda _path: (daemon, ""))
     monkeypatch.setattr(
         _rtcodex,
+        "codex_protocol_probe",
+        lambda _path: (True, "probe passed"),
+    )
+    monkeypatch.setattr(
+        _rtcodex,
         "wake_bridge_health",
         lambda *_a, **_k: (True, "healthy"),
     )
@@ -154,6 +159,11 @@ def test_responsive_npm_daemon_uses_launchd_owner_not_managed_slot(
         _rtcodex,
         "require_roundtable_daemon_owner",
         lambda _path: (101, 102),
+    )
+    monkeypatch.setattr(
+        _rtcodex,
+        "codex_protocol_probe",
+        lambda _path: (True, "probe passed"),
     )
     monkeypatch.setattr(
         _rtcodex,
@@ -426,6 +436,11 @@ def test_same_version_responsive_daemon_honors_persistent_reload_marker(
         "require_roundtable_daemon_owner",
         lambda _path: (101, 102),
     )
+    monkeypatch.setattr(
+        _rtcodex,
+        "codex_protocol_probe",
+        lambda _path: (True, "probe passed"),
+    )
     monkeypatch.setattr(_rtcodex, "inspect_host_harness_seats", lambda _h: [])
     monkeypatch.setattr(
         _rtcodex,
@@ -560,7 +575,7 @@ def test_approved_marked_reload_clears_marker_after_success(
     assert not marker_path.exists()
 
 
-def test_responsive_unvalidated_daemon_preserves_structured_status_fields(
+def test_responsive_daemon_preserves_structured_status_fields(
     monkeypatch,
 ):
     socket_path = Path("/tmp/roundtable-invalid-daemon-status.sock")
@@ -893,7 +908,7 @@ def test_service_path_symlink_and_permission_drift_fail_closed(tmp_path, monkeyp
         _rtcodex._validate_service_paths(tmp_path / "missing" / "app.sock")
 
 
-def _prepare_unvalidated_inspection(
+def _prepare_inspection(
     monkeypatch,
     socket_path: Path,
     selected_codex: Path,
@@ -942,32 +957,9 @@ def _prepare_unvalidated_inspection(
     return daemon
 
 
-def test_unvalidated_release_without_valve_is_unsupported(monkeypatch):
-    socket_path = Path("/tmp/roundtable-unvalidated.sock")
-    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
-    _prepare_unvalidated_inspection(
-        monkeypatch, socket_path, Path("/tmp/standalone/current/codex")
-    )
-    monkeypatch.setattr(
-        _rtcodex,
-        "probe_handshake_detailed",
-        lambda *_a, **_k: pytest.fail(
-            "an unallowed unvalidated release must fail before any probe"
-        ),
-    )
-
-    observed = _rtcodex.inspect_codex_services(socket_path)
-
-    assert observed.state == _rtcodex.SERVICE_UNSUPPORTED
-    assert "RT_CODEX_ALLOW_UNVALIDATED" in observed.detail
-    assert "0.145.0" in observed.detail
-    assert observed.version_tier == _rtcodex.RELEASE_TIER_UNVALIDATED
-
-
-def test_unvalidated_standalone_release_probes_then_ready(monkeypatch):
-    socket_path = Path("/tmp/roundtable-unvalidated.sock")
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
-    daemon = _prepare_unvalidated_inspection(
+def test_standalone_release_probes_then_ready(monkeypatch):
+    socket_path = Path("/tmp/roundtable-probe.sock")
+    daemon = _prepare_inspection(
         monkeypatch, socket_path, Path("/tmp/standalone/current/codex")
     )
     probes = []
@@ -981,16 +973,13 @@ def test_unvalidated_standalone_release_probes_then_ready(monkeypatch):
 
     assert observed.state == _rtcodex.SERVICE_READY
     assert observed.daemon == daemon
-    assert "unvalidated release 0.145.0" in observed.detail
-    assert "protocol probe passed" in observed.detail
-    assert observed.version_tier == _rtcodex.RELEASE_TIER_UNVALIDATED
+    assert observed.detail == "Codex app-server and wake bridge are ready"
     assert probes == ["probe"]
 
 
-def test_unvalidated_release_probe_failure_is_unsupported(monkeypatch):
-    socket_path = Path("/tmp/roundtable-unvalidated.sock")
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
-    _prepare_unvalidated_inspection(
+def test_release_probe_failure_is_unsupported(monkeypatch):
+    socket_path = Path("/tmp/roundtable-probe.sock")
+    _prepare_inspection(
         monkeypatch, socket_path, Path("/tmp/standalone/current/codex")
     )
     monkeypatch.setattr(
@@ -1004,13 +993,11 @@ def test_unvalidated_release_probe_failure_is_unsupported(monkeypatch):
     assert observed.state == _rtcodex.SERVICE_UNSUPPORTED
     assert "failed the app-server protocol probe" in observed.detail
     assert "hooks/list probe failed: closed" in observed.detail
-    assert observed.version_tier == _rtcodex.RELEASE_TIER_UNVALIDATED
 
 
 def test_probe_runs_only_after_daemon_identity(monkeypatch):
-    socket_path = Path("/tmp/roundtable-unvalidated.sock")
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
-    _prepare_unvalidated_inspection(
+    socket_path = Path("/tmp/roundtable-probe.sock")
+    _prepare_inspection(
         monkeypatch, socket_path, Path("/tmp/standalone/current/codex")
     )
     order = []
@@ -1033,8 +1020,7 @@ def test_probe_runs_only_after_daemon_identity(monkeypatch):
 
 def test_below_floor_release_is_unsupported_with_floor_detail(monkeypatch):
     socket_path = Path("/tmp/roundtable-below-floor.sock")
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
-    _prepare_unvalidated_inspection(
+    _prepare_inspection(
         monkeypatch,
         socket_path,
         Path("/tmp/standalone/current/codex"),
@@ -1045,4 +1031,3 @@ def test_below_floor_release_is_unsupported_with_floor_detail(monkeypatch):
 
     assert observed.state == _rtcodex.SERVICE_UNSUPPORTED
     assert "below the minimum supported app-server release 0.144.6" in observed.detail
-    assert observed.version_tier == _rtcodex.RELEASE_TIER_BELOW_FLOOR

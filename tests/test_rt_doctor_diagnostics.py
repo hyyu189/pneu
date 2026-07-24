@@ -469,7 +469,7 @@ def test_queue_files_remain_private_in_fixture(tmp_path):
     assert stat.S_IMODE(request.parent.stat().st_mode) == 0o700
 
 
-def _stub_unvalidated_codex_services(
+def _stub_codex_services(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     version: str = "0.145.0",
@@ -526,18 +526,17 @@ def _stub_unvalidated_codex_services(
     return socket_path
 
 
-def test_doctor_warns_on_probe_accepted_unvalidated_release(
+def test_doctor_reports_probe_accepted_release(
     tmp_path, monkeypatch, capsys
 ):
-    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
-    _stub_unvalidated_codex_services(tmp_path, monkeypatch)
+    _stub_codex_services(tmp_path, monkeypatch)
     monkeypatch.setattr(
         doctor,
         "codex_protocol_probe",
         lambda _socket: (True, "read-only protocol probe passed"),
     )
-    # A failing bridge must not misdirect a probe-accepted release toward
-    # installing 0.144.6; the launch fix applies instead.
+    # A failing bridge must not misdirect a probe-accepted release toward a
+    # floor reinstall; the launch fix applies instead.
     monkeypatch.setattr(
         doctor, "bridge_check", lambda *_a: (False, "heartbeat stale")
     )
@@ -546,40 +545,36 @@ def test_doctor_warns_on_probe_accepted_unvalidated_release(
 
     output = capsys.readouterr().out
     assert code == 1
-    assert "WARN version:" in output
-    assert "RT_CODEX_ALLOW_UNVALIDATED accepted it after a live protocol probe" in output
-    assert "install or validate one of" not in output
+    assert "OK version:" in output
+    assert "passed the live read-only protocol probe" in output
+    assert "install a Codex release at or above the floor" not in output
     assert "run `roundtable codex` from a normal terminal" in output
 
 
 @pytest.mark.parametrize(
-    ("valve", "probe_ok", "expected"),
+    ("version", "stub_probe", "expected"),
     [
-        (None, None, "set RT_CODEX_ALLOW_UNVALIDATED=1 to accept it"),
-        ("1", False, "failed the app-server protocol probe"),
+        ("0.145.0", (False, "hooks/list probe failed: closed"),
+         "failed the app-server protocol probe"),
+        ("0.143.0", None, "below the minimum supported app-server release"),
     ],
 )
-def test_doctor_fails_unvalidated_release_without_valve_or_failed_probe(
-    tmp_path, monkeypatch, capsys, valve, probe_ok, expected
+def test_doctor_fails_release_on_failed_probe_or_below_floor(
+    tmp_path, monkeypatch, capsys, version, stub_probe, expected
 ):
-    if valve is None:
-        monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
-    else:
-        monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", valve)
-    _stub_unvalidated_codex_services(tmp_path, monkeypatch)
-    if probe_ok is None:
+    _stub_codex_services(tmp_path, monkeypatch, version=version)
+    if stub_probe is None:
+        # A below-floor release is rejected before any probe runs.
         monkeypatch.setattr(
             doctor,
             "codex_protocol_probe",
             lambda _socket: pytest.fail(
-                "the probe must not run without the explicit valve"
+                "a below-floor release must fail before any probe"
             ),
         )
     else:
         monkeypatch.setattr(
-            doctor,
-            "codex_protocol_probe",
-            lambda _socket: (False, "hooks/list probe failed: closed"),
+            doctor, "codex_protocol_probe", lambda _socket: stub_probe
         )
 
     code = doctor.main()

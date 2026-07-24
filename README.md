@@ -77,12 +77,12 @@ Historical Fable 5 and Hermes contributions remain attributed separately in
 
 | Surface | Status |
 | --- | --- |
-| Installer runtime | Requires an existing CPython 3.11–3.14; the installer discovers versioned executables on PATH, while the archive bundles package dependencies but not the interpreter |
+| Installer runtime | Requires an existing CPython 3.11–3.14; the installer prefers an already-activated environment (VIRTUAL_ENV, then CONDA_PREFIX) before scanning versioned executables on PATH, while the archive bundles package dependencies but not the interpreter |
 | Terminal.app, iTerm2, and Ghostty | One first-class terminal baseline; automated core smoke passes, full harness wake UX matrix remains a release gate |
 | Claude Code | Owned global skill, asynchronous SessionStart/Stop watchers, and absolute lease-fenced mail permissions are packaged and configuration-tested; the installed RC8 artifact passed two sequential development-host wake generations without permission prompts, while a clean-account repeat remains a release gate |
 | Hermes | Owned global skill and plugin links are packaged and configuration-tested; two sequential RC7 development-host wake generations passed, while RC8 artifact and clean-account repeats remain release gates |
-| npm Codex CLI `0.144.6` | Exact-release protocol smoke, live RC5 cutover, cold start, launchd-to-socket-peer identity, SessionStart thread/lease identity, auto-bind, and isolated upgrade pass; full credentialed wake E2E remains a release gate; unlisted newer releases require the explicit unvalidated-release valve plus a live protocol probe and stay loudly diagnosed |
-| Codex standalone | Canonical resolver path implemented; standalone `0.145.0` can launch only through the explicit unvalidated tier (`RT_CODEX_ALLOW_UNVALIDATED=1` plus a live protocol probe) — permitted to run, still not a validated support claim because no standalone install has completed the live gate |
+| npm Codex CLI `0.144.6` | Exact-release protocol smoke, live RC5 cutover, cold start, launchd-to-socket-peer identity, SessionStart thread/lease identity, auto-bind, and isolated upgrade pass; full credentialed wake E2E remains a release gate; any release at or above the `0.144.6` floor launches when its identity-proven daemon passes a live protocol probe and fails closed otherwise |
+| Codex standalone | Canonical resolver path implemented; standalone `0.145.0` launches when its identity-proven daemon passes the live protocol probe and fails closed on probe failure — permitted to run, still not a validated support claim because no standalone install has completed the live gate |
 | cmux | The same baseline plus optional project/workspace topology, diagnostics, and notifications |
 | tmux and cross-host SSH | Not yet supported |
 
