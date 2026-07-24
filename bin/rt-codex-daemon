@@ -8,6 +8,7 @@ from pathlib import Path
 from _rtcodex import (
     APP_SERVER_LABEL,
     DEFAULT_SOCKET,
+    RELEASE_TIER_UNVALIDATED,
     CodexRuntimeError,
     app_server_plist,
     ensure_daemon,
@@ -15,8 +16,9 @@ from _rtcodex import (
     launchd_running,
     probe_handshake,
     require_default_socket,
-    require_validated_daemon,
-    require_validated_version,
+    require_supported_daemon,
+    require_supported_version,
+    validated_releases_text,
 )
 
 
@@ -29,23 +31,31 @@ def main() -> int:
     try:
         if args.command == "install":
             require_default_socket(args.socket)
-            require_validated_version()
+            version, tier = require_supported_version()
+            if tier == RELEASE_TIER_UNVALIDATED:
+                rendered = ".".join(str(part) for part in version)
+                print(
+                    f"rt-codex-daemon: warning: unvalidated Codex {rendered}; "
+                    "the protocol probe runs once the daemon answers "
+                    f"(validated: {validated_releases_text()})",
+                    file=sys.stderr,
+                )
             path = install_launch_agent(
                 APP_SERVER_LABEL, app_server_plist(args.socket), reload=args.reload
             )
             ensure_daemon(args.socket)
-            require_validated_daemon(args.socket)
+            require_supported_daemon(args.socket)
             print(f"installed {path}")
             return 0
         if args.command == "ensure":
-            require_validated_version()
+            require_supported_version()
             ensure_daemon(args.socket)
-            require_validated_daemon(args.socket)
+            require_supported_daemon(args.socket)
             print(f"ready {args.socket}")
             return 0
         ok, detail = probe_handshake(args.socket)
         if ok:
-            require_validated_daemon(args.socket)
+            require_supported_daemon(args.socket)
         print(
             f"launchd={'running' if launchd_running(APP_SERVER_LABEL) else 'not-running'} "
             f"handshake={'ok' if ok else 'failed'} socket={args.socket} detail={detail}"

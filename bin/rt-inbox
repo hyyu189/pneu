@@ -27,6 +27,10 @@ MAIL_HEADER_RE = re.compile(
     r"(?P<kind>[^\s\]]+) id=(?P<msg_id>[^\s\]]+)\](?: (?P<body>.*))?$",
     re.IGNORECASE | re.DOTALL,
 )
+MALFORMED_SCHEMA = "roundtable.maildir_malformed.v1"
+# Must stay in lockstep with rt-ack's MSG_ID_RE: remediation advice may only
+# name rt-ack for a raw id that rt-ack will actually accept and archive.
+ACK_MSG_ID_RE = re.compile(r"^\d{8}T\d{6}Z-([a-z0-9#_-]+)-to-([a-z0-9#_-]+)-[^-]+$")
 
 
 def parse_args():
@@ -110,11 +114,62 @@ def mail_timestamp(msg_id, path):
     timestamp = msg_id.split("-", 1)[0]
     try:
         parsed = datetime.strptime(timestamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
-        return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
     except ValueError:
-        return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).isoformat(
-            timespec="milliseconds"
-        ).replace("+00:00", "Z")
+        # A stray may be a dangling symlink or vanish mid-listing; a missing
+        # mtime must not crash the listing that is meant to expose it.
+        try:
+            parsed = datetime.fromtimestamp(path.lstat().st_mtime, timezone.utc)
+        except OSError:
+            parsed = datetime.now(timezone.utc)
+    return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def malformed_record(target, folder, path, problem, content, sender=""):
+    """Describe one undeliverable mail file instead of silently dropping it.
+
+    The raw file stem is the id the user acknowledges when the remedy is
+    rt-ack; a stray without the .md suffix keeps its full file name because
+    no ack id can address it. The mailbox directory is the addressee, because
+    the header itself cannot be trusted.
+    """
+    return {
+        "schema": MALFORMED_SCHEMA,
+        "msg_id": path.stem if path.suffix == ".md" else path.name,
+        "event_id": "",
+        "ts": mail_timestamp(path.stem, path),
+        "from": sender,
+        "to": target,
+        "kind": "malformed",
+        "problem": problem,
+        "body": one_line(content),
+        "rendered_text": content,
+        "send_text": None,
+        "workspace_ref": None,
+        "surface_ref": None,
+        "pane_ref": None,
+        "submit": "none",
+        "lifecycle": folder,
+        "refs": [],
+        "correlation": {},
+        "source": "maildir",
+        "maildir_path": str(path),
+        "delivery_sources": ["maildir"],
+    }
+
+
+def stray_record(target, path):
+    """Surface one wake-counted new/ entry that is not even a .md mail file."""
+    try:
+        stray_stat = path.lstat()
+    except OSError:
+        stray_stat = None
+    if stray_stat is None or not stat.S_ISREG(stray_stat.st_mode):
+        return malformed_record(target, "new", path, "not a regular mail file", "")
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        content = ""
+    return malformed_record(target, "new", path, "not a .md mail file", content)
 
 
 def read_maildir_records():
@@ -126,17 +181,60 @@ def read_maildir_records():
             continue
         target = target_dir.name.lower()
         paths = []
-        for folder in ("new", "cur"):
-            directory = target_dir / folder
-            if directory.is_dir():
-                paths.extend((folder, path) for path in sorted(directory.glob("*.md")))
+        new_dir = target_dir / "new"
+        if new_dir.is_dir():
+            # Mirror rt-wait-inbox's wake predicate exactly: every name in
+            # new/ that does not start with "ack-" or "." wakes the seat, so
+            # each of them must surface here even when it is not a .md mail
+            # file at all. Quiet acks and dot-hidden delivery temp files
+            # never wake and stay hidden.
+            for path in sorted(new_dir.iterdir()):
+                name = path.name
+                if name.startswith("."):
+                    continue
+                if name.endswith(".md"):
+                    paths.append(("new", path))
+                elif not name.startswith("ack-"):
+                    records.append(stray_record(target, path))
+        cur_dir = target_dir / "cur"
+        if cur_dir.is_dir():
+            paths.extend(("cur", path) for path in sorted(cur_dir.glob("*.md")))
         for folder, path in paths:
+            # A file in new/ that cannot be validated still wakes the seat, so
+            # it must stay visible instead of silently vanishing from the
+            # listing. Archived garbage in cur/ is inert and stays hidden.
+            try:
+                mail_stat = path.lstat()
+            except OSError:
+                mail_stat = None
+            if mail_stat is None or not stat.S_ISREG(mail_stat.st_mode):
+                # rt-ack archives only regular files, so a directory or
+                # symlink with a mail name is malformed even when it parses.
+                if folder == "new":
+                    records.append(
+                        malformed_record(
+                            target, folder, path, "not a regular mail file", ""
+                        )
+                    )
+                continue
             try:
                 content = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
+                if folder == "new":
+                    records.append(
+                        malformed_record(
+                            target, folder, path, "unreadable mail file", ""
+                        )
+                    )
                 continue
             match = MAIL_HEADER_RE.fullmatch(content)
             if not match:
+                if folder == "new":
+                    records.append(
+                        malformed_record(
+                            target, folder, path, "invalid mail header", content
+                        )
+                    )
                 continue
             parsed = match.groupdict()
             msg_id = parsed["msg_id"]
@@ -150,7 +248,31 @@ def read_maildir_records():
             valid_stems = {msg_id}
             if kind == "sync-ack":
                 valid_stems.add(f"ack-{msg_id}")
-            if path.stem not in valid_stems or to_agent != target:
+            if path.stem not in valid_stems:
+                if folder == "new":
+                    records.append(
+                        malformed_record(
+                            target,
+                            folder,
+                            path,
+                            "filename does not match message id",
+                            content,
+                            sender=parsed["from"].lower(),
+                        )
+                    )
+                continue
+            if to_agent != target:
+                if folder == "new":
+                    records.append(
+                        malformed_record(
+                            target,
+                            folder,
+                            path,
+                            "recipient does not match mailbox",
+                            content,
+                            sender=parsed["from"].lower(),
+                        )
+                    )
                 continue
             body = parsed.get("body") or ""
             record = {
@@ -287,12 +409,83 @@ def visible_records(agent, include_all):
             continue
         if record.get("kind") == "sync-ack":
             continue
+        if record.get("schema") == MALFORMED_SCHEMA:
+            # A malformed record is a live file in new/; it keeps waking this
+            # seat, so it stays listed as long as the file exists regardless
+            # of acknowledgement bookkeeping that its raw id may collide with.
+            visible.append(record)
+            continue
         if not include_all and record.get("msg_id") in acked_refs:
             continue
         if not include_all and LIFECYCLE_ORDINAL.get(record.get("lifecycle"), -1) >= LIFECYCLE_ORDINAL["acked"]:
             continue
         visible.append(record)
     return visible
+
+
+def resolvable_instances():
+    """Mirror rt-say's configured-target resolution for remediation advice.
+
+    An instance id resolves to itself; a base name resolves only when it has
+    exactly one instance, because rt-say refuses an ambiguous base. When the
+    agents document cannot be read, nothing resolves, so the advice degrades
+    to the manual move that always works.
+    """
+    try:
+        document = load_agents_doc(ROOT, "rt-inbox")
+        agents = document.get("agents") or {}
+    except (Exception, SystemExit):
+        return {}
+    resolved = {}
+    bases = []
+    for base, raw_config in agents.items():
+        config = raw_config if isinstance(raw_config, dict) else {}
+        base_name = str(base).lower()
+        instances = config.get("instances") or [{"id": base_name}]
+        instance_names = []
+        for instance in instances:
+            if isinstance(instance, str):
+                instance_name = instance.lower()
+            else:
+                instance_name = str((instance or {}).get("id") or base_name).lower()
+            instance_names.append(instance_name)
+            resolved.setdefault(instance_name, instance_name)
+        bases.append((base_name, instance_names))
+    for base_name, instance_names in bases:
+        resolved.setdefault(
+            base_name,
+            instance_names[0] if len(instance_names) == 1 else None,
+        )
+    return resolved
+
+
+def malformed_remedy(record, resolved):
+    """Name the cleanup that actually breaks this record's wake loop.
+
+    rt-ack is only advertised when every step it performs can succeed for
+    this seat: a regular .md file, a parseable raw id, a raw-id recipient
+    matching the mailbox owner, a registered non-self sender to receive the
+    sync-ack, and a registered recipient identity to send it. Everything
+    else needs the human to move the file out of new/ instead.
+    """
+    if record.get("problem") == "not a regular mail file":
+        return "manual-move"
+    path = Path(record.get("maildir_path", ""))
+    if path.suffix != ".md":
+        return "manual-move"
+    match = ACK_MSG_ID_RE.match(path.stem)
+    if not match:
+        return "manual-move"
+    ref_sender, ref_recipient = match.groups()
+    if ref_recipient != record.get("to"):
+        return "manual-move"
+    sender_instance = resolved.get(ref_sender)
+    recipient_instance = resolved.get(ref_recipient)
+    if not sender_instance or not recipient_instance:
+        return "manual-move"
+    if sender_instance == recipient_instance:
+        return "manual-move"
+    return "rt-ack"
 
 
 def print_text(records):
@@ -326,10 +519,45 @@ def main():
                 file=sys.stderr,
             )
     records = visible_records(agent, args.all)
+    malformed = [
+        record for record in records if record.get("schema") == MALFORMED_SCHEMA
+    ]
+    if malformed:
+        resolved = resolvable_instances()
+        for record in malformed:
+            record["remedy"] = malformed_remedy(record, resolved)
     if args.format == "json":
         print(json.dumps(records, ensure_ascii=False, indent=2))
-        return
-    print_text(records)
+    else:
+        print_text(records)
+    if malformed:
+        ackable = [
+            record["msg_id"]
+            for record in malformed
+            if record["remedy"] == "rt-ack"
+        ]
+        # A manual move handles the file itself, so name the file, not an id.
+        manual = [
+            Path(record["maildir_path"]).name
+            for record in malformed
+            if record["remedy"] != "rt-ack"
+        ]
+        parts = [
+            f"rt-inbox: {len(malformed)} malformed mail file(s) remain in "
+            "new/ and keep waking this seat"
+        ]
+        if ackable:
+            parts.append(
+                "acknowledge with rt-ack (--fenced) <raw-id>: "
+                + ", ".join(ackable)
+            )
+        if manual:
+            parts.append(
+                "rt-ack cannot archive these from this seat, so move each "
+                "file out of new/ (for example into cur/) manually: "
+                + ", ".join(manual)
+            )
+        print("; ".join(parts), file=sys.stderr)
 
 
 if __name__ == "__main__":

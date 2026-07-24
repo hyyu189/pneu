@@ -230,16 +230,140 @@ def test_unanchored_hermes_defaults_to_tui_without_changing_explicit_modes(
     with pytest.raises(ExecCalled):
         _rtlauncher.launch("hermes", argv)
 
+    # The full inherited lease context marks this shell as another seat's
+    # session, so the launcher scrubs every inherited seat variable —
+    # including RT_FROM, which here is the caller seat's identity rather
+    # than an explicit launch selection.
     assert observed == {
         "program": str(fake_binary),
         "command": [str(fake_binary), *expected_args],
         "environment": {
             "RT_PROJECT_ROOT": None,
-            "RT_FROM": "manual-identity",
+            "RT_FROM": None,
             "RT_SESSION_ID": None,
             "RT_LEASE_REVISION": None,
         },
     }
+
+
+def test_launch_scrubs_full_inherited_seat_environment(
+    tmp_path, monkeypatch, capsys
+):
+    # Field finding #8 (2026-07-21): a launcher run from inside another
+    # seat's shell inherited that seat's RT_* environment, so the wrong
+    # RT_FROM reached identity selection. A complete foreign lease context
+    # must be discarded before choosing or claiming the new seat.
+    project = write_project(
+        tmp_path / "project", agent_id="hermes", harness="hermes-agent"
+    )
+    fake_binary = tmp_path / "hermes"
+    observed = {}
+    calls = []
+
+    clear_lease_environment(monkeypatch)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("RT_PROJECT_ROOT", "/foreign/project")
+    monkeypatch.setenv("RT_FROM", "claude")
+    monkeypatch.setenv("RT_SESSION_ID", "foreign-session")
+    monkeypatch.setenv("RT_LEASE_REVISION", "41")
+    monkeypatch.setattr(
+        _rtlauncher, "choose_launch_cwd", lambda _harness: project
+    )
+    monkeypatch.setattr(_rtlauncher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(
+        _rtlauncher, "harness_bin", lambda _harness: fake_binary
+    )
+
+    def fake_claim(root, agent_id, harness):
+        calls.append((root, agent_id, harness))
+        return lease(project, agent_id, revision=5)
+
+    def fake_execv(program, command):
+        observed["program"] = program
+        observed["command"] = command
+        observed["environment"] = {
+            name: os.environ.get(name) for name in _rtlauncher.LEASE_ENV_NAMES
+        }
+        raise ExecCalled
+
+    monkeypatch.setattr(_rtlauncher, "claim", fake_claim)
+    monkeypatch.setattr(_rtlauncher.os, "execv", fake_execv)
+
+    with pytest.raises(ExecCalled):
+        _rtlauncher.launch("hermes", ["--continue"])
+
+    assert calls == [(project, "hermes", "hermes")]
+    assert observed == {
+        "program": str(fake_binary),
+        "command": [str(fake_binary), "--continue"],
+        "environment": {
+            "RT_PROJECT_ROOT": str(project),
+            "RT_FROM": "hermes",
+            "RT_SESSION_ID": "session-5",
+            "RT_LEASE_REVISION": "5",
+        },
+    }
+    assert (
+        "rt-hermes: advisory: ignoring Roundtable seat environment inherited"
+        in capsys.readouterr().err
+    )
+
+
+def test_launch_preserves_explicit_rt_from_without_lease_context(
+    tmp_path, monkeypatch, capsys
+):
+    project = (tmp_path / "project").resolve()
+    state = project / ".roundtable"
+    state.mkdir(parents=True)
+    (state / "agents.yaml").write_text(
+        "schema: roundtable.agents.v1\n"
+        f"project: {project}\n"
+        "agents:\n"
+        "  hermes:\n"
+        "    harness: hermes-agent\n"
+        "    instances:\n"
+        "      - id: hermes-build\n"
+        "      - id: hermes-review\n"
+    )
+    fake_binary = tmp_path / "hermes"
+    observed = {}
+
+    clear_lease_environment(monkeypatch)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("RT_FROM", "hermes-review")
+    monkeypatch.setattr(
+        _rtlauncher, "choose_launch_cwd", lambda _harness: project
+    )
+    monkeypatch.setattr(_rtlauncher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(
+        _rtlauncher, "harness_bin", lambda _harness: fake_binary
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "claim",
+        lambda root, agent_id, _harness: lease(project, agent_id, revision=6),
+    )
+
+    def fake_execv(program, command):
+        observed["environment"] = {
+            name: os.environ.get(name) for name in _rtlauncher.LEASE_ENV_NAMES
+        }
+        raise ExecCalled
+
+    monkeypatch.setattr(_rtlauncher.os, "execv", fake_execv)
+
+    with pytest.raises(ExecCalled):
+        _rtlauncher.launch("hermes", [])
+
+    # RT_FROM alone carries no lease context: it stays the documented
+    # explicit multi-instance selection and no advisory is printed.
+    assert observed["environment"] == {
+        "RT_PROJECT_ROOT": str(project),
+        "RT_FROM": "hermes-review",
+        "RT_SESSION_ID": "session-6",
+        "RT_LEASE_REVISION": "6",
+    }
+    assert "ignoring Roundtable seat environment" not in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(

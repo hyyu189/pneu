@@ -32,6 +32,7 @@ from _rtlib import (
 
 from _rtcodex import (
     DEFAULT_SOCKET,
+    RELEASE_TIER_UNVALIDATED,
     RUNTIME_DIR,
     WAKE_LABEL,
     AppServerClient,
@@ -40,8 +41,9 @@ from _rtcodex import (
     UnsupportedVersion,
     install_launch_agent,
     require_default_socket,
-    require_validated_daemon,
-    require_validated_version,
+    require_supported_daemon,
+    require_supported_version,
+    validated_releases_text,
     wake_bridge_build_fingerprint,
     wake_plist,
 )
@@ -2224,8 +2226,15 @@ def bind_command(args) -> int:
         raise IdentityError(
             "CODEX_THREAD_ID is unavailable; run bind from the target Codex turn"
         )
-    require_validated_version()
-    require_validated_daemon(args.socket)
+    version, tier = require_supported_version()
+    require_supported_daemon(args.socket)
+    if tier == RELEASE_TIER_UNVALIDATED:
+        rendered = ".".join(str(part) for part in version)
+        print(
+            f"rt-codex-wake: warning: unvalidated Codex {rendered}; protocol "
+            f"probe passed (validated: {validated_releases_text()})",
+            file=sys.stderr,
+        )
     client = AppServerClient(args.socket)
     try:
         thread = validate_thread(project, read_thread(client, thread_id), thread_id)
@@ -2310,8 +2319,13 @@ def run_command(args) -> int:
     try:
         while not stopping:
             try:
-                require_validated_version()
-                require_validated_daemon(args.socket)
+                version, tier = require_supported_version()
+                require_supported_daemon(args.socket)
+                if tier == RELEASE_TIER_UNVALIDATED:
+                    log_event(
+                        "unvalidated_release_probe_passed",
+                        version=".".join(str(part) for part in version),
+                    )
                 client = AppServerClient(args.socket)
                 bridge = WakeBridge(
                     client,
@@ -2426,7 +2440,7 @@ def main() -> int:
             return unbind_command(args)
         if args.command == "install":
             require_default_socket(args.socket)
-            require_validated_version()
+            require_supported_version()
             path = install_launch_agent(
                 WAKE_LABEL,
                 wake_plist(

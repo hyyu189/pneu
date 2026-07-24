@@ -188,6 +188,17 @@ the current active lease before touching project mail. Its host-local wake
 state also records the last pending filename generation and bounded attempt
 count, preventing one undrained generation from causing an infinite wake loop.
 
+Hermes follows the same bounded contract through its lifecycle plugin. The
+plugin arms on the TUI's `on_session_reset` boundary, and delivery uses the
+session-key-fenced background-notification handshake. Re-arm is
+generation-scoped: a fresh waiter starts only after the exact triggered
+filenames leave `new/`, and that archival belongs to the agent's `rt-ack`,
+never the plugin. An unacknowledged generation receives one bounded re-notice
+and then a pause diagnostic instead of an unbounded silent wait, and the
+plugin keeps polling so a late acknowledgement still re-arms automatically.
+A later session reset re-arms after session-scoped failures, while fence
+supersession and invalid installations stay closed for the process.
+
 Heartbeat reports adapter health; it is not by itself permission to steal a
 seat. On the same host, owner PID plus a process-start fingerprint protects
 against PID reuse and is the primary liveness proof. An unexpired-looking

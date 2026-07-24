@@ -112,7 +112,9 @@ Every `--fenced` action revalidates the canonical project, agent, session ID,
 lease revision, and current active lease. The send rule requires `--no-nudge`,
 so it cannot select the archived keyboard route. The fenced inbox operation
 also archives validated quiet `sync-ack` files for that seat before listing
-normal mail.
+normal mail. A mail file in `new/` that cannot be parsed or validated is
+listed explicitly as a `malformed` record with its raw file id instead of
+being hidden while it keeps triggering the watcher.
 
 Setup fails before writing when the same `~/.claude/settings.json` contains a
 matching `permissions.ask`/`permissions.deny` rule or
@@ -127,11 +129,36 @@ interaction, resume, or restart. Mail is still durable and diagnostics expose
 the unhealthy adapter; fully autonomous recovery from those failures is a
 post-P0 improvement.
 
+## Wake latency and zero-turn sessions
+
+Watcher arming belongs to the harness-native lifecycle hooks. A model turn
+must never start its own watcher, and specifically must never run
+`rt-wait-inbox ... &`: shell backgrounding trips the harness's
+background-operation approval prompt and freezes an unattended seat behind a
+dialog no one is watching. An unarmed seat is recovered through a normal
+interaction or a relaunch.
+
+A freshly launched seat with zero interactions may hold mail until its first
+turn. SessionStart hook output alone does not start a model turn on current
+harnesses, so the session has not yet entered the armed wake loop; the mail
+stays durable in `new/`. The workaround is to give an unattended seat one
+initial interaction after launch.
+
+Wake is edge-triggered and best-effort; durability, not latency, is the
+guarantee. A busy seat finishes its current turn before draining — a
+roughly five-minute Codex drain was observed in the field — while backlog
+accumulates in `new/` and one drain handles all of it. The bounded
+initial-wake, single Stop-hook retry, and pause semantics above govern
+repeated wakes for one pending generation. Senders must not re-send merely
+because a reply is slow.
+
 ## Readiness contract
 
 Codex wake is ready only when all of the following are true:
 
-- the selected CLI is an explicitly validated release;
+- the selected CLI is an explicitly validated release, or an unlisted release
+  at or above the `0.144.6` floor that was explicitly allowed with
+  `RT_CODEX_ALLOW_UNVALIDATED=1` and passed the live read-only protocol probe;
 - the daemon reports `running`;
 - the requested and reported Unix sockets match;
 - the daemon response has the validated required fields and does not claim a
@@ -152,14 +179,29 @@ Codex wake is ready only when all of the following are true:
 - the WebSocket-over-Unix-socket `initialize` / `initialized` handshake works.
 
 `managedCodexPath` and `managedCodexVersion` are schema-checked metadata, not a
-general process-identity proof: Codex 0.144.6 always reports the fixed
+general process-identity proof: the validated 0.144.6 implementation was
+source-verified to always report the fixed
 `$CODEX_HOME/packages/standalone/current/codex` management slot, even when the
-responsive app-server was launched from npm by Roundtable. Handshake liveness
-alone is not readiness. A daemon left running after a CLI upgrade fails closed
-until it is reloaded and revalidated.
+responsive app-server was launched from npm by Roundtable. An unvalidated
+release must satisfy the same runtime schema and launchd/socket-peer identity
+checks or it fails closed. Handshake liveness alone is not readiness. A daemon
+left running after a CLI upgrade fails closed until it is reloaded and
+revalidated.
 
-Future Codex releases are not accepted through an open-ended minimum version.
-The app-server is an experimental integration surface, so each release is added
+Codex release acceptance is layered, and a version comparison alone neither
+claims nor denies support. Releases below the `0.144.6` floor are always
+rejected because no gate ever exercised them. Explicitly validated releases
+are accepted silently. An unlisted release at or above the floor is accepted
+only when the operator sets `RT_CODEX_ALLOW_UNVALIDATED=1` and the
+identity-proven daemon passes a live protocol probe of the bridge's read-only
+surface (`initialize`/`initialized`, `thread/loaded/list`, `hooks/list`). The
+probe cannot exercise `turn/start` wake semantics, so a passing probe permits
+launch with loud diagnostics but is not a validated support claim; promotion
+into the validated set still requires the full release gate. The valve must be
+present in the same environment for setup and launch: setup forwards it into
+the owned wake LaunchAgent definition, so toggling it is a service-definition
+change that goes through the normal setup-upgrade path. The app-server remains
+an experimental integration surface, so each release joins the validated set
 only after its protocol and end-to-end wake path pass.
 
 ## Codex service preflight
@@ -175,7 +217,7 @@ lease. Its state machine is deliberately narrower than a generic repair tool:
 | `reload_required_idle` | Explain possible disconnection and ask before coordinated reload |
 | `reload_deferred_busy` | Refuse because the caller or another active, unhealthy-live, or ambiguous Codex lease may be disrupted |
 | `setup_required` | Stop and direct the user to managed setup |
-| `unsupported` | Stop because the selected Codex release has not passed this protocol matrix |
+| `unsupported` | Stop because the selected Codex release is below the floor, was not explicitly allowed, or failed the live protocol probe |
 | `unsafe` | Stop on foreign plist/socket ownership, permissions, malformed runtime state, or non-liveness protocol failure |
 
 Every launch takes one host-wide repair lock plus the install setup-state lock
@@ -233,7 +275,8 @@ repeat and the complete credentialed send-to-wake-to-drain/ack gate remain.
 | npm | `0.144.6` | isolated `0.144.6` | `initialize`, thread read/list, hooks list, and turn-history protocol smoke passed |
 | npm | `0.144.6` | Roundtable launchd `0.144.6` | RC5 live cutover, cold start, launchd-to-socket-peer ownership, SessionStart thread/lease identity, auto-bind, and isolated upgrade passed; credentialed wake E2E remains pending |
 | standalone | not installed | not installed | resolver and fixtures only; support is not yet claimed |
-| any future or unlisted release | any | any | rejected until explicitly validated |
+| below the `0.144.6` floor | any | any | rejected always |
+| at/above the floor, unlisted (e.g. standalone `0.145.0`) | any | any | policy row, not an exercised pairing: launchable only through `RT_CODEX_ALLOW_UNVALIDATED=1` after the live read-only protocol probe; loudly diagnosed; not a validated support claim — no unlisted release has run a live gate |
 
 Before the Build Week release, npm `0.144.6` still needs a clean-account repeat
 plus the real send-to-wake-to-drain/ack gate.

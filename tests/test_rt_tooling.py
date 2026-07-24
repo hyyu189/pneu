@@ -774,6 +774,83 @@ def test_rt_say_rejects_non_single_token_kind_without_side_effects(tmp_path):
         assert read_cmux_calls(trace_dir) == []
 
 
+def test_rt_say_rejects_hermes_cutover_specimen_shapes(tmp_path):
+    # Exact argv shapes replayed from the 2026-07-21 Hermes reply specimens:
+    # the model invented --kind/--refs options and pushed the real payload
+    # into the kind positional (28954) or a whole sentence plus the flags
+    # (52776/54352 shape).
+    flagged_cases = (
+        (
+            "specimen-28954",
+            (
+                "claude",
+                "CROSS_HERMES_OK",
+                "--kind",
+                "reply",
+                "--refs",
+                "20260721T222617Z-claude-to-hermes-26393",
+            ),
+        ),
+        (
+            "specimen-52776",
+            (
+                "claude",
+                "Cross check complete and acknowledged.",
+                "--kind",
+                "reply",
+                "--refs",
+                "20260721T222617Z-claude-to-hermes-26393",
+            ),
+        ),
+    )
+
+    for label, arguments in flagged_cases:
+        project, state, env, trace_dir = say_project(tmp_path / label)
+
+        proc = run_tool("rt-say", *arguments, cwd=project, env=env)
+
+        assert proc.returncode == 2
+        assert "--kind is not supported" in proc.stderr
+        assert "rt-say <agent-or-instance> <kind> <body...>" in proc.stderr
+        assert not (state / "inbox").exists()
+        assert read_ledger(state) == []
+        assert read_cmux_calls(trace_dir) == []
+
+    # The flag-free 29195 shape: a whole sentence lands in the kind
+    # positional instead of one token.
+    project, state, env, trace_dir = say_project(tmp_path / "specimen-29195")
+
+    proc = run_tool(
+        "rt-say",
+        "claude",
+        "CROSS HERMES OK acknowledged",
+        "message body",
+        cwd=project,
+        env=env,
+    )
+
+    assert proc.returncode == 2
+    assert "invalid kind: expected one non-empty token" in proc.stderr
+    assert not (state / "inbox").exists()
+    assert read_ledger(state) == []
+    assert read_cmux_calls(trace_dir) == []
+
+
+def test_rt_say_corrected_reply_form_delivers_reference_in_body(tmp_path):
+    # The taught form: kind is one flag-free token and the referenced
+    # message id travels in the body.
+    project, state, env, trace_dir = say_project(tmp_path)
+    body = "re 20260721T222617Z-claude-to-hermes-26393: CROSS_HERMES_OK"
+
+    proc = run_tool("rt-say", "claude", "reply", body, cwd=project, env=env)
+
+    assert proc.returncode == 0, proc.stderr
+    msg_id = proc.stdout.strip().split()[-1]
+    new_file = state / "inbox" / "claude" / "new" / f"{msg_id}.md"
+    assert new_file.read_text() == f"[CODEX→CLAUDE reply id={msg_id}] {body}"
+    assert read_cmux_calls(trace_dir) == []
+
+
 def test_rt_say_explicit_legacy_preserves_busy_submit_policy_per_harness(tmp_path):
     cases = [
         ("claude", "codex", "surface:2", "none", None, False),
@@ -1445,6 +1522,317 @@ def test_rt_inbox_shows_ledger_and_maildir_copies_with_source_labels(tmp_path):
     assert "both copy from maildir" in text_proc.stdout
     assert tmp_id not in text_proc.stdout
     assert cur_id not in text_proc.stdout
+
+
+def test_rt_inbox_surfaces_malformed_mail_with_specimen_header(tmp_path):
+    # Structural replay of field specimen 29195 (2026-07-21 cutover): the
+    # Hermes reply template pushed a multi-word sentence into the single-token
+    # kind slot and leaked CLI flags into the body, so MAIL_HEADER_RE cannot
+    # parse the header and the fenced listing used to hide the file while it
+    # kept waking the seat.
+    project = tmp_path / "project"
+    state = write_project(project)
+    stem = "20260721T222645Z-hermes-to-claude-29195"
+    new_dir = state / "inbox" / "claude" / "new"
+    new_dir.mkdir(parents=True)
+    (new_dir / f"{stem}.md").write_text(
+        f"[HERMES→CLAUDE CROSS HERMES OK acknowledged id={stem}] "
+        "--kind reply --refs 20260721T222617Z-claude-to-hermes-26393"
+    )
+
+    json_proc = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+
+    assert json_proc.returncode == 0, json_proc.stderr
+    payload = json.loads(json_proc.stdout)
+    assert len(payload) == 1
+    record = payload[0]
+    assert record["schema"] == "roundtable.maildir_malformed.v1"
+    assert record["msg_id"] == stem
+    assert record["to"] == "claude"
+    assert record["kind"] == "malformed"
+    assert record["problem"] == "invalid mail header"
+    assert record["lifecycle"] == "new"
+    # The stem parses, targets this mailbox, and names registered peers, so
+    # the advertised remedy is the one that actually works: rt-ack.
+    assert record["remedy"] == "rt-ack"
+    assert "1 malformed mail file(s) remain in new/" in json_proc.stderr
+    assert f"acknowledge with rt-ack (--fenced) <raw-id>: {stem}" in json_proc.stderr
+
+    text_proc = run_tool("rt-inbox", cwd=project, env={"RT_FROM": "claude"})
+    assert text_proc.returncode == 0, text_proc.stderr
+    assert stem in text_proc.stdout
+    assert "malformed" in text_proc.stdout
+    assert "keep waking this seat" in text_proc.stderr
+
+
+def test_rt_inbox_malformed_variants_and_cur_stays_hidden(tmp_path):
+    project = tmp_path / "project"
+    state = write_project(project)
+    new_dir = state / "inbox" / "claude" / "new"
+    cur_dir = state / "inbox" / "claude" / "cur"
+    new_dir.mkdir(parents=True)
+    cur_dir.mkdir(parents=True)
+    mismatch_id = "20260721T230000Z-codex-to-claude-11111"
+    variants = {
+        "20260721T230001Z-codex-to-claude-renamed": (
+            f"[CODEX→CLAUDE fyi id={mismatch_id}] stem drifted".encode(),
+            "filename does not match message id",
+        ),
+        "20260721T230002Z-codex-to-hermes-22222": (
+            "[CODEX→HERMES fyi id=20260721T230002Z-codex-to-hermes-22222]"
+            " wrong mailbox".encode(),
+            "recipient does not match mailbox",
+        ),
+        "20260721T230003Z-codex-to-claude-33333": (
+            b"[CODEX\xff not utf-8",
+            "unreadable mail file",
+        ),
+    }
+    for stem, (content, _problem) in variants.items():
+        (new_dir / f"{stem}.md").write_bytes(content)
+        (cur_dir / f"{stem}.md").write_bytes(content)
+
+    proc = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    # Only the three live new/ copies surface; archived cur/ garbage is inert.
+    assert len(payload) == 3
+    problems = {record["msg_id"]: record["problem"] for record in payload}
+    assert problems == {
+        stem: problem for stem, (_content, problem) in variants.items()
+    }
+    assert all(
+        record["schema"] == "roundtable.maildir_malformed.v1"
+        and record["kind"] == "malformed"
+        and record["lifecycle"] == "new"
+        for record in payload
+    )
+    # rt-ack archives the drifted stem and the unreadable file because their
+    # stems still target this mailbox between registered peers; the
+    # wrong-mailbox file is refused by rt-ack's identity checks, so only a
+    # manual move can break its wake loop.
+    remedies = {record["msg_id"]: record["remedy"] for record in payload}
+    assert remedies == {
+        "20260721T230001Z-codex-to-claude-renamed": "rt-ack",
+        "20260721T230002Z-codex-to-hermes-22222": "manual-move",
+        "20260721T230003Z-codex-to-claude-33333": "rt-ack",
+    }
+    assert "3 malformed mail file(s) remain in new/" in proc.stderr
+    assert "acknowledge with rt-ack (--fenced) <raw-id>:" in proc.stderr
+    assert (
+        "rt-ack cannot archive these from this seat, so move each file out "
+        "of new/ (for example into cur/) manually: "
+        "20260721T230002Z-codex-to-hermes-22222.md"
+    ) in proc.stderr
+
+
+def test_rt_inbox_malformed_does_not_disturb_normal_listing_or_quiet_ack_drain(
+    tmp_path,
+):
+    project = tmp_path / "project"
+    state = write_project(project)
+    normal_id = "20260721T231000Z-codex-to-claude-44444"
+    write_mail(state, "claude", normal_id, "codex", "question", "still normal")
+    acked_id = "20260721T231001Z-claude-to-codex-55555"
+    codex_new = state / "inbox" / "codex" / "new"
+    codex_new.mkdir(parents=True)
+    (codex_new / f"ack-{acked_id}.md").write_text(
+        f"[CLAUDE→CODEX sync-ack id={acked_id}] refs=original-message"
+    )
+    malformed_stem = "20260721T231002Z-hermes-to-claude-66666"
+    new_dir = state / "inbox" / "claude" / "new"
+    (new_dir / f"{malformed_stem}.md").write_text(
+        f"[HERMES→CLAUDE broken sentence kind id={malformed_stem}] leaked flags"
+    )
+
+    proc = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert [record["msg_id"] for record in payload] == [normal_id, malformed_stem]
+    assert payload[0]["schema"] == "roundtable.maildir_message.v1"
+    assert payload[0]["kind"] == "question"
+    assert payload[1]["schema"] == "roundtable.maildir_malformed.v1"
+
+    # The quiet ack in codex's mailbox stays a quiet ack: it is neither
+    # listed for codex nor mistaken for malformed mail.
+    codex_proc = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "codex"}
+    )
+    assert codex_proc.returncode == 0, codex_proc.stderr
+    assert json.loads(codex_proc.stdout) == []
+    assert "malformed" not in codex_proc.stderr
+
+
+def test_rt_ack_of_raw_malformed_id_breaks_the_wake_loop(tmp_path):
+    project = tmp_path / "project"
+    state = write_project(project)
+    stem = "20260721T222645Z-hermes-to-claude-29195"
+    new_dir = state / "inbox" / "claude" / "new"
+    new_dir.mkdir(parents=True)
+    source = new_dir / f"{stem}.md"
+    source.write_text(
+        f"[HERMES→CLAUDE CROSS HERMES OK acknowledged id={stem}] leaked flags"
+    )
+
+    before = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+    assert before.returncode == 0, before.stderr
+    assert json.loads(before.stdout)[0]["remedy"] == "rt-ack"
+
+    ack = run_tool("rt-ack", stem, cwd=project, env={"RT_FROM": "claude"})
+
+    assert ack.returncode == 0, ack.stderr
+    assert not source.exists()
+    assert (new_dir.parent / "cur" / source.name).is_file()
+    # Nothing that _wake_mail counts is left in new/, so the wake loop ends.
+    assert [
+        path.name
+        for path in new_dir.iterdir()
+        if not path.name.startswith(("ack-", "."))
+    ] == []
+    after = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+    assert after.returncode == 0, after.stderr
+    assert json.loads(after.stdout) == []
+    assert "malformed" not in after.stderr
+
+
+def test_rt_inbox_surfaces_wake_counted_non_md_strays(tmp_path):
+    # rt-wait-inbox counts every non-ack, non-hidden name in new/, so a stray
+    # that is not even a .md file wakes the seat; it must surface instead of
+    # leaving the wake loop without a visible cause.
+    project = tmp_path / "project"
+    state = write_project(project)
+    new_dir = state / "inbox" / "claude" / "new"
+    new_dir.mkdir(parents=True)
+    (new_dir / "stray.txt").write_text("editor scratch content")
+    (new_dir / "stray-file-no-extension").write_text("hook debris")
+    (new_dir / "stray-dir").mkdir()
+    # Quiet acks and dot-hidden delivery temp files never wake and stay out.
+    (new_dir / "ack-quiet.txt").write_text("never wakes")
+    (new_dir / ".hidden.md").write_text("delivery temp")
+
+    proc = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    wake_counted = sorted(
+        path.name
+        for path in new_dir.iterdir()
+        if not path.name.startswith(("ack-", "."))
+    )
+    # Everything the wake counter sees is listed, under its full file name.
+    assert sorted(record["msg_id"] for record in payload) == wake_counted
+    problems = {record["msg_id"]: record["problem"] for record in payload}
+    assert problems == {
+        "stray.txt": "not a .md mail file",
+        "stray-file-no-extension": "not a .md mail file",
+        "stray-dir": "not a regular mail file",
+    }
+    assert all(record["remedy"] == "manual-move" for record in payload)
+    assert "3 malformed mail file(s) remain in new/" in proc.stderr
+    assert "move each file out of new/" in proc.stderr
+    assert "acknowledge with rt-ack" not in proc.stderr
+
+
+def test_rt_inbox_wrong_mailbox_mail_needs_manual_move_to_break_the_loop(
+    tmp_path,
+):
+    # Field class from the 2026-07-21 cutover review: a valid-looking file
+    # sits in the wrong mailbox. rt-ack refuses it for the seat owner, so the
+    # only advertised remedy must be the manual move that actually works.
+    project = tmp_path / "project"
+    state = write_project(project)
+    stem = "20260721T230002Z-codex-to-hermes-22222"
+    new_dir = state / "inbox" / "claude" / "new"
+    new_dir.mkdir(parents=True)
+    source = new_dir / f"{stem}.md"
+    source.write_text(f"[CODEX→HERMES fyi id={stem}] wrong mailbox")
+
+    proc = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert len(payload) == 1
+    assert payload[0]["problem"] == "recipient does not match mailbox"
+    assert payload[0]["remedy"] == "manual-move"
+    assert "rt-ack cannot archive these from this seat" in proc.stderr
+    assert "acknowledge with rt-ack" not in proc.stderr
+
+    # rt-ack is a dead end for this class: the raw id names another seat.
+    ack = run_tool("rt-ack", stem, cwd=project, env={"RT_FROM": "claude"})
+    assert ack.returncode != 0
+    assert "does not match message recipient" in ack.stderr
+    assert source.exists()
+
+    # The printed remedy ends the wake loop.
+    cur_dir = new_dir.parent / "cur"
+    cur_dir.mkdir()
+    source.rename(cur_dir / source.name)
+    assert [
+        path.name
+        for path in new_dir.iterdir()
+        if not path.name.startswith(("ack-", "."))
+    ] == []
+    after = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+    assert after.returncode == 0, after.stderr
+    assert json.loads(after.stdout) == []
+    assert "malformed" not in after.stderr
+
+
+def test_rt_inbox_unregistered_sender_remedy_is_manual_move(tmp_path):
+    # An unparseable file whose stem names a sender missing from agents.yaml
+    # cannot be acknowledged: rt-ack's sync-ack send fails closed before
+    # archiving. The listing must not advertise rt-ack for it.
+    project = tmp_path / "project"
+    state = write_project(project)
+    stem = "20260721T230004Z-ghost-to-claude-77777"
+    new_dir = state / "inbox" / "claude" / "new"
+    new_dir.mkdir(parents=True)
+    source = new_dir / f"{stem}.md"
+    source.write_text(f"[GHOST→CLAUDE broken sentence kind id={stem}] debris")
+
+    proc = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    payload = json.loads(proc.stdout)
+    assert len(payload) == 1
+    assert payload[0]["problem"] == "invalid mail header"
+    assert payload[0]["remedy"] == "manual-move"
+    assert "rt-ack cannot archive these from this seat" in proc.stderr
+
+    ack = run_tool("rt-ack", stem, cwd=project, env={"RT_FROM": "claude"})
+    assert ack.returncode != 0
+    assert "unknown agent or instance: ghost" in ack.stderr
+    assert source.exists()
+
+    cur_dir = new_dir.parent / "cur"
+    cur_dir.mkdir()
+    source.rename(cur_dir / source.name)
+    after = run_tool(
+        "rt-inbox", "-f", "json", cwd=project, env={"RT_FROM": "claude"}
+    )
+    assert after.returncode == 0, after.stderr
+    assert json.loads(after.stdout) == []
+    assert "malformed" not in after.stderr
 
 
 def test_roundtable_gitignore_template_excludes_maildir_inbox():

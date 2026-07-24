@@ -9,6 +9,7 @@ import stat
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -466,3 +467,124 @@ def test_queue_files_remain_private_in_fixture(tmp_path):
 
     assert stat.S_IMODE(request.stat().st_mode) == 0o600
     assert stat.S_IMODE(request.parent.stat().st_mode) == 0o700
+
+
+def _stub_unvalidated_codex_services(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    version: str = "0.145.0",
+) -> Path:
+    """Stub one identity-proven daemon on `version` for the main() report."""
+
+    socket_path = tmp_path / "app.sock"
+    parsed = tuple(int(part) for part in version.split("."))
+    daemon = {
+        "status": "running",
+        "socketPath": str(socket_path),
+        "managedCodexPath": "/tmp/standalone/current/codex",
+        "managedCodexVersion": version,
+        "cliVersion": version,
+        "appServerVersion": version,
+    }
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "rt-doctor",
+            "--socket",
+            str(socket_path),
+            "--runtime-dir",
+            str(tmp_path / "runtime"),
+            "--registry",
+            str(tmp_path / "projects.yaml"),
+        ],
+    )
+    monkeypatch.setattr(doctor, "report_codex_setup", lambda *_a: None)
+    monkeypatch.setattr(
+        doctor,
+        "codex_version",
+        lambda: (parsed, f"codex-cli {version}"),
+    )
+    monkeypatch.setattr(doctor, "daemon_version", lambda *_a: (daemon, ""))
+    monkeypatch.setattr(
+        doctor,
+        "require_daemon_identity",
+        lambda *_args: SimpleNamespace(
+            distribution="standalone",
+            selected_codex=Path("/tmp/standalone/current/codex"),
+            launchd_pid=101,
+            peer_pid=102,
+        ),
+    )
+    monkeypatch.setattr(doctor, "socket_check", lambda *_a: (True, "safe"))
+    monkeypatch.setattr(doctor, "probe_handshake", lambda *_a: (True, "ready"))
+    monkeypatch.setattr(doctor, "launchd_loaded", lambda _label: True)
+    monkeypatch.setattr(doctor, "bridge_check", lambda *_a: (True, "healthy"))
+    monkeypatch.setattr(doctor, "report_bind_request_queue", lambda *_a, **_k: None)
+    monkeypatch.setattr(doctor, "project_health_checks", lambda *_a, **_k: None)
+    monkeypatch.setattr(doctor, "report_hook_trust", lambda *_a, **_k: None)
+    return socket_path
+
+
+def test_doctor_warns_on_probe_accepted_unvalidated_release(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    _stub_unvalidated_codex_services(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        doctor,
+        "codex_protocol_probe",
+        lambda _socket: (True, "read-only protocol probe passed"),
+    )
+    # A failing bridge must not misdirect a probe-accepted release toward
+    # installing 0.144.6; the launch fix applies instead.
+    monkeypatch.setattr(
+        doctor, "bridge_check", lambda *_a: (False, "heartbeat stale")
+    )
+
+    code = doctor.main()
+
+    output = capsys.readouterr().out
+    assert code == 1
+    assert "WARN version:" in output
+    assert "RT_CODEX_ALLOW_UNVALIDATED accepted it after a live protocol probe" in output
+    assert "install or validate one of" not in output
+    assert "run `roundtable codex` from a normal terminal" in output
+
+
+@pytest.mark.parametrize(
+    ("valve", "probe_ok", "expected"),
+    [
+        (None, None, "set RT_CODEX_ALLOW_UNVALIDATED=1 to accept it"),
+        ("1", False, "failed the app-server protocol probe"),
+    ],
+)
+def test_doctor_fails_unvalidated_release_without_valve_or_failed_probe(
+    tmp_path, monkeypatch, capsys, valve, probe_ok, expected
+):
+    if valve is None:
+        monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
+    else:
+        monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", valve)
+    _stub_unvalidated_codex_services(tmp_path, monkeypatch)
+    if probe_ok is None:
+        monkeypatch.setattr(
+            doctor,
+            "codex_protocol_probe",
+            lambda _socket: pytest.fail(
+                "the probe must not run without the explicit valve"
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            doctor,
+            "codex_protocol_probe",
+            lambda _socket: (False, "hooks/list probe failed: closed"),
+        )
+
+    code = doctor.main()
+
+    output = capsys.readouterr().out
+    assert code == 1
+    assert "FAIL version:" in output
+    assert expected in output

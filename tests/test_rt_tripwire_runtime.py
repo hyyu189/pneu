@@ -487,6 +487,56 @@ def test_fenced_inbox_archives_quiet_ack_without_a_shell_move(
     assert (inbox / "cur" / source.name).is_file()
 
 
+def test_fenced_drain_lists_malformed_mail_and_prints_break_loop_guidance(
+    tmp_path, monkeypatch
+):
+    # The exact hook-driven drain path from the 2026-07-21 field incident:
+    # a fenced --archive-quiet-acks listing must surface an unparseable mail
+    # file instead of hiding it while it keeps waking the seat.
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    inbox = project / ".roundtable" / "inbox" / "claude"
+    new_dir = inbox / "new"
+    new_dir.mkdir(parents=True)
+    msg_id = "20260721T220000Z-codex-to-claude-quiet"
+    ack = new_dir / f"ack-{msg_id}.md"
+    ack.write_text(
+        f"[CODEX→CLAUDE sync-ack id={msg_id}] refs=original-message\n"
+    )
+    malformed_stem = "20260721T222645Z-hermes-to-claude-29195"
+    malformed = new_dir / f"{malformed_stem}.md"
+    malformed.write_text(
+        f"[HERMES→CLAUDE CROSS HERMES OK acknowledged id={malformed_stem}] "
+        "--kind reply --refs 20260721T222617Z-claude-to-hermes-26393"
+    )
+
+    result = run_tool(
+        "rt-inbox",
+        "--fenced",
+        "--archive-quiet-acks",
+        "-f",
+        "json",
+        cwd=project,
+        env=environment,
+    )
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert [record["msg_id"] for record in payload] == [malformed_stem]
+    assert payload[0]["schema"] == "roundtable.maildir_malformed.v1"
+    assert payload[0]["kind"] == "malformed"
+    assert payload[0]["problem"] == "invalid mail header"
+    assert "archived 1 quiet acknowledgement" in result.stderr
+    assert "1 malformed mail file(s) remain in new/" in result.stderr
+    assert "rt-ack" in result.stderr
+    assert not ack.exists()
+    assert (inbox / "cur" / ack.name).is_file()
+    # The malformed file is never a quiet ack: --archive-quiet-acks leaves it
+    # in new/ until it is acknowledged or moved deliberately.
+    assert malformed.is_file()
+
+
 def test_fenced_ack_rejects_an_unanchored_session_before_foreign_archive(
     tmp_path,
 ):

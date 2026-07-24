@@ -1326,10 +1326,23 @@ def _codex_payloads(
         raise SetupError(f"cannot build Codex LaunchAgent configuration: {error}") from error
 
 
-def _require_validated_codex_release(home: Path, prefix: Path) -> None:
+def _require_validated_codex_release(home: Path, prefix: Path) -> str:
+    """Gate on the layered release policy and return the accepted tier.
+
+    Setup never probes the daemon and never starts one; the live protocol
+    probe for an explicitly allowed unvalidated release runs in the launch
+    preflight and the wake bridge.
+    """
     try:
         with _codex_context(home, prefix) as module:
-            module.require_validated_version()
+            checker = getattr(module, "require_supported_version", None)
+            if checker is None:
+                # Older supported artifacts expose only the strict exact-set
+                # gate; their released acceptance policy stays unchanged.
+                module.require_validated_version()
+                return "validated"
+            _version, tier = checker()
+            return str(tier)
     except SetupError:
         raise
     except Exception as error:

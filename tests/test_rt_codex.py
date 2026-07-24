@@ -1279,10 +1279,12 @@ def test_wake_heartbeat_reports_loaded_bridge_build(tmp_path):
 def test_wake_run_backs_off_without_repairing_daemon(tmp_path, monkeypatch):
     project = write_project(tmp_path / "project")
     repair_calls = []
-    monkeypatch.setattr(wake, "require_validated_version", lambda: None)
+    monkeypatch.setattr(
+        wake, "require_supported_version", lambda: ((0, 144, 6), "validated")
+    )
     monkeypatch.setattr(
         wake,
-        "require_validated_daemon",
+        "require_supported_daemon",
         lambda _socket: (_ for _ in ()).throw(
             _rtcodex.CodexRuntimeError("daemon unavailable")
         ),
@@ -1577,7 +1579,7 @@ def test_daemon_install_rejects_unsupported_cli_before_plist_or_launchctl(
     calls = []
     monkeypatch.setattr(
         daemon,
-        "require_validated_version",
+        "require_supported_version",
         lambda: (_ for _ in ()).throw(
             _rtcodex.UnsupportedVersion("unsupported test CLI")
         ),
@@ -1605,7 +1607,7 @@ def test_wake_install_rejects_unsupported_cli_before_plist_or_launchctl(
     calls = []
     monkeypatch.setattr(
         wake,
-        "require_validated_version",
+        "require_supported_version",
         lambda: (_ for _ in ()).throw(
             _rtcodex.UnsupportedVersion("unsupported test CLI")
         ),
@@ -1836,6 +1838,217 @@ def test_version_allowlist_is_exact():
     assert _rtcodex.version_is_validated((0, 144, 6))
     assert not _rtcodex.version_is_validated((0, 144, 5))
     assert not _rtcodex.version_is_validated((0, 144, 7))
+    assert not _rtcodex.version_is_validated((0, 145, 0))
+
+
+def test_release_tier_classification():
+    assert _rtcodex.codex_release_tier((0, 144, 6)) == _rtcodex.RELEASE_TIER_VALIDATED
+    assert (
+        _rtcodex.codex_release_tier((0, 144, 5)) == _rtcodex.RELEASE_TIER_BELOW_FLOOR
+    )
+    assert (
+        _rtcodex.codex_release_tier((0, 144, 7)) == _rtcodex.RELEASE_TIER_UNVALIDATED
+    )
+    assert (
+        _rtcodex.codex_release_tier((0, 145, 0)) == _rtcodex.RELEASE_TIER_UNVALIDATED
+    )
+    assert _rtcodex.codex_release_tier((1, 0, 0)) == _rtcodex.RELEASE_TIER_UNVALIDATED
+
+
+def test_unvalidated_release_requires_explicit_valve(monkeypatch):
+    monkeypatch.setattr(
+        _rtcodex, "codex_version", lambda: ((0, 145, 0), "codex-cli 0.145.0")
+    )
+    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
+    with pytest.raises(
+        _rtcodex.UnsupportedVersion, match="RT_CODEX_ALLOW_UNVALIDATED"
+    ):
+        _rtcodex.require_supported_version()
+
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    assert _rtcodex.require_supported_version() == (
+        (0, 145, 0),
+        _rtcodex.RELEASE_TIER_UNVALIDATED,
+    )
+
+    for value in ("true", "yes"):
+        monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", value)
+        with pytest.raises(
+            _rtcodex.CodexRuntimeError,
+            match="invalid RT_CODEX_ALLOW_UNVALIDATED value",
+        ):
+            _rtcodex.require_supported_version()
+
+
+def test_below_floor_and_parse_failure_rejected_even_with_valve(monkeypatch):
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    monkeypatch.setattr(
+        _rtcodex, "codex_version", lambda: ((0, 143, 0), "codex-cli 0.143.0")
+    )
+    with pytest.raises(_rtcodex.UnsupportedVersion, match="below the minimum"):
+        _rtcodex.require_supported_version()
+
+    monkeypatch.setattr(_rtcodex, "codex_version", lambda: (None, "garbage"))
+    with pytest.raises(_rtcodex.CodexRuntimeError, match="could not parse"):
+        _rtcodex.require_supported_version()
+
+
+def test_require_validated_version_shim_stays_strict(monkeypatch):
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    monkeypatch.setattr(
+        _rtcodex, "codex_version", lambda: ((0, 145, 0), "codex-cli 0.145.0")
+    )
+    with pytest.raises(_rtcodex.UnsupportedVersion, match="not a validated"):
+        _rtcodex.require_validated_version()
+
+
+def _standalone_daemon(selected_codex, version="0.145.0"):
+    return {
+        "status": "running",
+        "socketPath": str(_rtcodex.DEFAULT_SOCKET),
+        "managedCodexPath": str(selected_codex),
+        "managedCodexVersion": version,
+        "cliVersion": version,
+        "appServerVersion": version,
+    }
+
+
+def test_supported_daemon_probes_unvalidated_standalone_release(monkeypatch):
+    selected_codex = Path("/tmp/standalone/current/codex")
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    monkeypatch.setattr(
+        _rtcodex, "codex_version", lambda: ((0, 145, 0), "codex-cli 0.145.0")
+    )
+    monkeypatch.setattr(_rtcodex, "codex_bin", lambda: selected_codex)
+    monkeypatch.setattr(
+        _rtcodex,
+        "require_roundtable_daemon_owner",
+        lambda _path: (101, 102),
+    )
+    monkeypatch.setattr(
+        _rtcodex,
+        "daemon_version",
+        lambda _path: (_standalone_daemon(selected_codex), ""),
+    )
+    probes = []
+    monkeypatch.setattr(
+        _rtcodex,
+        "codex_protocol_probe",
+        lambda _path: probes.append("probe") or (True, "probe passed"),
+    )
+
+    daemon = _rtcodex.require_supported_daemon()
+
+    assert daemon["cliVersion"] == "0.145.0"
+    assert probes == ["probe"]
+
+    monkeypatch.setattr(
+        _rtcodex,
+        "codex_protocol_probe",
+        lambda _path: (False, "thread/loaded/list probe failed: closed"),
+    )
+    with pytest.raises(_rtcodex.UnsupportedVersion, match="protocol probe"):
+        _rtcodex.require_supported_daemon()
+
+
+def test_validated_release_skips_probe(monkeypatch):
+    selected_codex = Path("/tmp/standalone/current/codex")
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    monkeypatch.setattr(
+        _rtcodex, "codex_version", lambda: ((0, 144, 6), "codex-cli 0.144.6")
+    )
+    monkeypatch.setattr(_rtcodex, "codex_bin", lambda: selected_codex)
+    monkeypatch.setattr(
+        _rtcodex,
+        "require_roundtable_daemon_owner",
+        lambda _path: (101, 102),
+    )
+    monkeypatch.setattr(
+        _rtcodex,
+        "daemon_version",
+        lambda _path: (_standalone_daemon(selected_codex, "0.144.6"), ""),
+    )
+    monkeypatch.setattr(
+        _rtcodex,
+        "codex_protocol_probe",
+        lambda _path: pytest.fail("validated releases must not be probed"),
+    )
+
+    daemon = _rtcodex.require_supported_daemon()
+
+    assert daemon["cliVersion"] == "0.144.6"
+
+
+class ProbeClient:
+    responses = {}
+    calls = []
+    closed = False
+
+    def __init__(self, _socket, timeout=3.0):
+        type(self).calls = []
+        type(self).closed = False
+
+    def request(self, method, params):
+        type(self).calls.append((method, params))
+        value = type(self).responses[method]
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    def close(self):
+        type(self).closed = True
+
+
+def test_protocol_probe_validates_rpc_surface(monkeypatch):
+    monkeypatch.setattr(_rtcodex, "AppServerClient", ProbeClient)
+
+    ProbeClient.responses = {
+        "thread/loaded/list": {"data": ["thread-1"], "nextCursor": None},
+        "hooks/list": {"data": []},
+    }
+    ok, detail = _rtcodex.codex_protocol_probe(Path("/tmp/probe.sock"))
+    assert ok
+    assert "probe passed" in detail
+    assert [method for method, _params in ProbeClient.calls] == [
+        "thread/loaded/list",
+        "hooks/list",
+    ]
+    assert ProbeClient.closed
+
+    ProbeClient.responses = {
+        "thread/loaded/list": {"data": "not-a-list", "nextCursor": None},
+        "hooks/list": {"data": []},
+    }
+    ok, detail = _rtcodex.codex_protocol_probe(Path("/tmp/probe.sock"))
+    assert not ok
+    assert "thread/loaded/list probe failed" in detail
+    assert ProbeClient.closed
+
+    ProbeClient.responses = {
+        "thread/loaded/list": {"data": [], "nextCursor": None},
+        "hooks/list": _rtcodex.RpcError("hooks/list failed (400): nope"),
+    }
+    ok, detail = _rtcodex.codex_protocol_probe(Path("/tmp/probe.sock"))
+    assert not ok
+    assert "hooks/list probe failed" in detail
+    assert ProbeClient.closed
+
+
+def test_wake_plist_forwards_unvalidated_valve(tmp_path, monkeypatch):
+    fake_codex = tmp_path / "codex"
+    fake_codex.write_text("#!/bin/sh\n")
+    fake_codex.chmod(0o755)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_CODEX_BIN", str(fake_codex))
+    monkeypatch.setattr(_rtcodex, "RUNTIME_DIR", runtime)
+
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    bridge = _rtcodex.wake_plist(tmp_path / "app.sock")
+    assert bridge["EnvironmentVariables"]["RT_CODEX_ALLOW_UNVALIDATED"] == "1"
+
+    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED")
+    bridge = _rtcodex.wake_plist(tmp_path / "app.sock")
+    assert "RT_CODEX_ALLOW_UNVALIDATED" not in bridge["EnvironmentVariables"]
 
 
 def test_codex_bin_preserves_explicit_symlink_path(tmp_path, monkeypatch):
@@ -1951,7 +2164,7 @@ def test_daemon_version_mismatch_fails_closed(monkeypatch):
     )
 
     with pytest.raises(_rtcodex.CodexRuntimeError, match="version mismatch"):
-        _rtcodex.require_validated_daemon()
+        _rtcodex.require_supported_daemon()
 
 
 @pytest.mark.parametrize("payload", ["[]", '"running"', "7"])
@@ -1997,7 +2210,7 @@ def test_daemon_cli_version_mismatch_fails_closed(monkeypatch):
     )
 
     with pytest.raises(_rtcodex.CodexRuntimeError, match="daemon CLI"):
-        _rtcodex.require_validated_daemon()
+        _rtcodex.require_supported_daemon()
 
 
 def test_external_daemon_ignores_standalone_management_slot(monkeypatch):
@@ -2030,7 +2243,7 @@ def test_external_daemon_ignores_standalone_management_slot(monkeypatch):
         ),
     )
 
-    daemon = _rtcodex.require_validated_daemon()
+    daemon = _rtcodex.require_supported_daemon()
 
     assert daemon["managedCodexPath"] == str(managed_codex)
 
@@ -2685,7 +2898,7 @@ def test_daemon_status_rejects_handshake_only_readiness(monkeypatch, capsys):
     monkeypatch.setattr(daemon, "launchd_running", lambda _label: True)
     monkeypatch.setattr(
         daemon,
-        "require_validated_daemon",
+        "require_supported_daemon",
         lambda _path: (_ for _ in ()).throw(
             _rtcodex.CodexRuntimeError("CLI/app-server version mismatch")
         ),

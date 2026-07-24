@@ -1235,9 +1235,11 @@ def test_partial_codex_unload_never_claims_a_full_rollback(
 def test_unsupported_codex_release_is_rejected_without_writes(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
     home, prefix = installation
+    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
     _write_executable(
         home / ".npm-global" / "bin" / "codex",
         "#!/bin/sh\n"
@@ -1259,6 +1261,7 @@ def test_unsupported_codex_release_is_rejected_without_writes(
 
     assert code == 2
     assert "not a validated app-server wake release" in result["error"]
+    assert "RT_CODEX_ALLOW_UNVALIDATED=1" in result["error"]
     assert result["writes"] is False
     assert result["rolled_back"] is False
     assert result["launchctl_invoked"] is False
@@ -1271,9 +1274,11 @@ def test_unsupported_codex_release_is_rejected_without_writes(
 def test_existing_codex_setup_revalidates_cli_before_plan_or_apply(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
     command: str,
 ) -> None:
     home, prefix = installation
+    monkeypatch.delenv("RT_CODEX_ALLOW_UNVALIDATED", raising=False)
     code, configured = _run(
         capsys,
         home,
@@ -1306,9 +1311,86 @@ def test_existing_codex_setup_revalidates_cli_before_plan_or_apply(
 
     assert code == 2
     assert "not a validated app-server wake release" in result["error"]
+    assert "RT_CODEX_ALLOW_UNVALIDATED=1" in result["error"]
     assert result["writes"] is False
     assert result["rolled_back"] is False
     assert result["launchctl_invoked"] is False
+    assert _tree_snapshot(home) == before
+
+
+def test_unvalidated_codex_release_with_valve_plans_and_applies(
+    installation: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, prefix = installation
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    _write_executable(
+        home / ".npm-global" / "bin" / "codex",
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = \"--version\" ]; then\n"
+        "  printf '%s\\n' 'codex-cli 0.145.0'\n"
+        "fi\n"
+        "exit 0\n",
+    )
+
+    code, planned = _run(
+        capsys,
+        home,
+        prefix,
+        "plan",
+        "--harness",
+        "codex",
+    )
+    assert code == 0
+    assert planned["harnesses"]["codex"]["state"] == "planned"
+
+    code, applied = _run(
+        capsys,
+        home,
+        prefix,
+        "apply",
+        "--harness",
+        "codex",
+    )
+    assert code == 0
+    assert applied["harnesses"]["codex"]["state"] == "configured"
+    wake_plist_path = (
+        home / "Library" / "LaunchAgents" / "com.roundtable.codex-wake.plist"
+    )
+    payload = plistlib.loads(wake_plist_path.read_bytes())
+    assert payload["EnvironmentVariables"]["RT_CODEX_ALLOW_UNVALIDATED"] == "1"
+
+
+def test_below_floor_codex_release_rejected_despite_valve(
+    installation: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, prefix = installation
+    monkeypatch.setenv("RT_CODEX_ALLOW_UNVALIDATED", "1")
+    _write_executable(
+        home / ".npm-global" / "bin" / "codex",
+        "#!/bin/sh\n"
+        "if [ \"${1:-}\" = \"--version\" ]; then\n"
+        "  printf '%s\\n' 'codex-cli 0.143.0'\n"
+        "fi\n"
+        "exit 0\n",
+    )
+    before = _tree_snapshot(home)
+
+    code, result = _run(
+        capsys,
+        home,
+        prefix,
+        "plan",
+        "--harness",
+        "codex",
+    )
+
+    assert code == 2
+    assert "below the minimum" in result["error"]
+    assert result["writes"] is False
     assert _tree_snapshot(home) == before
 
 

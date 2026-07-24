@@ -315,6 +315,26 @@ def clear_unanchored_lease_context() -> None:
         os.environ.pop(name, None)
 
 
+def scrub_inherited_seat_environment(harness: str) -> None:
+    """Discard a seat environment inherited from another Roundtable session.
+
+    Any lease-context variable proves this shell already sits inside a
+    Roundtable-launched seat, so every inherited seat value is that caller's
+    identity rather than launch intent — including ``RT_FROM``, which must not
+    leak into the new seat's identity selection or claim. ``RT_FROM`` set on
+    its own remains the documented explicit multi-instance selection.
+    """
+    if not any(os.environ.get(name) for name in LEASE_CONTEXT_ENV_NAMES):
+        return
+    for name in LEASE_ENV_NAMES:
+        os.environ.pop(name, None)
+    print(
+        f"rt-{harness}: advisory: ignoring Roundtable seat environment "
+        "inherited from the launching session",
+        file=sys.stderr,
+    )
+
+
 def _confirm_codex_reload(status, *, stdin=None, stderr=None) -> bool:
     stdin = stdin or sys.stdin
     stderr = stderr or sys.stderr
@@ -341,14 +361,25 @@ def preflight_codex_services(*, ready_action=None) -> None:
     """Prepare services and publish the Codex seat under the host repair lock."""
 
     try:
-        from _rtcodex import CodexRuntimeError, codex_launch_preflight
+        from _rtcodex import (
+            RELEASE_TIER_UNVALIDATED,
+            CodexRuntimeError,
+            codex_launch_preflight,
+        )
 
-        codex_launch_preflight(
+        status = codex_launch_preflight(
             confirm_reload=_confirm_codex_reload,
             ready_action=ready_action,
         )
     except CodexRuntimeError as error:
         raise SelectionError(f"rt-codex: {error}") from error
+    if getattr(status, "version_tier", "") == RELEASE_TIER_UNVALIDATED:
+        print(
+            "rt-codex: warning: RT_CODEX_ALLOW_UNVALIDATED accepted an "
+            "unvalidated Codex release after a live protocol probe; wake E2E "
+            f"on this release is not a support claim ({status.detail})",
+            file=sys.stderr,
+        )
 
 
 def project_at_or_above(start: Path) -> Path | None:
@@ -476,6 +507,7 @@ def choose_launch_cwd(
 def launch(harness: str, argv: list[str]) -> int:
     if harness not in COMMANDS:
         raise SelectionError(f"unknown Roundtable harness: {harness}")
+    scrub_inherited_seat_environment(harness)
     selected = choose_launch_cwd(harness)
     if selected is not None:
         os.chdir(selected)

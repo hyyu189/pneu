@@ -20,16 +20,21 @@ from pathlib import Path
 from _rtcodex import (
     AppServerClient,
     DEFAULT_SOCKET,
+    RELEASE_TIER_BELOW_FLOOR,
+    RELEASE_TIER_VALIDATED,
     RUNTIME_DIR,
     WAKE_LABEL,
+    codex_protocol_probe,
+    codex_release_tier,
     codex_version,
     daemon_version,
     launchd_loaded,
+    minimum_release_text,
     pid_is_running,
     probe_handshake,
     require_daemon_identity,
+    unvalidated_codex_allowed,
     validated_releases_text,
-    version_is_validated,
     wake_bridge_build_fingerprint,
 )
 from _rtlib import load_agents_doc, load_project_registry, projects_registry_path
@@ -1463,7 +1468,7 @@ def main() -> int:
                     f"CLI {rendered_cli} != app-server {app_server_version}",
                     SAFE_CODEX_LAUNCH_FIX,
                 )
-            elif version_is_validated(cli_version):
+            elif codex_release_tier(cli_version) == RELEASE_TIER_VALIDATED:
                 version_supported = True
                 report.item(
                     "OK",
@@ -1471,14 +1476,77 @@ def main() -> int:
                     f"{rendered_cli} is an explicitly validated release "
                     f"({validated_releases_text()})",
                 )
-            else:
+            elif codex_release_tier(cli_version) == RELEASE_TIER_BELOW_FLOOR:
                 report.item(
                     "FAIL",
                     "version",
-                    f"{rendered_cli} is not an explicitly validated release; "
-                    "bridge wake disabled",
+                    f"{rendered_cli} is below the minimum supported "
+                    f"app-server release {minimum_release_text()}; bridge "
+                    "wake disabled",
                     f"install or validate one of: {validated_releases_text()}",
                 )
+            else:
+                try:
+                    valve_open = unvalidated_codex_allowed()
+                    valve_detail = None
+                except (OSError, RuntimeError) as error:
+                    valve_open, valve_detail = False, str(error)
+                if valve_detail is not None:
+                    report.item(
+                        "FAIL",
+                        "version",
+                        f"{rendered_cli} is not an explicitly validated "
+                        f"release and {valve_detail}",
+                        "set RT_CODEX_ALLOW_UNVALIDATED=1 to accept it after "
+                        "a live protocol probe",
+                    )
+                elif not valve_open:
+                    report.item(
+                        "FAIL",
+                        "version",
+                        f"{rendered_cli} is not an explicitly validated "
+                        "release; bridge wake disabled",
+                        "set RT_CODEX_ALLOW_UNVALIDATED=1 to accept it after "
+                        "a live protocol probe, or install one of: "
+                        f"{validated_releases_text()}",
+                    )
+                elif not rpc_ok:
+                    report.item(
+                        "FAIL",
+                        "version",
+                        f"unvalidated Codex {rendered_cli} cannot run the "
+                        "app-server protocol probe while the app-server is "
+                        "unreachable",
+                        daemon_fix(args.socket),
+                    )
+                else:
+                    try:
+                        probe_ok, probe_detail = codex_protocol_probe(
+                            args.socket
+                        )
+                    except (OSError, RuntimeError) as error:
+                        probe_ok, probe_detail = False, str(error)
+                    if probe_ok:
+                        # Probe-accepted launches stay supported for the
+                        # bridge-fix text below; the WARN keeps the missing
+                        # release gate loud.
+                        version_supported = True
+                        report.item(
+                            "WARN",
+                            "version",
+                            f"{rendered_cli} is not a validated release; "
+                            "RT_CODEX_ALLOW_UNVALIDATED accepted it after a "
+                            "live protocol probe (validated: "
+                            f"{validated_releases_text()})",
+                        )
+                    else:
+                        report.item(
+                            "FAIL",
+                            "version",
+                            f"unvalidated Codex {rendered_cli} failed the "
+                            f"app-server protocol probe: {probe_detail}",
+                            SAFE_CODEX_LAUNCH_FIX,
+                        )
 
         bridge_ok, bridge_detail = bridge_check(
             args.runtime_dir,

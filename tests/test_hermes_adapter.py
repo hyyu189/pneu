@@ -363,11 +363,18 @@ def test_tui_release_failure_kills_spawned_notification_process(
     }
     assert "invalid" in context.injected[-1][0]
 
+    # A failed delivery is session-scoped, not process-permanent: a later
+    # reset re-arms exactly one fresh watcher for the replacement session.
+    blocking = FakeProcess()
+    popen.plans.append(blocking)
     context.hooks["on_session_reset"](
         session_id="tui-session-key-2", platform="tui"
     )
-    time.sleep(0.05)
-    assert len(popen.calls) == 1
+    _wait_until(lambda: len(popen.calls) == 2)
+    assert blocking.communicating.wait(1)
+
+    context.hooks["on_session_finalize"]()
+    assert blocking.terminated
 
 
 def test_tui_unsupported_background_dispatch_is_killed_before_release(
@@ -661,3 +668,148 @@ def test_finalize_allows_a_new_native_session_in_the_same_cli(
     assert second.communicating.wait(1)
     context.hooks["on_session_finalize"]()
     assert second.terminated
+
+
+def test_pending_generation_renotifies_once_then_pauses_and_rearms_after_ack(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin()
+    monkeypatch.setattr(plugin, "_MAIL_DRAIN_POLL_SECONDS", 0.01)
+    monkeypatch.setattr(plugin, "_PENDING_RENOTIFY_SECONDS", 0.05)
+    monkeypatch.setattr(plugin, "_PENDING_PAUSE_SECONDS", 0.15)
+    project, _waiter = _set_activation(monkeypatch, tmp_path)
+    new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
+    new_dir.mkdir(parents=True)
+    mail = new_dir / "message-1"
+    mail.write_text("body is never read by the adapter", encoding="utf-8")
+    blocking = FakeProcess()
+    popen = FakePopen(
+        [
+            ("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0),
+            blocking,
+        ]
+    )
+    monkeypatch.setattr(plugin.subprocess, "Popen", popen)
+    context = FakeContext()
+
+    plugin.register(context)
+    context.hooks["on_session_start"]()
+    _wait_until(lambda: len(context.injected) == 3, timeout=5.0)
+    time.sleep(0.05)
+
+    # One re-notice, then one pause diagnostic, then silence; still only the
+    # original waiter because the generation never left new/.
+    assert [content for content, _role in context.injected] == [
+        plugin._MAIL_MESSAGE,
+        plugin._MAIL_MESSAGE,
+        plugin._PENDING_MESSAGE,
+    ]
+    assert len(popen.calls) == 1
+
+    # A late rt-ack (modeled by the archival leaving new/) must still re-arm
+    # a fresh waiter automatically after the pause notice.
+    mail.unlink()
+    _wait_until(lambda: len(popen.calls) == 2, timeout=5.0)
+    assert len(context.injected) == 3
+
+    context.hooks["on_session_finalize"]()
+    assert blocking.terminated
+
+
+def test_session_reset_after_transient_failure_rearms_fresh_watcher(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin()
+    project, _waiter = _set_activation(monkeypatch, tmp_path)
+    new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
+    new_dir.mkdir(parents=True)
+    (new_dir / "message-1").write_text("pending", encoding="utf-8")
+    blocking = FakeProcess()
+    popen = FakePopen(
+        [
+            ("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0),
+            blocking,
+        ]
+    )
+    monkeypatch.setattr(plugin.subprocess, "Popen", popen)
+    context = FakeContext(inject_result=False)
+
+    plugin.register(context)
+    context.hooks["on_session_start"]()
+    _wait_until(lambda: len(context.injected) == 2)
+    assert "invalid" in context.injected[-1][0]
+    assert len(popen.calls) == 1
+
+    # A failed delivery is session-scoped: replacing the session through the
+    # TUI reset boundary must arm one fresh watcher.
+    context.hooks["on_session_reset"](session_id="tui-2", platform="tui")
+    _wait_until(lambda: len(popen.calls) == 2)
+    assert blocking.communicating.wait(1)
+
+    context.hooks["on_session_finalize"]()
+    assert blocking.terminated
+
+
+def test_session_reset_after_supersession_stays_closed(tmp_path, monkeypatch):
+    plugin = _load_plugin()
+    _set_activation(monkeypatch, tmp_path)
+    popen = FakePopen(
+        [("rt-wait-inbox: seat lease or watcher was superseded\n", 0)]
+    )
+    monkeypatch.setattr(plugin.subprocess, "Popen", popen)
+    context = FakeContext()
+
+    plugin.register(context)
+    context.hooks["on_session_start"]()
+    _wait_until(
+        lambda: context.injected == [(plugin._FENCE_MESSAGE, "user")]
+    )
+
+    # Supersession is permanent for this process: the RT_* session env can
+    # never match the newer lease, so a reset must not re-arm or re-diagnose.
+    context.hooks["on_session_reset"](session_id="tui-2", platform="tui")
+    time.sleep(0.05)
+    assert len(popen.calls) == 1
+    assert context.injected == [(plugin._FENCE_MESSAGE, "user")]
+
+
+def test_wake_message_teaches_reply_syntax_and_quiet_ack_drain():
+    plugin = _load_plugin()
+
+    assert "rt-inbox --fenced --archive-quiet-acks -f json" in (
+        plugin._MAIL_MESSAGE
+    )
+    assert "rt-ack <id>[,<id>...]" in plugin._MAIL_MESSAGE
+    assert 'rt-say <agent> <kind> "body"' in plugin._MAIL_MESSAGE
+    assert "`--kind`/`--refs` options do not exist" in plugin._MAIL_MESSAGE
+    assert "referenced message id belongs in the body" in plugin._MAIL_MESSAGE
+    assert "rt-ack" in plugin._PENDING_MESSAGE
+    assert "durable" in plugin._PENDING_MESSAGE
+
+
+def test_desktop_platform_fails_closed_without_cli_injection(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin()
+    project, _waiter = _set_activation(monkeypatch, tmp_path)
+    new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
+    new_dir.mkdir(parents=True)
+    (new_dir / "message-1").write_text("pending", encoding="utf-8")
+    popen = FakePopen(
+        [("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0)]
+    )
+    monkeypatch.setattr(plugin.subprocess, "Popen", popen)
+    context = FakeContext(inject_result=False)
+
+    plugin.register(context)
+    context.hooks["on_session_reset"](
+        session_id="desktop-session", platform="desktop"
+    )
+    _wait_until(lambda: len(context.injected) == 2)
+
+    # The dispatch_tool handshake is validated for the TUI only. A "desktop"
+    # session without working CLI injection must fail closed instead of
+    # claiming an unproven delivery surface.
+    assert context.dispatch_calls == []
+    assert len(popen.calls) == 1
+    assert context.injected[-1][0] == plugin._CONFIG_MESSAGE

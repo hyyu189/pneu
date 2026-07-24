@@ -6,7 +6,7 @@ description: >-
   rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
   routing, or cmux surface-routing bugs. Do not use merely because a repo
   contains .roundtable/agents.yaml.
-version: 7.2.0
+version: 7.3.0
 author: Roundtable contributors
 license: MIT
 platforms: [macos]
@@ -97,7 +97,10 @@ Codex requires a project anchor; native `codex` remains available for sessions
 that do not need Roundtable messaging. Non-TTY unanchored calls exit 2. All
 three launchers select a real harness executable instead of a generated cmux
 PATH shim and export the unique configured `RT_FROM` identity. A
-multi-instance project must set `RT_FROM` explicitly. `rt-codex` additionally
+multi-instance project must set `RT_FROM` explicitly. Launching one seat from
+inside another seat's shell is safe: the launcher discards the inherited seat
+environment (including the caller's `RT_FROM`) and claims a fresh identity of
+its own. `rt-codex` additionally
 injects the `--remote` flag and fenced session environment that its native wake
 bridge requires. Direct vendor launch commands do not establish the complete
 lease context required for automatic wake; use the `rt-*` launchers for the
@@ -126,6 +129,15 @@ User interruption and API/authentication failure do not run a usable Stop hook;
 mail remains durable, but that Claude session may need a later normal
 interaction or resume before it is armed again.
 
+A listing entry with kind `malformed` is a raw file that cannot be delivered
+as Roundtable mail; while it sits in `new/` it keeps waking this seat even
+though it carries no readable message. Its `remedy` field names the cleanup
+that actually breaks the wake loop: `rt-ack` means acknowledge the listed
+raw id with `rt-ack` to archive it; `manual-move` means `rt-ack` cannot
+archive that file from this seat (wrong-mailbox recipient, unregistered or
+self sender, or not an ackable regular `.md` file), so have the human move
+the file out of `new/` — for example into `cur/` — instead.
+
 **Arming (Claude)** — the setup-owned SessionStart hook launches the first
 fenced inbox watcher for a Roundtable-launched session, and its Stop hook
 normally launches the successor after a completed turn. When mail wakes
@@ -149,7 +161,13 @@ with `/hooks`; never bypass that trust decision. Manual
 `rt-codex-wake bind <project-root>` is a diagnostic fallback only. An unbound
 session has no waker, but its mail still waits durably like any offline agent's.
 
-`rt-wait-inbox` remains an implementation and diagnostic tool. Never kill it
+`rt-wait-inbox` remains an implementation and diagnostic tool. Arming is
+owned by the harness-native lifecycle hooks above (Claude SessionStart/Stop
+async hooks, the Hermes plugin, the Codex bridge); never arm a watcher from a
+model turn, and specifically never run `rt-wait-inbox ... &` — shell
+backgrounding trips the harness's background-operation approval prompt and
+freezes an unattended seat. If a seat is unarmed, recover through a normal
+interaction or a relaunch, not a hand-started watcher. Never kill the watcher
 by process name: another project can have the same executable name. P0 watcher
 ownership is fenced by the host-local session lease; old project-local
 `.armed-*`, `.last-active`, and `.empty-beats` files are diagnostic-only legacy
@@ -166,7 +184,9 @@ permission matches, the current launcher lease is validated, and the archived
 keyboard path cannot be selected.
 
 `kind` is a free triage label (fyi, question, answer, proposal, review,
-correction, directive, urgent) with no effect on delivery. For anything long,
+correction, directive, urgent) with no effect on delivery — always one
+flag-free token. `rt-say` has no `--kind` or `--refs` options and rejects
+them; put any referenced message id in the body. For anything long,
 write `handoff/<topic>.md`, commit, and rt-say a one-line pointer.
 
 Emergency keyboard path (`--legacy-nudge-only` + submit-key lore) is archived
@@ -181,12 +201,16 @@ in `~/.roundtable/docs/legacy-v1-keyboard.md`; human-coordinated use only.
 
 ## When mail sits unanswered
 
-Mail waiting in `new/` means the receiver is offline or unarmed — not lost.
-Diagnose in order: ① is a Roundtable-launched session open in that project
-(Rule #0)? ② does `roundtable-setup status` report the harness configured?
-③ does `rt-doctor` report a current fenced lease and healthy adapter?
-④ for Codex, is the thread bound and are both services healthy? Fix the native
-waker; never re-send by keyboard reflex.
+Mail waiting in `new/` means the receiver is offline, unarmed, or busy — not
+lost. Diagnose in order: ① is a Roundtable-launched session open in that
+project (Rule #0)? ② does `roundtable-setup status` report the harness
+configured? ③ does `rt-doctor` report a current fenced lease and healthy
+adapter? ④ for Codex, is the thread bound and are both services healthy?
+⑤ has that session ever had a turn? A freshly launched seat with zero
+interactions is effectively unarmed until its first turn — interact with it
+once. A busy seat is not a lost seat either: wake latency on long turns is
+minutes-level because the current turn finishes before the drain. Fix the
+native waker; never re-send by keyboard reflex or on latency alone.
 
 ## Multi-instance
 

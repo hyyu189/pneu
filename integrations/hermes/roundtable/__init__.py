@@ -18,6 +18,7 @@ import shlex
 import shutil
 import subprocess
 import threading
+import time
 from typing import Any
 
 
@@ -35,12 +36,27 @@ _STOP_JOIN_SECONDS = 2.0
 _TUI_SENTINEL_POLLS = 150
 _TUI_SENTINEL_POLL_SECONDS = 0.1
 _TUI_RELEASE_TIMEOUT_SECONDS = 5
+# 2026-07-21 finding #7: a busy seat can take ~5 minutes to drain one
+# generation. Both bounds must exceed that so a slow-but-healthy drain never
+# receives a spurious re-notice.
+_PENDING_RENOTIFY_SECONDS = 600
+_PENDING_PAUSE_SECONDS = 1200
 
 _MAIL_MESSAGE = (
-    "[Roundtable] New durable mail is waiting. Run `rt-inbox -f json`, "
-    "process each non-ack message, and acknowledge it with `rt-ack <id>`; "
-    "successful acknowledgement also archives that message to `cur/`. The "
-    "watcher re-arms automatically after the triggered messages are archived."
+    "[Roundtable] New durable mail is waiting. Run "
+    "`rt-inbox --fenced --archive-quiet-acks -f json`, act on each non-ack "
+    "message, and acknowledge it with `rt-ack <id>[,<id>...]`; successful "
+    "acknowledgement also archives that message to `cur/`. Reply with "
+    "`rt-say <agent> <kind> \"body\"` where `kind` is one flag-free token "
+    "such as `reply` and any referenced message id belongs in the body — "
+    "`--kind`/`--refs` options do not exist. The watcher re-arms "
+    "automatically after the triggered messages are archived."
+)
+_PENDING_MESSAGE = (
+    "[Roundtable] The triggered mail generation is still pending in `new/` "
+    "after repeated notices. Automatic notices are paused for this "
+    "generation to prevent a loop; the mail remains durable and the watcher "
+    "re-arms automatically once `rt-ack` archives it."
 )
 _FENCE_MESSAGE = (
     "[Roundtable] This Hermes watcher stopped because its session lease was "
@@ -139,7 +155,12 @@ class _RoundtableBridge:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._process: subprocess.Popen[str] | None = None
+        # _closed is session-scoped: a later on_session_reset may re-arm after
+        # the failed watcher is proven dead. _terminal is process-permanent:
+        # a broken installation or a superseded lease cannot heal inside this
+        # Hermes process, so no reset may re-arm past it.
         self._closed = False
+        self._terminal = False
         self._diagnostic_sent = False
 
     def on_session_start(self, **kwargs: Any) -> None:
@@ -150,14 +171,17 @@ class _RoundtableBridge:
         platform = str(kwargs.get("platform") or "").strip().lower()
 
         with self._lock:
-            if self._closed or (
+            if self._closed or self._terminal or (
                 self._thread is not None and self._thread.is_alive()
             ):
                 return
             waiter = _resolve_waiter(environment)
             if waiter is None:
                 self._inject_diagnostic(_CONFIG_MESSAGE)
+                # PATH cannot heal mid-process; the diagnostic already says
+                # to restart Hermes, so stay down across session resets.
                 self._closed = True
+                self._terminal = True
                 return
             self._stop.clear()
             self._thread = threading.Thread(
@@ -190,6 +214,7 @@ class _RoundtableBridge:
         with self._lock:
             if permanent:
                 self._closed = True
+                self._terminal = True
             self._stop.set()
             process = self._process
             thread = self._thread
@@ -216,6 +241,10 @@ class _RoundtableBridge:
                     self._thread = None
                     self._process = None
                     self._diagnostic_sent = False
+                    # The old watcher is proven dead, so a session-scoped
+                    # failure may re-arm on this reset; a terminal one stays
+                    # closed for the life of the process.
+                    self._closed = self._terminal
                     self._stop.clear()
 
     def _watch(
@@ -277,6 +306,13 @@ class _RoundtableBridge:
                 ):
                     self._fail(_CONFIG_MESSAGE)
                     return
+                # RC10 finding #3: an unacknowledged generation used to park
+                # this watcher in a silent unbounded wait. Mirror the bounded
+                # Claude Stop-hook retries in rt-wait-inbox: one re-notice,
+                # then one pause diagnostic, then keep polling silently so a
+                # late `rt-ack` still re-arms a fresh waiter automatically.
+                pending_since = time.monotonic()
+                renotified = paused = False
                 while (
                     not self._stop.is_set()
                     and _generation_is_pending(
@@ -285,6 +321,25 @@ class _RoundtableBridge:
                         generation,
                     )
                 ):
+                    waited = time.monotonic() - pending_since
+                    if not renotified and waited >= _PENDING_RENOTIFY_SECONDS:
+                        renotified = True
+                        if not self._deliver(
+                            _MAIL_MESSAGE,
+                            session_id=session_id,
+                            platform=platform,
+                        ):
+                            self._fail(_CONFIG_MESSAGE)
+                            return
+                    elif not paused and waited >= _PENDING_PAUSE_SECONDS:
+                        paused = True
+                        if not self._deliver(
+                            _PENDING_MESSAGE,
+                            session_id=session_id,
+                            platform=platform,
+                        ):
+                            self._fail(_CONFIG_MESSAGE)
+                            return
                     self._stop.wait(_MAIL_DRAIN_POLL_SECONDS)
                 continue
 
@@ -292,7 +347,9 @@ class _RoundtableBridge:
                 continue
 
             if _SUPERSEDED_MARKER in output:
-                self._fail(_FENCE_MESSAGE)
+                # The RT_* session environment is fixed for this process, so
+                # a superseded lease can never become valid again here.
+                self._fail(_FENCE_MESSAGE, terminal=True)
                 return
 
             self._fail(_CONFIG_MESSAGE)
@@ -450,9 +507,11 @@ class _RoundtableBridge:
             self._diagnostic_sent = True
         self._inject(message)
 
-    def _fail(self, message: str) -> None:
+    def _fail(self, message: str, *, terminal: bool = False) -> None:
         with self._lock:
             self._closed = True
+            if terminal:
+                self._terminal = True
             self._stop.set()
         self._inject_diagnostic(message)
 
