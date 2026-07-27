@@ -32,6 +32,18 @@ SUPPORTED_SOURCES = frozenset({"startup", "resume", "clear"})
 MAX_INPUT_BYTES = 64 * 1024
 MAX_VALUE_BYTES = 4096
 
+# Every path out of this hook is a silent ``return 0`` by design: a hook that
+# breaks the harness is worse than one that skips a binding.  Silence toward
+# Codex is not silence toward the operator, though -- without a host-local
+# trace, "the hook was never dispatched" and "the hook ran and declined" are
+# indistinguishable after the fact, and telling them apart is the whole
+# diagnosis when auto-bind stops working.  The trace is best-effort, self
+# capping, and deliberately does not depend on ``RT_RUNTIME_DIR``: a hook
+# subprocess that never inherited the runtime environment is itself one of the
+# outcomes worth recording.
+TRACE_NAME = "codex-session-start.log.jsonl"
+TRACE_MAX_BYTES = 512 * 1024
+
 
 class HookError(RuntimeError):
     """The hook could not safely publish a bind request."""
@@ -41,6 +53,65 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def _trace_root(environment: dict[str, str]) -> Path | None:
+    """Resolve a trace directory without trusting the runtime environment.
+
+    ``RT_RUNTIME_DIR`` is preferred when it is usable, but its absence is one
+    of the failures this trace exists to record, so fall back to the install
+    prefix and finally to the default runtime root.
+    """
+
+    candidates = (
+        environment.get("RT_RUNTIME_DIR"),
+        environment.get("RT_CODEX_RUNTIME_DIR"),
+    )
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate.startswith("/"):
+            return Path(candidate)
+    prefix = environment.get("ROUNDTABLE_INSTALL_PREFIX")
+    if isinstance(prefix, str) and prefix.startswith("/"):
+        return Path(prefix) / ".runtime"
+    try:
+        return Path.home() / ".roundtable" / ".runtime"
+    except (OSError, RuntimeError):
+        return None
+
+
+def _trace(environment: dict[str, str], outcome: str, **fields) -> None:
+    """Append one host-local line describing how this invocation ended.
+
+    Never raises and never blocks the hook: a tracing failure must not turn a
+    harmless skip into a broken session start.
+    """
+
+    try:
+        root = _trace_root(environment)
+        if root is None:
+            return
+        record = {"ts": utc_now(), "outcome": outcome, "pid": os.getpid()}
+        record.update(fields)
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n"
+        try:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            return
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(root / TRACE_NAME, flags, 0o600)
+        try:
+            if os.fstat(descriptor).st_size > TRACE_MAX_BYTES:
+                # Self-capping beats a rotator nobody wrote: one dead binding
+                # retried at poll cadence is exactly how the wake log reached
+                # 29 MB of a single repeated line.
+                os.ftruncate(descriptor, 0)
+            os.write(descriptor, line.encode("utf-8"))
+        finally:
+            os.close(descriptor)
+    except Exception:  # noqa: BLE001 - tracing must never break the hook
+        return
 
 
 def _safe_text(value, *, label: str, pattern=None) -> str | None:
@@ -186,12 +257,35 @@ def _atomic_request_locked(path: Path, payload: dict) -> bool:
 def _request_context(
     payload: dict,
     environment: dict[str, str],
+    rejection: dict | None = None,
 ) -> tuple[str, str, Path, Path] | None:
-    if payload.get("hook_event_name") != "SessionStart":
+    """Validate one SessionStart payload.
+
+    ``rejection`` optionally receives the reason this payload was declined, so
+    the caller can trace it.  It stays an out-parameter rather than a changed
+    return type to keep the existing callers and tests intact.
+    """
+
+    def _decline(outcome: str, **fields):
+        if rejection is not None:
+            rejection.clear()
+            rejection["outcome"] = outcome
+            rejection.update(fields)
         return None
+
+    event = payload.get("hook_event_name")
+    if event != "SessionStart":
+        return _decline(
+            "not_session_start",
+            event=event if isinstance(event, str) else None,
+        )
     source = _safe_text(payload.get("source"), label="source")
     if source not in SUPPORTED_SOURCES:
-        return None
+        raw = payload.get("source")
+        return _decline(
+            "unsupported_source",
+            source=raw if isinstance(raw, str) else None,
+        )
 
     thread_id = _safe_text(payload.get("session_id"), label="session_id")
     cwd = _canonical_existing_dir(payload.get("cwd"), label="cwd")
@@ -199,9 +293,24 @@ def _request_context(
         environment.get("RT_RUNTIME_DIR"), label="RT_RUNTIME_DIR"
     )
     if not all((thread_id, cwd, configured_runtime)):
-        return None
+        # Naming the missing piece matters: a hook subprocess that did not
+        # inherit RT_RUNTIME_DIR looks identical, from the outside, to one
+        # that was never dispatched at all.
+        return _decline(
+            "incomplete_payload",
+            source=source,
+            missing=[
+                name
+                for name, value in (
+                    ("session_id", thread_id),
+                    ("cwd", cwd),
+                    ("RT_RUNTIME_DIR", configured_runtime),
+                )
+                if not value
+            ],
+        )
     if not (cwd / ".roundtable" / "agents.yaml").is_file():
-        return None
+        return _decline("not_a_roundtable_project", source=source, cwd=str(cwd))
 
     try:
         selected_runtime = runtime_root()
@@ -256,20 +365,26 @@ def request_path(payload: dict, *, root: Path | None = None) -> Path:
 
 
 def run(stdin, environment: dict[str, str] | None = None) -> int:
+    selected_environment = dict(os.environ if environment is None else environment)
     raw = stdin.buffer.read(MAX_INPUT_BYTES + 1)
     if len(raw) > MAX_INPUT_BYTES:
+        _trace(selected_environment, "input_too_large", bytes=len(raw))
         return 0
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeError, json.JSONDecodeError):
+        _trace(selected_environment, "input_not_json", bytes=len(raw))
         return 0
     if not isinstance(payload, dict):
+        _trace(selected_environment, "input_not_object")
         return 0
-    selected_environment = dict(os.environ if environment is None else environment)
-    context = _request_context(payload, selected_environment)
+    rejection: dict = {}
+    context = _request_context(payload, selected_environment, rejection)
     if context is None:
+        outcome = rejection.pop("outcome", "declined")
+        _trace(selected_environment, outcome, **rejection)
         return 0
-    selected_runtime = context[3]
+    source, thread_id, cwd, selected_runtime = context
     try:
         # Intent advancement and queue publication form one linearized action.
         # Otherwise two concurrent ``clear`` hooks could publish in the reverse
@@ -277,13 +392,28 @@ def run(stdin, environment: dict[str, str] | None = None) -> int:
         with bind_request_guard(selected_runtime):
             request = _request_from_context(context)
             if request is None:
+                _trace(
+                    selected_environment,
+                    "intent_unresolved",
+                    source=source,
+                    threadId=thread_id,
+                    cwd=str(cwd),
+                )
                 return 0
-            _atomic_request_locked(
+            published = _atomic_request_locked(
                 request_path(request, root=selected_runtime),
                 request,
             )
     except RuntimeStateError as error:
         raise HookError(str(error)) from error
+    _trace(
+        selected_environment,
+        "request_published" if published else "request_already_queued",
+        source=source,
+        threadId=thread_id,
+        projectRoot=request["projectRoot"],
+        agentId=request["agentId"],
+    )
     return 0
 
 
@@ -291,6 +421,7 @@ def main() -> int:
     try:
         return run(sys.stdin)
     except (HookError, OSError) as error:
+        _trace(dict(os.environ), "hook_error", error=str(error))
         print(f"rt-codex-session-start: {error}", file=sys.stderr)
         return 1
 
