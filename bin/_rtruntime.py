@@ -64,6 +64,24 @@ class SeatPaths:
 
 
 @dataclass(frozen=True)
+class CodexLaunchIntent:
+    """A read-only snapshot of the current Codex launch intent.
+
+    Reading is separated from claiming because a caller that must prove
+    uniqueness across a whole candidate set has to observe the intent before it
+    mutates anything: the claim is a single-use side effect, so it may run at
+    most once and only after exactly one candidate survives.
+    """
+
+    project_root: Path
+    agent_id: str
+    session_id: str
+    revision: str
+    armed_at: datetime
+    active_native_session_id: str | None
+
+
+@dataclass(frozen=True)
 class LeaseToken:
     project_root: Path
     project_hash: str
@@ -978,6 +996,7 @@ def resolve_codex_launch_intent(
     source: str,
     *,
     initial_ttl: float = DEFAULT_CODEX_LAUNCH_INTENT_TTL,
+    expect: CodexLaunchIntent | None = None,
 ) -> LeaseToken | None:
     """Resolve and advance the current Codex launch intent, or fail closed.
 
@@ -986,6 +1005,14 @@ def resolve_codex_launch_intent(
     native session, except ``clear`` which is the documented lifecycle event
     allowed to advance the native thread for the same fenced Roundtable lease.
     Project claim locking makes two competing SessionStart hooks linearizable.
+
+    ``discover`` is the wake bridge claiming an unclaimed intent for a remote
+    thread it proved unique inside the intent's creation window.  It has the
+    same privilege as the ``startup`` claim the SessionStart hook would have
+    made and deliberately not the ``clear`` privilege, which is the only one
+    that can move mail off an already established thread.  ``expect`` is the
+    caller's selection snapshot; requiring it unchanged under the claim lock
+    makes selection and claim a single compare-and-set.
     """
 
     if (
@@ -994,7 +1021,7 @@ def resolve_codex_launch_intent(
         or "\0" in native_session_id
     ):
         raise RuntimeStateError("native Codex session ID is invalid")
-    if source not in {"startup", "resume", "clear"}:
+    if source not in {"startup", "resume", "clear", "discover"}:
         raise RuntimeStateError(f"unsupported Codex SessionStart source: {source!r}")
     try:
         ttl = float(initial_ttl)
@@ -1018,6 +1045,18 @@ def resolve_codex_launch_intent(
         agent_id, session_id, revision, active, armed_at = (
             _validate_codex_launch_intent(payload, canonical)
         )
+        if expect is not None and (
+            agent_id != expect.agent_id
+            or session_id != expect.session_id
+            or revision != expect.revision
+            or armed_at != expect.armed_at
+            or active != expect.active_native_session_id
+        ):
+            # A relaunch that landed between candidate selection and this claim
+            # published a new intent under a new lease.  The thread we selected
+            # was proven against the superseded window, so it must not be
+            # claimed here.
+            return None
         paths = seat_paths(canonical, agent_id)
         if paths.project_dir != lookup.project_dir:
             raise RuntimeStateError("Codex launch intent runtime path mismatch")
@@ -1042,7 +1081,7 @@ def resolve_codex_launch_intent(
             )
 
         if active is None:
-            if source not in {"startup", "resume"}:
+            if source not in {"startup", "resume", "discover"}:
                 return None
             age = (datetime.now(timezone.utc) - armed_at).total_seconds()
             if age < -5.0 or age > ttl:
@@ -1057,6 +1096,41 @@ def resolve_codex_launch_intent(
         payload["lastSessionStartAt"] = utc_now()
         _atomic_json(intent_path, payload)
         return current
+
+
+def read_codex_launch_intent(project: Path | str) -> CodexLaunchIntent | None:
+    """Read the current Codex launch intent without claiming or mutating it.
+
+    The wake bridge needs the intent as an anchor while it decides which loaded
+    thread, if any, is the seat it launched.  That decision spans several RPCs
+    and must be provably unique before anything is claimed, so this path holds
+    only a shared claim lock, loads no lease, and never writes.  The returned
+    snapshot is what the caller passes back as ``expect``.
+    """
+
+    canonical = canonical_project(project)
+    lookup = seat_paths(canonical, "__codex-launch-intent__")
+    intent_path = lookup.project_dir / CODEX_LAUNCH_INTENT_NAME
+    if _path_info(intent_path) is None:
+        return None
+    _validate_read_path(lookup.runtime_root, directory=True)
+    _validate_read_path(lookup.project_dir, directory=True)
+    _validate_project_meta(lookup, canonical)
+    with _locked(lookup.claim_lock, shared=True):
+        payload = _read_json(intent_path)
+        if payload is None:
+            return None
+        agent_id, session_id, revision, active, armed_at = (
+            _validate_codex_launch_intent(payload, canonical)
+        )
+    return CodexLaunchIntent(
+        project_root=canonical,
+        agent_id=agent_id,
+        session_id=session_id,
+        revision=revision,
+        armed_at=armed_at,
+        active_native_session_id=active,
+    )
 
 
 def _normalize_fence(session_id: Any, revision: Any) -> tuple[str, str]:

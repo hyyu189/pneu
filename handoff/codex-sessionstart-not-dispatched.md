@@ -74,7 +74,21 @@ a particular thread is the one this launcher just spawned.
 
 ## Status
 
-The instrumentation landed in `e70dfb5`. The binding fix is in progress;
-it must not be able to bind a foreign thread that merely shares the project
-cwd, and it should repair the seats that are already running unbound, not
-only future launches.
+The instrumentation landed in `e70dfb5`. The binding replacement is
+intent-anchored discovery in the wake bridge: the bridge selects the one
+loaded thread whose cwd matches the project and whose UUIDv7 creation
+instant falls inside the intent's window, then claims the intent under a
+compare-and-set before binding it to the current fenced lease.
+
+The two candidate classes stay independently gated. The legacy local-CLI
+class is fenced only by the project cwd, so it remains behind the opt-in
+`--auto-discover`, and an armed intent now pre-empts it outright rather
+than competing with it. The `discover` claim has the same privilege the
+SessionStart hook's `startup` claim would have had, and deliberately not
+the `clear` privilege, which is the only one that can move mail off an
+already established thread.
+
+Seats already running unbound are not repaired retroactively: their
+intents are long past the claim TTL, and relaxing that would remove the
+freshness fence for a case a relaunch fixes for free. Each such seat needs
+one relaunch, or one `rt-codex-wake bind` from inside its own turn.
