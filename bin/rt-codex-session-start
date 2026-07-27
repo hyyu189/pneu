@@ -321,13 +321,21 @@ def _request_context(
     return source, thread_id, cwd, selected_runtime
 
 
-def _request_from_context(context: tuple[str, str, Path, Path]) -> dict | None:
+def _request_from_context(
+    context: tuple[str, str, Path, Path],
+    rejection: dict | None = None,
+) -> dict | None:
     source, thread_id, cwd, _selected_runtime = context
     # The app-server owns the runtime environment. Lease identity is resolved
     # from a launcher-published private intent, never from tool-shell variables
     # that hooks do not reliably inherit.
     try:
-        lease = resolve_codex_launch_intent(cwd, thread_id, source)
+        lease = resolve_codex_launch_intent(
+            cwd,
+            thread_id,
+            source,
+            rejection=rejection,
+        )
     except RuntimeStateError as error:
         raise HookError(str(error)) from error
     if lease is None:
@@ -390,14 +398,18 @@ def run(stdin, environment: dict[str, str] | None = None) -> int:
         # Otherwise two concurrent ``clear`` hooks could publish in the reverse
         # order from their intent updates and wake the older native thread.
         with bind_request_guard(selected_runtime):
-            request = _request_from_context(context)
+            intent_rejection: dict = {}
+            request = _request_from_context(context, intent_rejection)
             if request is None:
+                intent_rejection.setdefault("reason", "unknown")
                 _trace(
                     selected_environment,
                     "intent_unresolved",
                     source=source,
                     threadId=thread_id,
                     cwd=str(cwd),
+                    remedy="run rt-codex-wake bind from the target Codex turn",
+                    **intent_rejection,
                 )
                 return 0
             published = _atomic_request_locked(

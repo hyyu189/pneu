@@ -146,12 +146,14 @@ For Codex, setup installs an owned SessionStart hook and two owned macOS
 LaunchAgent definitions. On first use, Codex may require one `/hooks` review of
 the user-level hook. Roundtable does not bypass that trust decision.
 
-After trust is granted, a new Codex thread normally binds automatically: the
-SessionStart hook atomically queues the native session identity, and the wake
-bridge validates its exact project cwd and current fenced launcher lease before
-recording the binding. The callback does not re-enter the app-server while the
-thread is starting. Manual binding remains a troubleshooting fallback, not a
-normal onboarding step:
+After trust is granted, a new Codex thread normally binds automatically on its
+first turn, however long that turn is delayed: the SessionStart hook atomically
+queues the native session identity after resolving its UUIDv7 launch window,
+current lease revision, and live launcher-owner identity. The wake bridge then
+validates the exact project cwd and thread shape before recording the binding.
+The callback does not re-enter the app-server while the thread is starting.
+Manual binding remains a troubleshooting fallback, not a normal onboarding
+step:
 
 ```bash
 rt-codex-wake bind /absolute/path/to/project
