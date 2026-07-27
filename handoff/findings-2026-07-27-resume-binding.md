@@ -1,7 +1,16 @@
 # The bound thread is not the thread the human is looking at
 
 Found on the development host on 2026-07-27, immediately after the
-intent-anchored bind replacement started working. Three defects, one root.
+intent-anchored bind replacement started working.
+
+**Root cause corrected.** This document originally attributed defect 1 to a
+missing Codex API and a lost hook. Both premises were wrong; see
+`codex-sessionstart-turn-gated.md`. SessionStart is dispatched normally,
+including `source=resume`, and would have rebound the resumed thread on its
+own. Defect 1 was *introduced* by the intent-anchored discovery layer,
+which claims the intent seconds after launch and thereby makes the hook's
+legitimate resume claim fail the `active != native_session_id` guard.
+Defects 2 and 3 below stand as written.
 
 ## 1. Launch-thread anchoring cannot follow a TUI resume
 
@@ -16,11 +25,10 @@ Mail therefore landed in a thread nobody was watching. From the human's
 side it looked like the message created a brand-new conversation, and it
 took a second trip through the resume selector to find it.
 
-This is structural, not a tuning problem. Codex, asked from inside the
-session, reported that `CODEX_THREAD_ID` in its turn was still the launch
-thread: the environment identity does not follow a resume. It also
-established that Codex `0.145.0` exposes no way for an external app-server
-client to learn which thread another client displays — no `currentThread`
+`CODEX_THREAD_ID` in the turn was still the launch thread, so the
+environment identity does not follow a resume, and Codex `0.145.0` exposes
+no way for an external app-server client to learn which thread another
+client displays — no `currentThread`
 query, no client-to-thread mapping, no `thread/attached` or
 `thread/switched` notification, and `remoteControl/client/list` carries
 client metadata without a thread id. A TUI resume is a client-to-server
@@ -28,8 +36,11 @@ client metadata without a thread id. A TUI resume is a client-to-server
 runtime activity, not UI focus, so `thread/loaded/list` plus status cannot
 identify the displayed thread either.
 
-No launcher-intent or recency heuristic can solve this, because the
-information required is not published.
+No launcher-intent or recency heuristic can solve this from the outside,
+because the information required is not published. That mattered only while
+the hook was believed dead. The hook is alive and carries the resumed
+thread's own identity, so the supported answer is to stop pre-empting it,
+not to reconstruct it externally.
 
 ## 2. The documented manual fallback cannot work in a remote thread
 
@@ -82,7 +93,14 @@ Two expected behaviors:
    precondition in a remote thread and say so, instead of asking the
    operator to relaunch with the launcher that already launched it.
 
-## Options, with the first one retracted
+## Options — superseded
+
+The three options below were written on the assumption that the hook was
+gone. With the hook working, B and C are both solving a problem that does
+not exist, and the real work is removing the discovery layer's pre-emption
+and renewing the intent so a late first turn can still claim it. They are
+kept only as the record of what was considered.
+
 
 **A — detect and tell the operator to rebind.** Retracted. Its remedy is
 defect 2, which does not work. Any variant of A needs a repair action that
@@ -109,13 +127,11 @@ complexity cost.
 `thread/switched` notification. Independent of the above and worth filing
 regardless, since B and C are both workarounds for a missing API.
 
-## Note on the original design
+## Note on the original design — confirmed
 
 The hook's supported sources are `startup`, `resume`, and `clear`, and
 `resolve_codex_launch_intent` accepts the same set, with `clear` explicitly
-privileged to move the active native thread. The original design therefore
-expected a resume to re-fire SessionStart and rebind. If `0.144.x`
-delivered that, the mis-binding here is a direct consequence of losing hook
-dispatch rather than a separate defect, and restoring a resume-time signal
-is the correct fix rather than a heuristic. Whether `0.144.x` actually
-fired SessionStart on resume is not yet verified.
+privileged to move the active native thread. The original design expected a
+resume to re-fire SessionStart and rebind, and that expectation is correct:
+the live trace shows a `resume` request publishing normally. The design was
+right and the replacement was built on a misdiagnosis.
