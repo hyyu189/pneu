@@ -46,8 +46,6 @@ from _rtcodex import (
     wake_plist,
 )
 from _rtruntime import (
-    DEFAULT_CODEX_LAUNCH_INTENT_TTL,
-    CodexLaunchIntent,
     FenceRejected,
     LeaseToken,
     RuntimeStateError,
@@ -56,8 +54,6 @@ from _rtruntime import (
     inspect_seat,
     legacy_harness_guard,
     load_validated_lease,
-    read_codex_launch_intent,
-    resolve_codex_launch_intent,
     seat_shared_guard,
     update_wake,
 )
@@ -90,20 +86,6 @@ HUMAN_DECISION_METHODS = frozenset(
 
 class IdentityError(RuntimeError):
     pass
-
-
-class DiscoveryRefused(IdentityError):
-    """Intent-fenced discovery refused to bind, with a diagnosable reason.
-
-    It stays an ``IdentityError`` so every existing caller keeps treating it as
-    one; the extra fields exist only so the bridge can log a stable, dedupable
-    refusal instead of re-deriving it from the message.
-    """
-
-    def __init__(self, reason: str, candidate_ids: list[str], message: str):
-        super().__init__(message)
-        self.reason = reason
-        self.candidate_ids = candidate_ids
 
 
 class HumanGate(RuntimeError):
@@ -1134,27 +1116,7 @@ def resume_or_loaded(
         return loaded, False
 
 
-def discover_thread(
-    client: AppServerClient,
-    project: Path,
-    *,
-    intent: CodexLaunchIntent | None = None,
-    allow_local: bool = False,
-    tally: dict[str, list[str]] | None = None,
-) -> dict:
-    """Select the one thread this project may auto-bind, or fail closed.
-
-    The two candidate classes are gated independently and must stay that way.
-    A local CLI thread is admissible only under ``allow_local`` -- the opt-in
-    ``--auto-discover`` privilege -- because its only fence is the project cwd.
-    A remote TUI thread is admissible only under an unclaimed ``intent``, whose
-    fence is the launcher's pre-exec anchor.  Collapsing the two would let any
-    project that ever armed an intent silently acquire the cwd-only privilege.
-
-    ``tally`` is an optional out-parameter that receives the classified
-    candidate ids so a caller can diagnose a refusal without re-running the
-    RPCs or parsing the message.
-    """
+def discover_thread(client: AppServerClient, project: Path) -> dict:
     loaded = []
     cursor = None
     seen_cursors = set()
@@ -1168,8 +1130,7 @@ def discover_thread(
         if cursor in seen_cursors:
             raise IdentityError("thread/loaded/list returned a repeated cursor")
         seen_cursors.add(cursor)
-    local: list[dict] = []
-    remote: list[dict] = []
+    candidates = []
     for thread_id in loaded:
         try:
             candidate = validate_thread(
@@ -1177,49 +1138,16 @@ def discover_thread(
             )
             # App-server labels every external client `vscode`, including both
             # rt-codex remote TUIs and real IDE sessions. That union is not a
-            # safe auto-binding identity on its own. An embedded local CLI is
-            # auto-discoverable by cwd; a remote TUI additionally needs the
-            # launcher's unclaimed launch intent as an anchor, and must have
-            # been created inside that intent's creation window.
+            # safe auto-binding identity. Remote TUIs must self-register with
+            # `bind`; only an embedded local CLI is auto-discoverable.
             if candidate.get("source") == "cli":
-                # An armed unclaimed intent is a positive assertion about which
-                # thread this seat means, so the cwd-only class must not
-                # pre-empt it even where the operator opted into that class.
-                if allow_local and intent is None:
-                    local.append(candidate)
-            elif intent is not None and intent.active_native_session_id is None:
-                created = _thread_creation_instant(thread_id)
-                offset = (created - intent.armed_at).total_seconds()
-                if (
-                    -CODEX_DISCOVERY_CREATION_SKEW
-                    <= offset
-                    <= CODEX_DISCOVERY_CREATION_WINDOW
-                ):
-                    remote.append(candidate)
+                candidates.append(candidate)
         except IdentityError:
             continue
-    candidates = local + remote
-    if tally is not None:
-        tally["local"] = [str(candidate.get("id")) for candidate in local]
-        tally["remote"] = [str(candidate.get("id")) for candidate in remote]
     if len(candidates) != 1:
-        if intent is None:
-            # Without an anchor the legacy refusal is unchanged, including its
-            # wording, because nothing about that decision has changed.
-            raise IdentityError(
-                f"expected exactly one auto-discoverable local CLI root thread for {project}, "
-                f"found {len(candidates)}; run rt-codex-wake bind from the target Codex turn"
-            )
-        found = ", ".join(str(candidate.get("id")) for candidate in candidates)
-        raise DiscoveryRefused(
-            "ambiguous" if candidates else "no_candidates",
-            [str(candidate.get("id")) for candidate in candidates],
-            f"expected exactly one auto-discoverable Codex root thread for {project}; "
-            f"found {len(candidates)} ({len(local)} local CLI, {len(remote)} remote "
-            f"created within {CODEX_DISCOVERY_CREATION_WINDOW:g}s of the launch intent "
-            f"armed at {intent.armed_at.isoformat()})"
-            + (f": {found}" if found else "")
-            + "; run rt-codex-wake bind from the target Codex turn"
+        raise IdentityError(
+            f"expected exactly one auto-discoverable local CLI root thread for {project}, "
+            f"found {len(candidates)}; run rt-codex-wake bind from the target Codex turn"
         )
     return candidates[0]
 
@@ -1293,47 +1221,6 @@ def safe_timestamp(value) -> float:
     return parsed if math.isfinite(parsed) and parsed >= 0 else 0.0
 
 
-CODEX_DISCOVERY_CREATION_WINDOW = 30.0
-# The launcher writes armedAt before it execs codex, and the thread's UUIDv7
-# stamp comes from the same host clock, so the seat's own thread is always
-# created strictly after arming.  Any tolerance below zero can therefore only
-# ever admit a thread that is not this seat's.
-CODEX_DISCOVERY_CREATION_SKEW = 0.0
-# Backoff before the eager sweep spends discovery RPCs on a refusing project again.
-CODEX_DISCOVERY_RETRY_SECONDS = 30.0
-
-
-def _thread_creation_instant(thread_id: str) -> datetime:
-    """Return when app-server created this thread, from its UUIDv7 identifier.
-
-    Codex thread ids are UUIDv7, whose leading 48 bits are the creation time in
-    milliseconds.  That is the only creation fact available: ``thread/read``
-    exposes no creating-client identity, and its ``createdAt`` reports when the
-    app-server loaded the thread, not when it was created.  Anything that is
-    not a UUIDv7 fails closed rather than degrading discovery back to the
-    cwd-plus-source union that is explicitly not a safe binding identity.
-    """
-    try:
-        value = uuid.UUID(str(thread_id))
-    except (AttributeError, TypeError, ValueError) as error:
-        raise IdentityError(
-            f"thread id {thread_id!r} is not a UUID; cannot prove creation time"
-        ) from error
-    if value.version != 7 or value.variant != uuid.RFC_4122:
-        raise IdentityError(
-            f"thread id {thread_id!r} is not a UUIDv7; cannot prove creation time"
-        )
-    try:
-        return datetime.fromtimestamp((value.int >> 80) / 1000.0, timezone.utc)
-    except (OSError, OverflowError, ValueError) as error:
-        # A well-formed UUIDv7 can still carry a 48-bit timestamp outside the
-        # representable date range.  That is an unusable creation proof, not a
-        # bridge-fatal condition.
-        raise IdentityError(
-            f"thread id {thread_id!r} has an unrepresentable creation time"
-        ) from error
-
-
 def safe_counter(value) -> int:
     try:
         parsed = int(value or 0)
@@ -1368,15 +1255,6 @@ class WakeBridge:
         self.resume_attempted: set[str] = set()
         self.subscribed_threads: set[str] = set()
         self.bind_quarantined: set[str] = set()
-        # Per-project fingerprint of the last logged discovery refusal. A
-        # stable refusal must log once per bridge process, not once per poll.
-        self.discovery_notes: dict[str, str] = {}
-        # Per-project monotonic deadline before which the sweep will not spend
-        # RPCs again. The mail path already backs off through _record_project_error;
-        # the sweep runs on every iteration, and iterations are paced by
-        # notification bursts rather than by --poll-seconds, so a project that
-        # keeps refusing would otherwise re-list every loaded thread unboundedly.
-        self.discovery_retry_at: dict[str, tuple[float, str]] = {}
 
     @staticmethod
     def _request_key(request_id) -> str:
@@ -1557,78 +1435,9 @@ class WakeBridge:
             ):
                 self.store.flush_transaction()
 
-    def _superseding_intent(
-        self, project: Path, binding: dict
-    ) -> CodexLaunchIntent | None:
-        """Return the intent that proves this binding belongs to a dead launch.
-
-        A relaunch arms a fresh unclaimed intent under a new fenced lease while
-        the previous binding is still stored.  Nothing else evicts that
-        binding, so without this the seat is never rebound and every poll
-        re-fails the same identity check -- the shape that filled the wake log
-        with one repeated rejection.
-
-        The comparison is deliberately narrow.  The intent must be strictly
-        newer than the binding, otherwise an explicit ``bind`` performed after
-        an older unclaimed intent would evict itself, and it must still be
-        inside its own claim TTL: eviction destroys the project's phase record,
-        so a binding must never be dropped for an intent too old to replace it.
-
-        A legacy identity-less binding is evictable too.  It carries no fence to
-        compare, but a newer unclaimed intent is itself proof that the launcher
-        has since claimed this seat, and exempting those bindings would leave
-        exactly the projects that cannot self-repair unable to use the relaunch.
-        """
-
-        try:
-            intent = read_codex_launch_intent(project)
-        except RuntimeStateError:
-            return None
-        if intent is None or intent.active_native_session_id is not None:
-            return None
-        age = (datetime.now(timezone.utc) - intent.armed_at).total_seconds()
-        if age < -CODEX_DISCOVERY_CREATION_SKEW or age > (
-            DEFAULT_CODEX_LAUNCH_INTENT_TTL
-        ):
-            return None
-        bound_at = binding.get("boundAt")
-        if not isinstance(bound_at, str):
-            return None
-        try:
-            bound_instant = datetime.fromisoformat(bound_at.replace("Z", "+00:00"))
-        except ValueError:
-            return None
-        if bound_instant.tzinfo is None:
-            bound_instant = bound_instant.replace(tzinfo=timezone.utc)
-        if intent.armed_at <= bound_instant:
-            return None
-        recorded_session = binding.get("roundtableSessionId")
-        recorded_revision = binding.get("leaseRevision")
-        if (
-            recorded_session
-            and recorded_revision
-            and (recorded_session, recorded_revision)
-            == (intent.session_id, intent.revision)
-        ):
-            return None
-        return intent
-
     def _thread_for(self, project: Path) -> dict:
         key = str(project)
         binding = self.store.bindings.get(key)
-        if binding:
-            superseding = self._superseding_intent(project, binding)
-            if superseding is not None:
-                self.store.unbind(project)
-                log_event(
-                    "binding_superseded",
-                    project=key,
-                    thread_id=str(binding.get("threadId")),
-                    armed_at=superseding.armed_at.isoformat(),
-                )
-                self.resumed.pop(key, None)
-                self.resume_attempted.discard(key)
-                binding = None
         if binding:
             if binding.get("project") != key:
                 raise IdentityError(f"invalid stored binding identity for {project}")
@@ -1648,64 +1457,13 @@ class WakeBridge:
                     self.subscribed_threads.add(thread_id)
             return self.resumed[key]
 
-        try:
-            intent = read_codex_launch_intent(project)
-        except RuntimeStateError as error:
-            raise DiscoveryRefused(
-                "intent_invalid",
-                [],
-                f"Codex launch intent is unusable for {project}: {error}",
-            ) from error
-        if intent is None and not self.auto_discover:
+        if not self.auto_discover:
             raise IdentityError(
                 f"project has no explicit Codex binding: {project}; "
                 "run rt-codex-wake bind from its target Codex turn"
             )
-        tally: dict[str, list[str]] = {}
-        thread = discover_thread(
-            self.client,
-            project,
-            intent=intent,
-            allow_local=self.auto_discover,
-            tally=tally,
-        )
-        # `source` is the exact field discover_thread classified on, so it is a
-        # discriminator here rather than a heuristic.
-        if thread.get("source") == "cli":
-            # The legacy local-CLI path is unchanged: it never depended on a
-            # launch intent and still resolves its seat by inspection.
-            lease = _discover_binding_lease(project)
-        else:
-            # Claim the intent before entering seat_shared_guard. The claim
-            # takes the project claim lock exclusively while the guard takes it
-            # shared, and _locked opens a fresh descriptor per call, so flock
-            # cannot upgrade shared to exclusive inside one process. These two
-            # must never nest.
-            try:
-                lease = resolve_codex_launch_intent(
-                    project,
-                    thread["id"],
-                    "discover",
-                    expect=intent,
-                )
-            except RuntimeStateError as error:
-                # An ambiguous seat owner or an unusable lease must fail this
-                # project closed, not raise out of the bridge iteration.
-                raise DiscoveryRefused(
-                    "intent_unclaimable",
-                    [str(thread["id"])],
-                    f"Codex launch intent for {project} could not be claimed for thread "
-                    f"{thread['id']}: {error}",
-                ) from error
-            if lease is None:
-                raise DiscoveryRefused(
-                    "intent_unclaimable",
-                    [str(thread["id"])],
-                    f"Codex launch intent for {project} could not be claimed for thread "
-                    f"{thread['id']} (withdrawn, expired, already claimed, relaunched, or its "
-                    "seat lease is no longer current); run rt-codex-wake bind from the "
-                    "target Codex turn"
-                )
+        thread = discover_thread(self.client, project)
+        lease = _discover_binding_lease(project)
         if lease is None:
             try:
                 with legacy_harness_guard(project, "codex"):
@@ -1732,26 +1490,6 @@ class WakeBridge:
                     f"Codex seat changed before auto-bind: {error}"
                 ) from error
         _binding_lease(project, binding)
-        if intent is not None and thread.get("source") != "cli":
-            # One line per successful intent-fenced bind. The binding now
-            # exists, so this cannot repeat for the same intent.
-            self.discovery_notes.pop(key, None)
-            log_event(
-                "intent_discovery_bound",
-                project=key,
-                agent=binding.get("agent"),
-                thread_id=binding.get("threadId"),
-                armed_at=intent.armed_at.isoformat(),
-                creation_delta_seconds=round(
-                    (
-                        _thread_creation_instant(thread["id"]) - intent.armed_at
-                    ).total_seconds(),
-                    3,
-                ),
-                cli_candidates=len(tally.get("local", [])),
-                remote_candidates=len(tally.get("remote", [])),
-                binding_revision=binding.get("bindingRevision"),
-            )
         self.resume_attempted.add(key)
         self.resumed[key], subscribed = resume_or_loaded(
             self.client, project, binding["threadId"]
@@ -2380,91 +2118,6 @@ class WakeBridge:
                 expected_binding=(thread_id, binding_revision),
             )
 
-    def _note_discovery(
-        self,
-        project: Path,
-        reason: str,
-        candidate_ids: list[str],
-        intent: "CodexLaunchIntent | None",
-    ) -> None:
-        """Log one refusal per distinct outcome, not one per poll."""
-        key = str(project)
-        armed_key = intent.armed_at.isoformat() if intent is not None else "-"
-        self.discovery_retry_at[key] = (
-            time.monotonic() + CODEX_DISCOVERY_RETRY_SECONDS,
-            armed_key,
-        )
-        # The armed instant is part of the fingerprint so a relaunch that fails
-        # the same way is reported again rather than silenced by the previous
-        # launch's identical refusal.
-        fingerprint = f"{reason}|{armed_key}|{','.join(sorted(candidate_ids))}"
-        if self.discovery_notes.get(key) == fingerprint:
-            return
-        self.discovery_notes[key] = fingerprint
-        log_event(
-            "intent_discovery_rejected",
-            project=key,
-            reason=reason,
-            candidate_ids=sorted(candidate_ids),
-            armed_at=intent.armed_at.isoformat() if intent is not None else None,
-            window_seconds=CODEX_DISCOVERY_CREATION_WINDOW,
-        )
-
-    def discover_unbound_projects(self) -> set[str]:
-        """Bind freshly launched seats before any mail arrives for them.
-
-        ``_thread_for`` runs only when a project already has pending mail, and
-        the launch intent's creation window is far shorter than the interval
-        before a seat's first message.  Without this pass a seat launched at T
-        and first messaged at T+1h would always miss its own window.  The cost
-        for a project with nothing to bind is one stat plus one small JSON read
-        per poll.
-        """
-        bound: set[str] = set()
-        for project in self.projects:
-            key = str(project)
-            existing = self.store.bindings.get(key)
-            if existing is not None and self._superseding_intent(project, existing) is None:
-                continue
-            intent = None
-            try:
-                intent = read_codex_launch_intent(project)
-                if intent is None or intent.active_native_session_id is not None:
-                    continue
-                age = (
-                    datetime.now(timezone.utc) - intent.armed_at
-                ).total_seconds()
-                if age < -CODEX_DISCOVERY_CREATION_SKEW or age > (
-                    DEFAULT_CODEX_LAUNCH_INTENT_TTL
-                ):
-                    # Outside the claim's own TTL the RPCs cannot succeed, so
-                    # do not spend them.  A relaunch is the documented repair.
-                    continue
-                # Back off only within one launch. A relaunch publishes a new
-                # armedAt, and that seat must bind on the next poll rather than
-                # inherit the previous launch's penalty.
-                retry_at, retry_armed = self.discovery_retry_at.get(
-                    key, (0.0, "")
-                )
-                if (
-                    retry_armed == intent.armed_at.isoformat()
-                    and time.monotonic() < retry_at
-                ):
-                    continue
-                self._thread_for(project)
-                bound.add(key)
-                self.discovery_notes.pop(key, None)
-                self.discovery_retry_at.pop(key, None)
-            except DiscoveryRefused as error:
-                self._note_discovery(project, error.reason, error.candidate_ids, intent)
-            except (IdentityError, RuntimeStateError, FenceRejected) as error:
-                self._note_discovery(project, "intent_invalid", [str(error)], intent)
-            except (RpcError, OSError, TimeoutError) as error:
-                # Transient app-server or I/O failure; the next poll retries
-                # while the intent is still inside its TTL.
-                self._note_discovery(project, "deferred", [str(error)], intent)
-        return bound
-
     def step(self, messages: list[dict] | None = None) -> list[ProjectResult]:
         self.store.reload()
         rebound = drain_bind_requests(
@@ -2473,14 +2126,9 @@ class WakeBridge:
             self.projects,
             quarantined_projects=self.bind_quarantined,
         )
-        rebound |= self.discover_unbound_projects()
         for project in rebound:
             self.resumed.pop(project, None)
             self.resume_attempted.discard(project)
-            # The quarantine latch waits for a replacement SessionStart request,
-            # which the remote Codex path never produces.  Any path that
-            # re-establishes a binding has satisfied what it was waiting for.
-            self.bind_quarantined.discard(project)
         self.consume_messages(messages or [])
         return [
             (
