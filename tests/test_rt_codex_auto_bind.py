@@ -10,7 +10,9 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -111,6 +113,22 @@ def run_hook_in_process(payload: dict, environment: dict[str, str]) -> int:
     stdin = type("HookInput", (), {})()
     stdin.buffer = io.BytesIO(json.dumps(payload).encode())
     return hook.run(stdin, environment)
+
+
+def trace_records(tmp_path: Path) -> list[dict]:
+    trace = tmp_path / "runtime" / hook.TRACE_NAME
+    if not trace.exists():
+        return []
+    return [json.loads(line) for line in trace.read_text().splitlines() if line]
+
+
+def uuid7_at(instant: datetime) -> str:
+    milliseconds = int(instant.timestamp() * 1000)
+    value = (milliseconds & ((1 << 48) - 1)) << 80
+    value |= 7 << 76
+    value |= 0b10 << 62
+    value |= 1
+    return str(uuid.UUID(int=value))
 
 
 def selected_thread(project: Path, thread_id: str) -> dict:
@@ -254,9 +272,83 @@ def test_session_start_hook_noops_without_launcher_intent(tmp_path):
 
     assert result.returncode == 0
     assert not (runtime / "codex-bind-requests").exists()
+    assert trace_records(tmp_path)[-1]["reason"] == "intent_missing"
 
 
-def test_session_start_hook_noops_for_expired_launcher_intent(tmp_path):
+def test_session_start_hook_accepts_late_first_turn_for_live_fenced_owner(
+    tmp_path,
+):
+    project = write_project(tmp_path / "project")
+    environment, token = claim_environment(tmp_path, project)
+    intent = (
+        tmp_path
+        / "runtime"
+        / "projects"
+        / _rtruntime.project_hash(project)
+        / _rtruntime.CODEX_LAUNCH_INTENT_NAME
+    )
+    payload = json.loads(intent.read_text())
+    payload["armedAt"] = "2000-01-01T00:00:00Z"
+    intent.write_text(json.dumps(payload))
+    intent.chmod(0o600)
+    thread_id = uuid7_at(
+        datetime(2000, 1, 1, tzinfo=timezone.utc) + timedelta(seconds=1)
+    )
+
+    result = run_hook(hook_payload(project, thread_id, "startup"), environment)
+
+    queue = tmp_path / "runtime" / "codex-bind-requests"
+    request = json.loads(next(queue.glob("*.json")).read_text())
+    assert result.returncode == 0, result.stderr
+    assert request["threadId"] == thread_id
+    assert request["roundtableSessionId"] == token.session_id
+    assert request["leaseRevision"] == token.revision
+    updated = json.loads(intent.read_text())
+    assert updated["activeNativeSessionId"] == thread_id
+    assert updated["lastSessionStartAt"] is not None
+
+
+def test_late_unrelated_thread_cannot_win_before_delayed_launcher_thread(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+    intent = (
+        tmp_path
+        / "runtime"
+        / "projects"
+        / _rtruntime.project_hash(project)
+        / _rtruntime.CODEX_LAUNCH_INTENT_NAME
+    )
+    armed_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    payload = json.loads(intent.read_text())
+    payload["armedAt"] = armed_at.isoformat().replace("+00:00", "Z")
+    intent.write_text(json.dumps(payload))
+    intent.chmod(0o600)
+    unrelated = uuid7_at(datetime.now(timezone.utc))
+    launcher = uuid7_at(armed_at + timedelta(seconds=1))
+
+    unrelated_result = run_hook(
+        hook_payload(project, unrelated, "startup"),
+        environment,
+    )
+    launcher_result = run_hook(
+        hook_payload(project, launcher, "startup"),
+        environment,
+    )
+
+    request = json.loads(
+        next((tmp_path / "runtime" / "codex-bind-requests").glob("*.json")).read_text()
+    )
+    records = trace_records(tmp_path)
+    assert unrelated_result.returncode == 0
+    assert launcher_result.returncode == 0
+    assert request["threadId"] == launcher
+    assert any(
+        record.get("reason") == "native_session_outside_launch_window"
+        for record in records
+    )
+
+
+def test_late_non_v7_session_remains_unclaimable(tmp_path):
     project = write_project(tmp_path / "project")
     environment, _token = claim_environment(tmp_path, project)
     intent = (
@@ -275,6 +367,85 @@ def test_session_start_hook_noops_for_expired_launcher_intent(tmp_path):
 
     assert result.returncode == 0
     assert not (tmp_path / "runtime" / "codex-bind-requests").exists()
+    assert (
+        trace_records(tmp_path)[-1]["reason"]
+        == "native_session_time_unavailable"
+    )
+
+
+def test_late_historical_resume_claims_current_live_lease(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+    intent = (
+        tmp_path
+        / "runtime"
+        / "projects"
+        / _rtruntime.project_hash(project)
+        / _rtruntime.CODEX_LAUNCH_INTENT_NAME
+    )
+    armed_at = datetime(2000, 1, 1, tzinfo=timezone.utc)
+    payload = json.loads(intent.read_text())
+    payload["armedAt"] = armed_at.isoformat().replace("+00:00", "Z")
+    intent.write_text(json.dumps(payload))
+    intent.chmod(0o600)
+    historical_thread = uuid7_at(armed_at - timedelta(days=1))
+
+    result = run_hook(
+        hook_payload(project, historical_thread, "resume"),
+        environment,
+    )
+
+    request = json.loads(
+        next((tmp_path / "runtime" / "codex-bind-requests").glob("*.json")).read_text()
+    )
+    assert result.returncode == 0, result.stderr
+    assert request["threadId"] == historical_thread
+
+
+def test_invalid_uuid_v7_time_never_falls_back_to_arrival_window(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+    invalid_time = "ffffffff-ffff-7000-8000-000000000001"
+
+    result = run_hook(
+        hook_payload(project, invalid_time, "startup"),
+        environment,
+    )
+
+    assert result.returncode == 0
+    assert not (tmp_path / "runtime" / "codex-bind-requests").exists()
+    assert trace_records(tmp_path)[-1]["reason"] == "native_session_time_invalid"
+
+
+def test_fresh_non_v7_uuid_cannot_claim_startup_intent(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+
+    result = run_hook(
+        hook_payload(project, str(uuid.uuid4()), "startup"),
+        environment,
+    )
+
+    assert result.returncode == 0
+    assert not (tmp_path / "runtime" / "codex-bind-requests").exists()
+    assert trace_records(tmp_path)[-1]["reason"] == "startup_session_not_v7"
+
+
+@pytest.mark.parametrize("window", [0, -1, float("inf"), float("nan")])
+def test_launch_thread_window_must_be_positive_and_finite(tmp_path, window):
+    project = write_project(tmp_path / "project")
+    _environment, _token = claim_environment(tmp_path, project)
+
+    with pytest.raises(
+        _rtruntime.RuntimeStateError,
+        match="thread window must be positive and finite",
+    ):
+        _rtruntime.resolve_codex_launch_intent(
+            project,
+            "thread-1",
+            "startup",
+            initial_thread_window=window,
+        )
 
 
 def test_session_start_hook_noops_when_launcher_owner_died(
@@ -294,6 +465,25 @@ def test_session_start_hook_noops_when_launcher_owner_died(
 
     assert result == 0
     assert not (tmp_path / "runtime" / "codex-bind-requests").exists()
+    trace = trace_records(tmp_path)[-1]
+    assert trace["reason"] == "lease_fence_rejected"
+    assert "is not running" in trace["detail"]
+
+
+def test_session_start_hook_noops_when_launcher_lease_was_replaced(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, old = claim_environment(tmp_path, project)
+    assert _rtruntime.release(old)
+    fresh = _rtruntime.claim(project, "codex", "codex")
+
+    result = run_hook(hook_payload(project), environment)
+
+    assert result.returncode == 0, result.stderr
+    assert fresh.revision != old.revision
+    assert not (tmp_path / "runtime" / "codex-bind-requests").exists()
+    trace = trace_records(tmp_path)[-1]
+    assert trace["reason"] == "lease_fence_rejected"
+    assert "seat lease changed" in trace["detail"]
 
 
 def test_session_start_hook_noops_for_non_utf8_scalar_text(tmp_path):
@@ -453,6 +643,10 @@ def test_later_startup_cannot_claim_an_established_launch_intent(tmp_path):
 
     assert list(queue.glob("*.json")) == []
     assert first_payload["threadId"] == "launcher-thread"
+    assert (
+        trace_records(tmp_path)[-1]["reason"]
+        == "active_native_session_mismatch"
+    )
 
 
 def test_clear_publication_waits_for_shared_consume_guard(tmp_path):

@@ -9,6 +9,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import stat
 import subprocess
@@ -26,7 +27,7 @@ PROJECT_SCHEMA = "roundtable.runtime-project.v1"
 CODEX_LAUNCH_INTENT_SCHEMA = "roundtable.codex-launch-intent.v1"
 CODEX_LAUNCH_INTENT_NAME = "codex-launch-intent.json"
 DEFAULT_HEARTBEAT_TTL = 30.0
-DEFAULT_CODEX_LAUNCH_INTENT_TTL = 300.0
+DEFAULT_CODEX_LAUNCH_THREAD_WINDOW = 300.0
 BIND_REQUEST_LOCK_NAME = ".codex-bind-requests.lock"
 UNCHANGED = object()
 
@@ -972,21 +973,58 @@ def _validate_codex_launch_intent(
     return values[0], values[1], values[2], active, armed_at
 
 
+def _codex_thread_created_at(
+    native_session_id: str,
+) -> tuple[str, datetime | None]:
+    """Classify a Codex thread ID and decode a UUIDv7 creation time."""
+
+    try:
+        parsed = uuid.UUID(native_session_id)
+    except (ValueError, AttributeError):
+        return "not_uuid", None
+    if parsed.version != 7:
+        return "not_v7", None
+    milliseconds = parsed.int >> 80
+    try:
+        return (
+            "v7",
+            datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc),
+        )
+    except (OSError, OverflowError, ValueError):
+        return "v7_invalid_time", None
+
+
 def resolve_codex_launch_intent(
     project: Path | str,
     native_session_id: str,
     source: str,
     *,
-    initial_ttl: float = DEFAULT_CODEX_LAUNCH_INTENT_TTL,
+    initial_thread_window: float = DEFAULT_CODEX_LAUNCH_THREAD_WINDOW,
+    rejection: dict[str, Any] | None = None,
 ) -> LeaseToken | None:
     """Resolve and advance the current Codex launch intent, or fail closed.
 
-    The first root ``startup``/``resume`` event must arrive shortly after the
-    launcher arms the intent.  Once claimed, later events must name the same
-    native session, except ``clear`` which is the documented lifecycle event
-    allowed to advance the native thread for the same fenced Roundtable lease.
-    Project claim locking makes two competing SessionStart hooks linearizable.
+    Codex dispatches the first root ``startup``/``resume`` event on the first
+    turn, which may happen long after launch.  Codex-generated fresh thread IDs
+    are UUIDv7, so a ``startup`` creation time must fall inside the launch
+    window; the hook's arrival time is only a compatibility fallback for
+    non-UUID test or legacy IDs.  A historical ``resume`` may predate that
+    window and is accepted under the exact current live lease fence.  Once
+    claimed, later events must name the same native session, except ``clear``
+    which is the documented lifecycle event allowed to advance the native
+    thread for the same fenced Roundtable lease.  Project claim locking makes
+    two competing SessionStart hooks linearizable.
+
+    ``rejection`` optionally receives a stable reason for an expected no-op.
+    Malformed or ambiguous state still raises instead of being reduced to a
+    reason code.
     """
+
+    def _reject(reason: str) -> None:
+        if rejection is not None:
+            rejection.clear()
+            rejection["reason"] = reason
+        return None
 
     if (
         not isinstance(native_session_id, str)
@@ -997,24 +1035,28 @@ def resolve_codex_launch_intent(
     if source not in {"startup", "resume", "clear"}:
         raise RuntimeStateError(f"unsupported Codex SessionStart source: {source!r}")
     try:
-        ttl = float(initial_ttl)
+        thread_window = float(initial_thread_window)
     except (TypeError, ValueError) as error:
-        raise RuntimeStateError("Codex launch intent TTL is invalid") from error
-    if ttl <= 0:
-        raise RuntimeStateError("Codex launch intent TTL must be positive")
+        raise RuntimeStateError(
+            "Codex launch thread window is invalid"
+        ) from error
+    if not math.isfinite(thread_window) or thread_window <= 0:
+        raise RuntimeStateError(
+            "Codex launch thread window must be positive and finite"
+        )
 
     canonical = canonical_project(project)
     lookup = seat_paths(canonical, "__codex-launch-intent__")
     intent_path = lookup.project_dir / CODEX_LAUNCH_INTENT_NAME
     if _path_info(intent_path) is None:
-        return None
+        return _reject("intent_missing")
     _validate_read_path(lookup.runtime_root, directory=True)
     _validate_read_path(lookup.project_dir, directory=True)
     _validate_project_meta(lookup, canonical)
     with _locked(lookup.claim_lock):
         payload = _read_json(intent_path)
         if payload is None:
-            return None
+            return _reject("intent_missing")
         agent_id, session_id, revision, active, armed_at = (
             _validate_codex_launch_intent(payload, canonical)
         )
@@ -1032,9 +1074,15 @@ def resolve_codex_launch_intent(
                         revision,
                     )
                 )
-        except FenceRejected:
+        except FenceRejected as error:
             # A launcher that died before exec leaves a harmless stale intent.
             # An unrelated native Codex session in the same cwd remains a no-op.
+            if rejection is not None:
+                rejection.clear()
+                rejection.update(
+                    reason="lease_fence_rejected",
+                    detail=str(error),
+                )
             return None
         if current.harness != "codex":
             raise RuntimeStateError(
@@ -1043,14 +1091,34 @@ def resolve_codex_launch_intent(
 
         if active is None:
             if source not in {"startup", "resume"}:
-                return None
-            age = (datetime.now(timezone.utc) - armed_at).total_seconds()
-            if age < -5.0 or age > ttl:
-                return None
+                return _reject("unclaimed_source")
+            now = datetime.now(timezone.utc)
+            intent_age = (now - armed_at).total_seconds()
+            if intent_age < -5.0:
+                return _reject("intent_armed_in_future")
+            thread_id_kind, thread_created_at = _codex_thread_created_at(
+                native_session_id
+            )
+            if thread_id_kind == "v7_invalid_time":
+                return _reject("native_session_time_invalid")
+            if thread_id_kind == "not_uuid":
+                if intent_age > thread_window:
+                    return _reject("native_session_time_unavailable")
+            elif thread_id_kind == "not_v7":
+                if source == "startup":
+                    return _reject("startup_session_not_v7")
+            elif thread_created_at is not None:
+                launch_delta = (thread_created_at - armed_at).total_seconds()
+                if source == "startup" and (
+                    launch_delta < -5.0 or launch_delta > thread_window
+                ):
+                    return _reject("native_session_outside_launch_window")
+                if source == "resume" and launch_delta > thread_window:
+                    return _reject("native_session_outside_launch_window")
         elif source != "clear" and active != native_session_id:
             # A nested or unrelated root thread cannot steal an established
             # launch intent merely because it shares the project cwd.
-            return None
+            return _reject("active_native_session_mismatch")
 
         if active != native_session_id:
             payload["activeNativeSessionId"] = native_session_id

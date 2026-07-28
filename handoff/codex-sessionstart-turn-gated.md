@@ -70,16 +70,28 @@ a one-shot 300 s token with no renewal path. The audit reported it; it was
 filed as mechanism detail behind a louder wrong hypothesis and
 under-weighted.
 
-## The correct fix
+## The implemented fix
 
-Renew rather than report. While the seat owner process is alive and the
-intent still names the current fenced lease, a late first turn should be
-claimable: either the launcher/bridge refreshes `armedAt`, or the resolver
-accepts a late `startup`/`resume` whose intent resolves to the
-still-current active lease. The fence that prevents an unrelated native
-Codex in the same cwd from stealing the seat is the lease revision plus
-owner identity. The clock is not load-bearing for safety, and it should not
-be load-bearing for correctness either.
+The earlier proposal to renew `armedAt` or accept any late request from a
+live lease was incomplete: the lease proves the current Roundtable seat and
+owner process, but it does not correlate an app-server thread with that
+client. An unrelated same-cwd remote client could therefore win an
+unbounded first-claim race.
+
+Codex-generated thread IDs are UUIDv7 in both `0.144.6` and `0.145.0`, so
+the resolver now applies the 300-second window to the fresh thread's
+embedded creation time rather than to the delayed hook arrival time. The
+real `019fa1b5...` thread decodes to `03:54:17.762Z`, roughly one second
+after its launch intent was armed, so its first turn remains claimable 82
+minutes later. A same-cwd thread created outside that fixed launch window
+is rejected even if its hook runs first.
+
+A cold `resume` preserves a historical thread ID rather than creating one
+at launch, so it cannot use the same creation-time association. The
+resolver accepts a historical resume only under the exact current live
+lease fence and documents this as part of P0's one-interactive-Codex-seat
+cooperative boundary. Strict per-client attribution still requires an
+upstream client identity or nonce in SessionStart and `thread/read`.
 
 ## The intervening change made it worse
 
@@ -96,9 +108,10 @@ mechanism that would have rebound the resumed thread correctly. The resume
 mis-binding recorded in `findings-2026-07-27-resume-binding.md` was
 introduced by it.
 
-## Instrumentation gap to close
+## Instrumentation gap closed
 
-The trace records `intent_unresolved` without the resolver's reason, so TTL
-expiry, a fence rejection, and a source mismatch are indistinguishable in
-the log. The TTL reading above is inferred from the timestamps rather than
-read from the trace. Propagate the resolver's decision into the trace.
+The hook now propagates the resolver's stable reason into every
+`intent_unresolved` trace. Fence rejections also include their safe detail,
+so a dead owner, replaced lease, missing intent, invalid thread timestamp,
+and active-session mismatch no longer collapse into the same line. Each
+unresolved trace carries the in-thread manual-bind remedy.

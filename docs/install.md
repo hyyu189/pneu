@@ -299,12 +299,14 @@ choice remains available for Claude and Hermes; use native `codex` directly
 when no Roundtable project or messaging is wanted.
 
 Claude's installed hooks and the Hermes plugin handle their native inbox wake
-lifecycle. A fresh Codex thread normally binds without user input. The trusted
-SessionStart hook writes an atomic request containing the native session ID,
-cwd, and fence resolved from the launcher's private runtime intent, then
-returns without making an app-server RPC. The wake bridge later validates the
-exact thread ID, exact cwd, interactive source, root-thread status, and current
-lease before committing the binding.
+lifecycle. A fresh Codex thread binds when Codex dispatches SessionStart on its
+first turn, even if that interaction is delayed. The trusted hook writes an
+atomic request containing the native session ID, cwd, and fence resolved from
+the launcher's private runtime intent, then returns without making an
+app-server RPC. Intent resolution validates the UUIDv7 launch window, current
+lease revision, and live owner identity; the wake bridge later validates the
+exact thread ID, exact cwd, interactive source, and root-thread status before
+committing the binding.
 
 If diagnostics show that auto-bind was blocked or the hook has not yet been
 trusted, manual binding remains available as a fallback:

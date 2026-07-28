@@ -244,6 +244,14 @@ request later and accepts it only when all of these identities agree:
   match the current fenced host lease;
 - the project has not acquired a conflicting current binding.
 
+Codex queues SessionStart during session construction but dispatches it from
+the first turn. The hook's arrival time therefore does not expire an unclaimed
+intent. Instead, the Codex-generated UUIDv7 thread ID must place thread
+creation inside the bounded launch window, while the exact lease revision must
+still be current and its owner PID plus process-start fingerprint live. This
+lets a delayed first interaction bind without turning the whole owner lifetime
+into an unrestricted same-cwd first-claim window.
+
 Exact replays are idempotent. A trusted `clear` event may move the same current
 lease to its replacement native thread; a request from an older lease cannot
 replace a newer claim. If `clear` replaces a request while the bridge is
@@ -254,13 +262,21 @@ decision. The manual
 `rt-codex-wake bind /absolute/project/path` command remains a diagnostic
 fallback.
 
-The launcher thread's first `startup` or `resume` request wins for its lease;
-an interactive Codex started later from one of that thread's tool shells cannot
-replace it merely by sharing the project cwd. A `clear` event is allowed to
-replace the current native thread for the same lease. P0 treats an
-operator deliberately running `/clear` inside a nested Codex that inherited
-that lease as a same-user cooperative boundary, not as a supported nested-Codex
-routing topology; stronger per-client lifecycle identity is deferred to P1.
+The first fresh `startup` request whose UUIDv7 creation time falls inside the
+current lease's launch window wins, even when Codex defers that hook until a
+much later first turn. A first `resume` may name a historical thread, so it is
+accepted under the exact current live lease fence; a resumed UUIDv7 created
+after the launch window is still rejected. Once claimed, an interactive Codex
+started later from one of that thread's tool shells cannot replace it merely by
+sharing the project cwd. The creation window narrows fresh-start candidates but
+is not a cryptographic client identity; P0 still relies on the
+one-interactive-Codex-seat-per-project cooperative boundary because Codex does
+not expose the app-server client identity needed to prove which same-cwd thread
+belongs to the launcher. A `clear` event is allowed to replace the current
+native thread for the same lease. P0 treats an operator deliberately running
+`/clear` in another same-cwd remote client as the same cooperative boundary,
+not as a supported multi-client routing topology; stronger per-client lifecycle
+identity is deferred to P1.
 
 This path has focused automated coverage and the installed RC5 proved on the
 development host that Codex's SessionStart `session_id` is the ID returned by
