@@ -101,7 +101,22 @@ Be skeptical about the moat's durability for a second reason: two independent, b
 ## 6. What remains unknown, and the cheapest experiment
 
 1. **Do two concurrent Claude Code processes in one directory actually conflict?** This decides whether Option A is one line or a config-dir subsystem — and whether our P0 cut was defending against a problem that does not exist. *Experiment: scratch repo, two Claude Code sessions, both editing and both writing history; watch `~/.claude` for clobbering. 15 minutes.* Do this first.
-2. **Is `git rev-parse --path-format=absolute --git-common-dir` stable across bare repos, submodules and `--separate-git-dir`?** Verified for the ordinary linked-worktree case on this machine; the edge cases decide whether Option B's key needs a fallback. *Experiment: 10 minutes in a scratch repo.*
+2. ~~Is `git rev-parse --path-format=absolute --git-common-dir` stable across bare repos, submodules and `--separate-git-dir`?~~ **Settled 2026-07-28: yes, and no fallback is needed.** Six cases in a scratch tree:
+
+| case | key | verdict |
+|---|---|---|
+| ordinary repo | `main-repo/.git` | baseline |
+| linked worktree | `main-repo/.git` | groups with its repo |
+| submodule | `main-repo/.git/modules/vendor` | own key, correctly separate |
+| `--separate-git-dir` | the real git dir, not the worktree path | tracks the repository object, not the location |
+| bare repo | `bare.git` | fine |
+| worktree of a bare repo | `bare.git` | groups with the bare repo |
+
+   The submodule result is the desired behaviour rather than a gap: a submodule is its own
+   repository and its agents should not silently join the parent's group. The
+   `--separate-git-dir` result matters more than it looks — the key follows the repository
+   object, so it survives moving a worktree. The bare-repo pair means the
+   `clone --bare` plus several worktrees layout is supported for free.
 3. **Does a cross-project fenced send violate a real invariant, or only a conservative one?** *Experiment: read `require_fenced_seat` and `rt-wait-inbox._project_root()` together and write the threat statement — one hour, no code.*
 4. **Orca's Run/Delivery layer in practice** — ack semantics, the one-outstanding-batch fence, `--wait` behaviour. Unshipped and unobservable here. *Experiment: throwaway macOS account, `ORCA_USER_DATA_PATH` to a scratch dir, install 1.4.160-rc.2+, run `run-create` / `worker-start`, read the DB and socat the socket. 30 minutes, not safe on this machine.*
 5. **Whether Orca's `::workspace:<uuid>` multi-instance path can ever be reached for a git repo.** Verification found it gated to folder projects; a partial path would change how we read their worktree model. *Experiment: grep every caller of `getFolderWorkspaceInstanceId` and `FOLDER_WORKSPACE_INSTANCE_SEPARATOR` for a non-folder repo. 30 minutes.*
