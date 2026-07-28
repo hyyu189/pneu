@@ -34,3 +34,7 @@ PAUSE
 
 # Local agent runtime state
 .claude/
+
+# Competitive and market research. Kept local: it is about other people's
+# products, it goes stale fast, and it does not belong in a public product repo.
+research/
