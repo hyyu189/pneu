@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from roundtable_packaging import MANAGED_ASSETS, MANAGED_HELPERS
+from roundtable_packaging import MANAGED_ASSETS, MANAGED_HELPERS, VERSION
 from roundtable_packaging import cli as packaging_cli
 
 
@@ -185,7 +185,9 @@ def built_wheel(tmp_path_factory):
         check=False,
     )
     assert process.returncode == 0, process.stderr
-    matches = list(wheel_dir.glob("roundtable_messaging-0.1.8-*.whl"))
+    # Derived, not literal: a test that builds the real wheel must not break
+    # on every version bump for a reason that has nothing to do with it.
+    matches = list(wheel_dir.glob(f"roundtable_messaging-{VERSION}-*.whl"))
     assert len(matches) == 1
     return matches[0]
 

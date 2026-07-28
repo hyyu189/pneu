@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 MANIFEST_SCHEMA = "roundtable.install.v1"
 MANAGED_MARKER = ".roundtable-managed.json"
 

@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
+from roundtable_packaging import VERSION
 from scripts import build_release
 
 
@@ -264,7 +265,7 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
     )
 
     root, relative, files = archive_members(first.artifact)
-    assert root == "roundtable-messaging-0.1.8"
+    assert root == f"roundtable-messaging-{VERSION}"
     assert {
         "BUILD-METADATA.json",
         "CREDITS.md",
@@ -289,7 +290,7 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
     assert "migrate" not in relative
     assert "roundtable_packaging/migrate.py" not in relative
     assert any(
-        name.startswith("wheels/roundtable_messaging-0.1.8-")
+        name.startswith(f"wheels/roundtable_messaging-{VERSION}-")
         and name.endswith("-py3-none-any.whl")
         for name in relative
     )
@@ -303,7 +304,7 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
     metadata_name = f"{root}/BUILD-METADATA.json"
     metadata = json.loads(files[metadata_name])
     assert metadata["source_commit"] == first.commit
-    assert metadata["version"] == "0.1.8"
+    assert metadata["version"] == VERSION
     assert metadata["project_wheel"]["tag"] == "py3-none-any"
     toolchain = metadata["deterministic_build"]["toolchain"]
     assert toolchain["implementation"]
