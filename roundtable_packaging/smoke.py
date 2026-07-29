@@ -99,7 +99,7 @@ def write_project(root: Path) -> None:
 def smoke(bin_dir: Path) -> dict:
     commands = {
         name: tool_command(bin_dir, name)
-        for name in ("rt-say", "rt-inbox", "rt-ack")
+        for name in ("rt-say", "rt-inbox", "rt-ack", "rt-projects")
     }
     with tempfile.TemporaryDirectory(prefix="roundtable-terminal-smoke-") as temporary:
         workspace = Path(temporary)
@@ -146,12 +146,30 @@ def smoke(bin_dir: Path) -> dict:
                 "ROUNDTABLE_PROJECT_DIR": "",
                 "RT_FALLBACK_PROJECT": "",
                 "RT_FROM": "codex",
-                "RT_PROJECTS_FILE": "/dev/null",
+                "RT_PROJECTS_FILE": str(workspace / "registry" / "projects.yaml"),
                 "CMUX_SURFACE_ID": "",
                 "CODEX_THREAD_ID": "",
                 "RT_SMOKE_ADAPTER_SENTINEL": str(adapter_sentinel),
             }
         )
+        run_tool(
+            commands,
+            "rt-projects",
+            "add",
+            str(project),
+            cwd=project,
+            environment=environment,
+        )
+        resolved = run_tool(
+            commands,
+            "rt-projects",
+            "resolve",
+            str(project),
+            cwd=project,
+            environment=environment,
+        )
+        mailbox = json.loads(resolved.stdout)
+        inbox_dir = Path(mailbox["inbox_dir"])
         sent = run_tool(
             commands,
             "rt-say",
@@ -198,19 +216,12 @@ def smoke(bin_dir: Path) -> dict:
             environment=ack_environment,
         )
         ack_files = list(
-            (project / ".roundtable" / "inbox" / "codex" / "new").glob("ack-*.md")
+            (inbox_dir / "codex" / "new").glob("ack-*.md")
         )
         if len(ack_files) != 1 or f"refs={message_id}" not in ack_files[0].read_text():
             raise SmokeFailure("sender mailbox does not contain the expected quiet ack")
 
-        new_path = (
-            project
-            / ".roundtable"
-            / "inbox"
-            / "claude"
-            / "new"
-            / f"{message_id}.md"
-        )
+        new_path = inbox_dir / "claude" / "new" / f"{message_id}.md"
         current = new_path.parents[1] / "cur"
         archived_path = current / new_path.name
         if new_path.exists() or not archived_path.is_file():

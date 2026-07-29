@@ -3,12 +3,17 @@ import argparse
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from datetime import date
 from pathlib import Path
 
-from _rtlib import register_project, validate_project_registry
+from _rtlib import (
+    _clean_git_environment,
+    register_project,
+    validate_project_registry,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 TEMPLATES = ROOT / "templates"
@@ -81,6 +86,7 @@ MARKER_BLOCKS = {
         "# BEGIN Roundtable\n"
         "runtime.json\n"
         "runtime.json.tmp.*\n"
+        "project.json\n"
         "messages/\n"
         "locks/\n"
         "inbox/\n"
@@ -166,13 +172,41 @@ def fail(message):
     raise SystemExit(f"roundtable-init: {message}")
 
 
-def ensure_plain_directory(path, *, writable=False):
+def ensure_plain_directory(path, *, writable=False, guarded=False):
     if path.is_symlink():
         fail(f"refusing symbolic-link directory: {path}")
     if not path.is_dir():
         fail(f"expected a directory: {path}")
+    info = path.stat()
+    if guarded:
+        if info.st_uid != os.getuid():
+            fail(
+                f"guarded directory is owned by uid {info.st_uid}, "
+                f"expected {os.getuid()}: {path}"
+            )
+        if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            fail(
+                f"guarded directory is group/other writable: {path}; "
+                f"run: chmod go-w {path}"
+            )
     if writable and not os.access(path, os.W_OK | os.X_OK):
         fail(f"directory is not writable: {path}")
+
+
+def ensure_guarded_file(path):
+    if path.is_symlink() or not path.is_file():
+        fail(f"expected a non-symlink regular file: {path}")
+    info = path.stat()
+    if info.st_uid != os.getuid():
+        fail(
+            f"guarded file is owned by uid {info.st_uid}, "
+            f"expected {os.getuid()}: {path}"
+        )
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        fail(
+            f"guarded file is group/other writable: {path}; "
+            f"run: chmod go-w {path}"
+        )
 
 
 def read_templates():
@@ -217,7 +251,11 @@ def preflight(project_dir, *, create_root, values, templates):
             fail(f"target already exists: {project_dir}")
         ensure_plain_directory(project_dir.parent, writable=True)
     else:
-        ensure_plain_directory(project_dir, writable=True)
+        ensure_plain_directory(
+            project_dir,
+            writable=True,
+            guarded=True,
+        )
 
     directory_rels = {
         "handoff",
@@ -236,7 +274,11 @@ def preflight(project_dir, *, create_root, values, templates):
     for rel in sorted(directory_rels, key=lambda value: (len(Path(value).parts), value)):
         target = project_dir / rel
         if target.exists() or target.is_symlink():
-            ensure_plain_directory(target, writable=True)
+            ensure_plain_directory(
+                target,
+                writable=True,
+                guarded=rel == ".roundtable",
+            )
         else:
             missing_directories.add(rel)
             directories.append(target)
@@ -250,6 +292,8 @@ def preflight(project_dir, *, create_root, values, templates):
         if target.exists():
             if not target.is_file():
                 fail(f"expected a regular file: {target}")
+            if rel.startswith(".roundtable/"):
+                ensure_guarded_file(target)
             if rel == ".roundtable/agents.yaml":
                 try:
                     content = target.read_text()
@@ -273,6 +317,10 @@ def preflight(project_dir, *, create_root, values, templates):
             # BRIEF.md and decision.md are user-owned when already present.
             continue
         creates.append((target, render(templates[template_name], values)))
+
+    identity = project_dir / ".roundtable" / "project.json"
+    if identity.exists() or identity.is_symlink():
+        ensure_guarded_file(identity)
 
     gitkeeps = []
     for rel in ("handoff", "log", "skills"):
@@ -303,14 +351,18 @@ def preflight(project_dir, *, create_root, values, templates):
 
 def apply_plan(project_dir, plan):
     if plan["create_root"]:
-        project_dir.mkdir()
+        project_dir.mkdir(mode=0o755)
     for path in plan["directories"]:
-        path.mkdir()
+        relative = path.relative_to(project_dir)
+        path.mkdir(mode=0o700 if relative == Path(".roundtable") else 0o755)
     for path in plan["gitkeeps"]:
         path.write_text("")
+        path.chmod(0o644)
     for path, content in plan["creates"]:
         with path.open("x") as handle:
             handle.write(content)
+        relative = path.relative_to(project_dir)
+        path.chmod(0o600 if relative.parts[0] == ".roundtable" else 0o644)
     for path, addition in plan["appends"]:
         with path.open("a") as handle:
             handle.write(addition)
@@ -319,19 +371,42 @@ def apply_plan(project_dir, plan):
 
 
 def run_git(project_dir, args):
-    return subprocess.run(["git", *args], cwd=project_dir, text=True, check=True)
+    return subprocess.run(
+        ["git", *args],
+        cwd=project_dir,
+        text=True,
+        check=True,
+        env=_clean_git_environment(),
+    )
 
 
 def git_init(project_dir, project_name):
     run_git(project_dir, ["init", "-q", "-b", "main"])
     run_git(project_dir, ["add", "."])
     cmd = ["git"]
-    if subprocess.run(["git", "config", "--get", "user.name"], cwd=project_dir, stdout=subprocess.DEVNULL).returncode != 0:
+    environment = _clean_git_environment()
+    if subprocess.run(
+        ["git", "config", "--get", "user.name"],
+        cwd=project_dir,
+        stdout=subprocess.DEVNULL,
+        env=environment,
+    ).returncode != 0:
         cmd.extend(["-c", "user.name=roundtable-init"])
-    if subprocess.run(["git", "config", "--get", "user.email"], cwd=project_dir, stdout=subprocess.DEVNULL).returncode != 0:
+    if subprocess.run(
+        ["git", "config", "--get", "user.email"],
+        cwd=project_dir,
+        stdout=subprocess.DEVNULL,
+        env=environment,
+    ).returncode != 0:
         cmd.extend(["-c", "user.email=bot@roundtable.local"])
     cmd.extend(["commit", "-q", "-m", f"Initial: {project_name} bootstrapped via roundtable-init"])
-    subprocess.run(cmd, cwd=project_dir, text=True, check=True)
+    subprocess.run(
+        cmd,
+        cwd=project_dir,
+        text=True,
+        check=True,
+        env=environment,
+    )
 
 
 def in_git_worktree(project_dir):
@@ -342,6 +417,7 @@ def in_git_worktree(project_dir):
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         check=False,
+        env=_clean_git_environment(),
     )
     return result.returncode == 0 and result.stdout.strip() == "true"
 

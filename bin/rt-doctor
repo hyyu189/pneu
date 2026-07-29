@@ -33,7 +33,13 @@ from _rtcodex import (
     require_daemon_identity,
     wake_bridge_build_fingerprint,
 )
-from _rtlib import load_agents_doc, load_project_registry, projects_registry_path
+from _rtlib import (
+    active_project_entries,
+    load_agents_doc,
+    load_project_registry,
+    projects_registry_path,
+    resolve_project_mailbox,
+)
 from _rtruntime import RuntimeStateError, harness_lease_records, inspect_seat
 
 
@@ -395,7 +401,7 @@ def report_bind_request_queue(
 def _configured_codex_projects(registry_path: Path) -> list[Path]:
     entries, _warnings = load_project_registry(registry_path)
     projects: list[Path] = []
-    for entry in entries:
+    for entry in active_project_entries(entries, available_only=True):
         project = entry["root"]
         try:
             configured = configured_instances(project)
@@ -952,9 +958,24 @@ def inspect_project_seats(
     return inspections, codex_instances
 
 
-def report_legacy_markers(report: Report, registered: dict[str, Path]) -> None:
+def report_legacy_markers(
+    report: Report,
+    registered: dict[str, Path],
+    registry_path: Path,
+) -> None:
     for project in registered.values():
-        inbox = project / ".roundtable" / "inbox"
+        try:
+            inbox = resolve_project_mailbox(
+                project, registry_path=registry_path
+            ).inbox_dir
+        except SystemExit as error:
+            report.item(
+                "WARN",
+                "mailbox-resolver",
+                str(error),
+                f"repair project registration for {project}",
+            )
+            continue
         for marker in sorted(inbox.glob("*/.armed-*")):
             report.item(
                 "WARN",
@@ -1089,23 +1110,53 @@ def project_health_checks(
             warning,
             f"inspect {registry_path}; use rt-projects rm <stale-root> when applicable",
         )
-    if not entries:
+    active = active_project_entries(entries, available_only=True)
+    if not active:
         report.item(
             "WARN",
             "registry",
-            f"no valid projects in {registry_path}",
+            f"no active available projects in {registry_path}",
             "rt-projects add <project-root>",
         )
     for entry in entries:
-        report.item(
-            "OK",
-            "registry",
-            f"{entry['root']} registered_at={entry.get('registered_at') or 'unknown'}",
-        )
+        if entry.get("legacy"):
+            report.item(
+                "WARN",
+                "registry-legacy",
+                f"path={entry['root']} has no durable project UUID",
+                f"run rt-projects --registry {registry_path} upgrade",
+            )
+        elif entry.get("status") == "tombstoned":
+            report.item(
+                "WARN",
+                "registry-tombstone",
+                f"uuid={entry.get('uuid')} last_path={entry['root']} "
+                f"layout={entry.get('layout')}",
+                "purge only with an explicit exact-UUID GC workflow",
+            )
+        elif not entry.get("available"):
+            report.item(
+                "WARN",
+                "registry-orphan",
+                f"uuid={entry.get('uuid')} path={entry['root']} "
+                f"layout={entry.get('layout')}",
+                "restore the project path or explicitly tombstone the registration",
+            )
+        else:
+            report.item(
+                "OK",
+                "registry",
+                f"uuid={entry.get('uuid')} path={entry['root']} "
+                f"layout={entry.get('layout')} "
+                f"registered_at={entry.get('registered_at') or 'unknown'}",
+            )
 
-    registered = {str(entry["root"]): entry["root"] for entry in entries}
+    registered = {
+        str(entry["root"]): entry["root"]
+        for entry in active
+    }
     inspections, codex_instances = inspect_project_seats(report, registered)
-    report_legacy_markers(report, registered)
+    report_legacy_markers(report, registered, registry_path)
 
     try:
         state = json.loads(state_file.read_text())

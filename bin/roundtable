@@ -16,7 +16,14 @@ from _rtlauncher import (
     harness_bin,
     project_at_or_above,
 )
-from _rtlib import emit_registry_warnings, is_project_root, load_project_registry
+from _rtlib import (
+    ProjectRegistryError,
+    active_project_entries,
+    emit_registry_warnings,
+    is_project_root,
+    load_project_registry_strict,
+    resolve_project_mailbox_checked,
+)
 
 
 ALIASES = {
@@ -318,6 +325,19 @@ def choose_registered_project(
         ) from error
 
 
+def preflight_project_selection(root: Path) -> Path:
+    """Validate durable identity and layout before onboarding a seat."""
+
+    try:
+        mailbox = resolve_project_mailbox_checked(root)
+    except ProjectRegistryError as error:
+        raise OnboardingError(
+            f"roundtable: project registration preflight failed for "
+            f"{root}: {error}"
+        ) from error
+    return mailbox.project_root
+
+
 def choose_project(
     *,
     cwd: Path,
@@ -329,7 +349,7 @@ def choose_project(
     anchored = project_at_or_above(cwd)
     if anchored is not None and not forbidden_project_root(anchored, home):
         print(f"Roundtable project: {anchored}", file=stderr)
-        return anchored
+        return preflight_project_selection(anchored)
 
     if anchored is None:
         print(
@@ -337,11 +357,16 @@ def choose_project(
             file=stderr,
         )
 
-    entries, warnings = load_project_registry()
+    try:
+        entries, warnings = load_project_registry_strict()
+    except ProjectRegistryError as error:
+        raise OnboardingError(
+            f"roundtable: invalid project registry: {error}"
+        ) from error
     emit_registry_warnings(warnings, stream=stderr, tool="roundtable")
     registered_roots = [
         entry["root"]
-        for entry in entries
+        for entry in active_project_entries(entries, available_only=True)
         if not forbidden_project_root(entry["root"], home)
     ]
     if not registered_roots:
@@ -387,18 +412,22 @@ def choose_project(
         ) from error
 
     if kind == "registered":
-        return choose_registered_project(
-            registered_roots,
-            stdin=stdin,
-            stderr=stderr,
+        return preflight_project_selection(
+            choose_registered_project(
+                registered_roots,
+                stdin=stdin,
+                stderr=stderr,
+            )
         )
     if kind == "create":
-        return create_project(
-            cwd,
-            stdin=stdin,
-            stderr=stderr,
-            home=home,
-            init_runner=init_runner,
+        return preflight_project_selection(
+            create_project(
+                cwd,
+                stdin=stdin,
+                stderr=stderr,
+                home=home,
+                init_runner=init_runner,
+            )
         )
     if kind == "another":
         raw_path = read_choice(stdin, stderr, "Existing folder path: ")
@@ -412,10 +441,12 @@ def choose_project(
     initialize_git = read_yes_no(
         stdin, stderr, "Initialize Git too? [y/N]: "
     )
-    return run_init_here(
-        root,
-        initialize_git=initialize_git,
-        init_runner=init_runner,
+    return preflight_project_selection(
+        run_init_here(
+            root,
+            initialize_git=initialize_git,
+            init_runner=init_runner,
+        )
     )
 
 

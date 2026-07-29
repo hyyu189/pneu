@@ -40,14 +40,37 @@ This also fixes a defect we have today and have not hit yet: renaming or
 moving a project silently makes it a different project, because the key is
 `sha256(path)`.
 
+The durable witness is a worktree-local, ignored
+`.roundtable/project.json` containing `schema: roundtable.project.v1` and the
+UUID. It is deliberately not committed: each linked worktree is a distinct
+Roundtable project and receives a distinct UUID when registered. A physical
+rename carries the witness with the directory; the resolver may reindex its
+registry path only when the old registered path is no longer a live
+Roundtable project, or when both path spellings name the same live inode (for
+example a case-only rename). Copying a witness while its original remains live
+at a distinct inode is an identity collision and fails closed.
+
+The registry schema is `roundtable.projects.v2`. Every row carries `uuid`,
+`path`, `name`, the derived `group`, `layout`, `status`, and
+`registered_at`; tombstones also carry `tombstoned_at`. A root-only v1
+registry is upgraded only by the explicit, locked, idempotent
+`rt-projects upgrade` operation, after a byte-for-byte verified sibling
+backup has been atomically published. Diagnostic/list read paths never mint
+identities or rewrite the registry. The identity-verified mailbox resolver has
+one narrow reconciliation exception: it may atomically repair the stored
+`path`, derived `name`, or derived `group` after the worktree-local UUID proves
+which single active row it owns and live-inode collision checks pass. It never
+mints an identity.
+
 ## 2. Storage: central, with the in-project symlink as a bookmark
 
 ```
 ~/.roundtable/
   projects.yaml                          registry: uuid, path, group, name, layout
   mail/<project-uuid>/
-    <agent>/{new,cur,tmp}                maildir
+    inbox/<agent>/{new,cur,tmp}          maildir
     messages/                            the ledger, and its locks
+    locks/                               send and ledger locks
 ```
 
 **The ledger moves with the mail.** `rt-say` and `rt-inbox` both use
@@ -57,8 +80,9 @@ cross-project acknowledgement under the wrong root.
 
 **One resolver, no direct path construction.** Every consumer takes the
 mailbox path from a single registry-backed resolver: `rt-say`, `rt-inbox`,
-`rt-ack`, `rt-wait-inbox`, `rt-stop-gate`, `rt-codex-wake`, `rt-doctor`. A
-second place that builds the path by hand is how the two layouts drift apart.
+`rt-ack`, `rt-wait-inbox`, `rt-stop-gate`, `rt-codex-wake`, `rt-doctor`,
+`rt-refresh`, the Hermes watcher, and the packaged terminal smoke. A second
+place that builds the path by hand is how the two layouts drift apart.
 
 **Host runtime keys are a separate decision, deliberately deferred.**
 `_rtruntime.project_hash` is `sha256(path)` and the Codex wake bindings and
@@ -71,7 +95,10 @@ runtime keys as well is a later, separable change.
 entry whose `.roundtable/agents.yaml` is gone (`if not is_project_root(root):
 continue`), so a deleted project disappears from the registry entirely — and
 with it, any way for `doctor` to report that its central mail is now orphaned.
-A removed project must leave a tombstoned entry carrying at least its UUID.
+A removed project leaves a tombstoned entry carrying its UUID, last path,
+layout, registration time, and tombstone time. A missing active root is
+reported as an orphan; absence alone never silently changes durable registry
+state.
 
 `agents.yaml` and `runtime.json` stay project-local. `agents.yaml` describes
 the project rather than the delivery state; `runtime.json` holds the cmux
@@ -229,7 +256,8 @@ The sequence has to survive being interrupted at any point, which means one
 authoritative layout at all times and never a merge of two.
 
 1. Ship the UUID-aware resolver first, with every entry recording
-   `layout=local`. Nothing moves yet; this step is separately releasable.
+   `layout=local`. Existing root-only registries require the explicit backed-up
+   v1→v2 upgrade. Nothing moves yet; this step is separately releasable.
 2. Every mutator and scanner takes a per-project **shared** layout lock, so a
    migration can exclude them.
 3. The migrator takes the **exclusive** lock and quiesces legacy writers.
@@ -342,10 +370,11 @@ Recorded so they are decisions rather than omissions.
    would touch exactly the binding code that took a full day to stabilise.
    Revisit when renaming becomes common or when that code is being changed for
    another reason.
-2. **Binding still requires a first turn.** SessionStart is turn-gated in
-   Codex, so a seat binds when the human first says something. Yesterday's fix
-   removed the five-minute deadline, so the wait is now unbounded rather than
-   fatal, but the requirement remains. See the open question below.
+2. **Hand-started Codex fallback binding still requires a first turn.**
+   Managed v1 launches preallocate and bind the thread before the TUI starts,
+   as specified in §8. The retained SessionStart launch-intent fallback is
+   turn-gated only for a hand-started seat or a managed launch whose
+   preallocation could not complete.
 
 ## Still open
 

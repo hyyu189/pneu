@@ -24,10 +24,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _rtlib import (
+    ProjectRegistryError,
+    active_project_entries,
     emit_registry_warnings,
     load_agents_doc,
-    load_project_registry,
+    load_project_registry_strict,
     projects_registry_path,
+    resolve_project_mailbox_checked,
 )
 
 from _rtcodex import (
@@ -1158,7 +1161,11 @@ def pending_generation(
 ) -> tuple[str | None, list[str]]:
     if not isinstance(agent_id, str) or not agent_id:
         raise IdentityError("Codex binding lacks a valid agent identity")
-    inbox = project / ".roundtable" / "inbox" / agent_id / "new"
+    try:
+        mailbox = resolve_project_mailbox_checked(project)
+    except ProjectRegistryError as error:
+        raise IdentityError(f"mailbox resolution failed: {error}") from error
+    inbox = mailbox.inbox_dir / agent_id / "new"
     inbox.mkdir(parents=True, exist_ok=True)
     ids = []
     for path in sorted(inbox.iterdir()):
@@ -1765,7 +1772,11 @@ class WakeBridge:
         trust_reason = self._hook_trust_gate(project)
         if trust_reason:
             raise HumanGate("hook_trust", trust_reason)
-        inbox = project / ".roundtable" / "inbox" / agent_id / "new"
+        try:
+            mailbox = resolve_project_mailbox_checked(project)
+        except ProjectRegistryError as error:
+            raise IdentityError(f"mailbox resolution failed: {error}") from error
+        inbox = mailbox.inbox_dir / agent_id / "new"
         with self.store.transaction():
             current_binding = self.store.bindings.get(str(project)) or {}
             if (
@@ -2148,10 +2159,18 @@ def discover_projects(explicit: list[str], *, warn: bool = True) -> list[Path]:
     if explicit:
         paths.extend(Path(value) for value in explicit)
     else:
-        entries, warnings = load_project_registry()
+        try:
+            entries, warnings = load_project_registry_strict()
+        except ProjectRegistryError as error:
+            raise SystemExit(
+                f"rt-codex-wake: invalid project registry: {error}"
+            ) from None
         if warn:
             emit_registry_warnings(warnings, tool="rt-codex-wake")
-        paths.extend(entry["root"] for entry in entries)
+        paths.extend(
+            entry["root"]
+            for entry in active_project_entries(entries, available_only=True)
+        )
     projects = []
     seen = set()
     for path in paths:

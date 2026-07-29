@@ -15,6 +15,14 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtruntime
+import _rtlib
+
+
+@pytest.fixture(autouse=True)
+def isolated_project_registry(tmp_path, monkeypatch) -> Path:
+    registry = tmp_path / "projects.json"
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
+    return registry
 
 
 def write_project(path: Path, agent: str = "claude") -> Path:
@@ -31,7 +39,14 @@ def write_project(path: Path, agent: str = "claude") -> Path:
         "    instances:\n"
         f"      - id: {agent}\n"
     )
+    _rtlib.register_project(project)
     return project
+
+
+def project_inbox(project: Path, agent: str) -> Path:
+    mailbox = _rtlib.resolve_project_mailbox(project)
+    assert mailbox.layout == "local"
+    return mailbox.inbox_dir / agent
 
 
 def claim_environment(
@@ -86,7 +101,7 @@ def run_tool(
 
 
 def assert_no_project_liveness(project: Path, agent: str = "claude") -> None:
-    inbox = project / ".roundtable" / "inbox" / agent
+    inbox = project_inbox(project, agent)
     if not inbox.exists():
         return
     forbidden = {
@@ -182,7 +197,7 @@ def test_wait_keeps_maildir_project_local_and_wake_state_host_local(
     project = write_project(tmp_path / "project", agent)
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project, agent)
-    new_dir = project / ".roundtable" / "inbox" / agent / "new"
+    new_dir = project_inbox(project, agent) / "new"
     new_dir.mkdir(parents=True)
     message = new_dir / "message-1.md"
     message.write_text("[CODEX→CLAUDE question id=message-1] test\n")
@@ -207,7 +222,7 @@ def test_claude_hook_uses_async_rewake_exit_for_mail(tmp_path, monkeypatch):
     environment = claim_environment(monkeypatch, runtime, project)
     install_prefix = tmp_path / "managed-prefix"
     environment["ROUNDTABLE_INSTALL_PREFIX"] = str(install_prefix)
-    new_dir = project / ".roundtable" / "inbox" / "claude" / "new"
+    new_dir = project_inbox(project, "claude") / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "message-claude.md").write_text(
         "[CODEX→CLAUDE question id=message-claude] test\n"
@@ -244,7 +259,7 @@ def test_global_claude_hooks_use_the_claimed_instance_identity(
     project = write_project(tmp_path / "project", agent)
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project, agent)
-    new_dir = project / ".roundtable" / "inbox" / agent / "new"
+    new_dir = project_inbox(project, agent) / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "message-custom.md").write_text(
         "[CODEX→CLAUDE question id=message-custom] test\n"
@@ -324,7 +339,7 @@ def test_claude_stop_hook_breaks_an_undrained_mail_retry_loop(
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
-    new_dir = project / ".roundtable" / "inbox" / "claude" / "new"
+    new_dir = project_inbox(project, "claude") / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "message-still-pending.md").write_text(
         "[CODEX→CLAUDE question id=message-still-pending] test\n"
@@ -372,7 +387,7 @@ def test_claude_stop_hook_wakes_a_fresh_late_message_generation(
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
-    inbox = project / ".roundtable" / "inbox" / "claude"
+    inbox = project_inbox(project, "claude")
     new_dir = inbox / "new"
     cur_dir = inbox / "cur"
     new_dir.mkdir(parents=True)
@@ -433,7 +448,7 @@ def test_quiet_ack_does_not_wake_and_empty_heartbeat_backoff_persists(
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
-    new_dir = project / ".roundtable" / "inbox" / "claude" / "new"
+    new_dir = project_inbox(project, "claude") / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "ack-message-1.md").write_text(
         "[CODEX→CLAUDE sync-ack id=message-1] received\n"
@@ -461,7 +476,7 @@ def test_fenced_inbox_archives_quiet_ack_without_a_shell_move(
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
-    inbox = project / ".roundtable" / "inbox" / "claude"
+    inbox = project_inbox(project, "claude")
     new_dir = inbox / "new"
     new_dir.mkdir(parents=True)
     msg_id = "20260721T220000Z-codex-to-claude-quiet"
@@ -496,7 +511,7 @@ def test_fenced_drain_lists_malformed_mail_and_prints_break_loop_guidance(
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
-    inbox = project / ".roundtable" / "inbox" / "claude"
+    inbox = project_inbox(project, "claude")
     new_dir = inbox / "new"
     new_dir.mkdir(parents=True)
     msg_id = "20260721T220000Z-codex-to-claude-quiet"
@@ -542,7 +557,7 @@ def test_fenced_ack_rejects_an_unanchored_session_before_foreign_archive(
 ):
     project = write_project(tmp_path / "project")
     msg_id = "20260721T220100Z-codex-to-hermes-foreign"
-    new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
+    new_dir = project_inbox(project, "hermes") / "new"
     new_dir.mkdir(parents=True)
     source = new_dir / f"{msg_id}.md"
     source.write_text(f"[CODEX→HERMES question id={msg_id}] keep\n")
@@ -577,7 +592,7 @@ def test_active_fenced_claude_cannot_ack_another_seats_message(
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
     msg_id = "20260721T220200Z-codex-to-hermes-foreign"
-    new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
+    new_dir = project_inbox(project, "hermes") / "new"
     new_dir.mkdir(parents=True)
     source = new_dir / f"{msg_id}.md"
     source.write_text(f"[CODEX→HERMES question id={msg_id}] keep\n")
@@ -733,7 +748,7 @@ def test_stop_gate_accepts_live_tripwire_and_blocks_undrained_mail(
         )
         assert allowed.returncode == 0, allowed.stderr
 
-        new_dir = project / ".roundtable" / "inbox" / "claude" / "new"
+        new_dir = project_inbox(project, "claude") / "new"
         new_dir.mkdir(parents=True, exist_ok=True)
         (new_dir / "message-2.md").write_text(
             "[CODEX→CLAUDE question id=message-2] test\n"

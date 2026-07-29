@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 import re
 import threading
@@ -143,6 +144,15 @@ def _wait_until(predicate, timeout=2.0):
     raise AssertionError("condition did not become true")
 
 
+def _mail_output(new_dir: Path, *names: str, seconds: int = 5) -> str:
+    return (
+        f"rt-wait-inbox: new-dir {json.dumps(str(new_dir))}\n"
+        f"rt-wait-inbox: mail after {seconds}s:\n"
+        + "\n".join(names)
+        + "\n"
+    )
+
+
 def test_registers_classic_and_tui_session_hooks_declared_by_manifest():
     plugin = _load_plugin()
     context = FakeContext()
@@ -251,9 +261,7 @@ def _start_tui_mail(plugin, tmp_path, monkeypatch, context, *, session_id):
     new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "message-1").write_text("pending", encoding="utf-8")
-    popen = FakePopen(
-        [("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0)]
-    )
+    popen = FakePopen([(_mail_output(new_dir, "message-1"), 0)])
     monkeypatch.setattr(plugin.subprocess, "Popen", popen)
 
     plugin.register(context)
@@ -462,7 +470,7 @@ def test_mail_is_injected_once_until_non_ack_mail_is_drained(
     blocking = FakeProcess()
     popen = FakePopen(
         [
-            ("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0),
+            (_mail_output(new_dir, "message-1"), 0),
             blocking,
         ]
     )
@@ -498,8 +506,8 @@ def test_mail_arriving_during_drain_gets_its_own_wake_generation(
     blocking = FakeProcess()
     popen = FakePopen(
         [
-            ("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0),
-            ("rt-wait-inbox: mail after 0s:\nmessage-2\n", 0),
+            (_mail_output(new_dir, "message-1"), 0),
+            (_mail_output(new_dir, "message-2", seconds=0), 0),
             blocking,
         ]
     )
@@ -529,9 +537,13 @@ def test_mail_arriving_during_drain_gets_its_own_wake_generation(
 @pytest.mark.parametrize(
     "output",
     [
+        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\n",
+        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\n../outside\n",
+        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\nack-quiet\n",
+        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\n padded-name\n",
     ],
 )
@@ -564,9 +576,7 @@ def test_failed_mail_injection_stops_instead_of_waiting_forever(
     new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "message-1").write_text("pending", encoding="utf-8")
-    popen = FakePopen(
-        [("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0)]
-    )
+    popen = FakePopen([(_mail_output(new_dir, "message-1"), 0)])
     monkeypatch.setattr(plugin.subprocess, "Popen", popen)
 
     plugin.register(context)
@@ -685,7 +695,7 @@ def test_pending_generation_renotifies_once_then_pauses_and_rearms_after_ack(
     blocking = FakeProcess()
     popen = FakePopen(
         [
-            ("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0),
+            (_mail_output(new_dir, "message-1"), 0),
             blocking,
         ]
     )
@@ -727,7 +737,7 @@ def test_session_reset_after_transient_failure_rearms_fresh_watcher(
     blocking = FakeProcess()
     popen = FakePopen(
         [
-            ("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0),
+            (_mail_output(new_dir, "message-1"), 0),
             blocking,
         ]
     )
@@ -795,9 +805,7 @@ def test_desktop_platform_fails_closed_without_cli_injection(
     new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "message-1").write_text("pending", encoding="utf-8")
-    popen = FakePopen(
-        [("rt-wait-inbox: mail after 5s:\nmessage-1\n", 0)]
-    )
+    popen = FakePopen([(_mail_output(new_dir, "message-1"), 0)])
     monkeypatch.setattr(plugin.subprocess, "Popen", popen)
     context = FakeContext(inject_result=False)
 

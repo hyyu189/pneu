@@ -1,4 +1,5 @@
 import os
+import stat
 import subprocess
 import sys
 from datetime import date
@@ -11,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INIT = ROOT / "bin" / "roundtable-init"
 
 
-def run_init(tmp_path, *args, cwd=None):
+def run_init(tmp_path, *args, cwd=None, env_extra=None, umask=None):
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
     env = os.environ.copy()
@@ -22,6 +23,8 @@ def run_init(tmp_path, *args, cwd=None):
             "RT_PROJECTS_FILE": str(tmp_path / "projects.yaml"),
         }
     )
+    if env_extra:
+        env.update(env_extra)
     return subprocess.run(
         [sys.executable, str(INIT), *args],
         cwd=cwd or tmp_path,
@@ -30,6 +33,7 @@ def run_init(tmp_path, *args, cwd=None):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         check=False,
+        preexec_fn=(lambda: os.umask(umask)) if umask is not None else None,
     )
 
 
@@ -69,6 +73,33 @@ def test_new_project_initializes_git_only_with_explicit_flag(tmp_path):
     assert log.stdout.splitlines() == [
         "Initial: versioned bootstrapped via roundtable-init"
     ]
+
+
+def test_new_project_is_guard_safe_under_group_writable_umask(tmp_path):
+    parent = tmp_path / "projects"
+    parent.mkdir()
+
+    result = run_init(
+        tmp_path,
+        "guarded",
+        "--parent",
+        str(parent),
+        "--git",
+        umask=0o002,
+    )
+
+    project = parent / "guarded"
+    guarded_paths = [
+        project,
+        project / ".roundtable",
+        project / ".roundtable" / "agents.yaml",
+        project / ".roundtable" / ".gitignore",
+        project / ".roundtable" / "project.json",
+    ]
+    assert result.returncode == 0, result.stderr
+    for path in guarded_paths:
+        assert path.exists()
+        assert path.stat().st_mode & (stat.S_IWGRP | stat.S_IWOTH) == 0
 
 
 def test_git_and_no_git_are_mutually_exclusive(tmp_path):
@@ -251,6 +282,52 @@ def test_here_git_flag_does_not_commit_inside_existing_repository(tmp_path):
     assert log.stdout.strip() == "0"
 
 
+def test_git_routing_environment_cannot_redirect_initialization(tmp_path):
+    project = tmp_path / "target"
+    project.mkdir()
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main"],
+        cwd=decoy,
+        check=True,
+    )
+
+    result = run_init(
+        tmp_path,
+        "--here",
+        "--git",
+        cwd=project,
+        env_extra={
+            "GIT_DIR": str(decoy / ".git"),
+            "GIT_WORK_TREE": str(project),
+            "GIT_INDEX_FILE": str(decoy / ".git" / "index"),
+        },
+    )
+    target_top = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=project,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    decoy_count = subprocess.run(
+        ["git", "rev-list", "--all", "--count"],
+        cwd=decoy,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "git: initialized with an initial commit" in result.stdout
+    assert target_top.returncode == 0, target_top.stderr
+    assert Path(target_top.stdout.strip()) == project.resolve()
+    assert decoy_count.stdout.strip() == "0"
+
+
 def test_here_preflight_conflict_leaves_directory_untouched(tmp_path):
     project = tmp_path / "conflicted"
     project.mkdir()
@@ -265,6 +342,22 @@ def test_here_preflight_conflict_leaves_directory_untouched(tmp_path):
     assert "expected a regular file" in result.stderr
     assert before == after
     assert (project / "AGENTS.md").read_text() == "user-owned\n"
+    assert not (project / ".roundtable").exists()
+
+
+def test_here_group_writable_root_fails_before_mutation_with_remedy(tmp_path):
+    project = tmp_path / "shared"
+    project.mkdir(mode=0o775)
+    project.chmod(0o775)
+    user_file = project / "notes.txt"
+    user_file.write_text("unchanged\n")
+
+    result = run_init(tmp_path, "--here", cwd=project)
+
+    assert result.returncode != 0
+    assert "group/other writable" in result.stderr
+    assert f"chmod go-w {project}" in result.stderr
+    assert user_file.read_text() == "unchanged\n"
     assert not (project / ".roundtable").exists()
 
 

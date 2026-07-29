@@ -90,13 +90,16 @@ project-identity requirement and is initialized only with `--git`. The
 unified `roundtable` command exposes this as the default interactive journey;
 the individual harness launchers retain their scriptable entry points.
 
-Generated project identity is repository-relative: `agents.yaml` stores
+Generated project configuration is repository-relative: `agents.yaml` stores
 `project: "."`, which consumers resolve against the directory that owns the
 configuration. This keeps a cloned project portable while retaining support
-for older absolute-path configs. Runtime mailboxes stay project-local and
-ignored. The Claude project-skill bridge is a portable relative symlink and is
-part of the optional initial commit; an existing user-managed skills directory
-is preserved instead.
+for older absolute-path configs; it is not the durable project identity. Each
+registered worktree instead has an ignored `.roundtable/project.json` UUID
+witness, and `~/.roundtable/projects.yaml` maps that stable UUID to its mutable
+path, derived group, status, and selected mailbox layout. New and explicitly
+upgraded entries start with the project-local layout. The Claude project-skill
+bridge is a portable relative symlink and is part of the optional initial
+commit; an existing user-managed skills directory is preserved instead.
 
 ## P0 state placement and session ownership
 
@@ -105,8 +108,9 @@ host:
 
 | State | Location | Lifetime |
 | --- | --- | --- |
-| Agent identities and project configuration | `<project>/.roundtable/` | Durable project state |
-| Inbox `new/`, `cur/`, and `tmp/`; message ledger and acknowledgements | `<project>/.roundtable/` | Durable delivery state |
+| Agent identities and portable project configuration | `<project>/.roundtable/agents.yaml` | Durable project state |
+| Stable worktree identity and registry metadata | ignored `<project>/.roundtable/project.json` plus `~/.roundtable/projects.yaml` | Durable worktree and host state |
+| Inbox `new/`, `cur/`, and `tmp/`; message ledger and acknowledgements | Registry-selected local or central mail root (new/upgraded entries initially use `<project>/.roundtable/`) | Durable delivery state |
 | Current session lease, owner PID and process fingerprint, wake-adapter PID, activity and heartbeat | `~/.roundtable/.runtime/` | Host-local ephemeral state |
 | Optional terminal topology, navigation handles, and adapter diagnostics | `~/.roundtable/.runtime/adapters/` | Host-local ephemeral state |
 

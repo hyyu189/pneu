@@ -10,9 +10,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
 ISOLATED_BIN = ROOT / "tests" / "fixtures" / "bin"
+sys.path.insert(0, str(BIN))
+
+import _rtlib  # noqa: E402
 
 
-def isolated_env():
+_PROJECT_REGISTRIES = {}
+
+
+def isolated_env(*, cwd=None, env=None):
     merged = os.environ.copy()
     merged.update(
         {
@@ -25,13 +31,28 @@ def isolated_env():
             "RT_PROJECTS_FILE": "/dev/null",
         }
     )
+    if env:
+        merged.update(env)
+    if not (env and "RT_PROJECTS_FILE" in env):
+        candidates = [
+            (env or {}).get("ROUNDTABLE_PROJECT_DIR"),
+            (env or {}).get("RT_FALLBACK_PROJECT"),
+            cwd,
+        ]
+        for raw_candidate in candidates:
+            if not raw_candidate:
+                continue
+            candidate = Path(raw_candidate).expanduser().resolve()
+            for root in (candidate, *candidate.parents):
+                registry = _PROJECT_REGISTRIES.get(root)
+                if registry is not None:
+                    merged["RT_PROJECTS_FILE"] = str(registry)
+                    return merged
     return merged
 
 
 def run_tool(name, *args, cwd=None, env=None):
-    merged = isolated_env()
-    if env:
-        merged.update(env)
+    merged = isolated_env(cwd=cwd or ROOT, env=env)
     return subprocess.run(
         [sys.executable, str(BIN / name), *args],
         cwd=cwd or ROOT,
@@ -44,9 +65,7 @@ def run_tool(name, *args, cwd=None, env=None):
 
 
 def run_executable(name, *args, cwd=None, env=None):
-    merged = isolated_env()
-    if env:
-        merged.update(env)
+    merged = isolated_env(cwd=cwd or ROOT, env=env)
     return subprocess.run(
         [str(BIN / name), *args],
         cwd=cwd or ROOT,
@@ -102,6 +121,15 @@ project: {path}
     (state / "locks").mkdir()
     if runtime is not None:
         (state / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
+    registry = path.parent / "projects.yaml"
+    _rtlib.register_project(path, path=registry)
+    mailbox = _rtlib.resolve_project_mailbox(path, registry_path=registry)
+    assert mailbox.layout == "local"
+    assert mailbox.state_dir == state
+    assert mailbox.inbox_dir == state / "inbox"
+    assert mailbox.messages_dir == state / "messages"
+    assert mailbox.locks_dir == state / "locks"
+    _PROJECT_REGISTRIES[path.resolve()] = registry
     return state
 
 
@@ -381,6 +409,7 @@ def say_project(tmp_path, *, target_status="idle"):
     trace_dir.mkdir()
     env["CMUX_FAKE_TRACE_DIR"] = str(trace_dir)
     env["RT_FROM"] = "codex"
+    env["RT_PROJECTS_FILE"] = str(_PROJECT_REGISTRIES[project.resolve()])
     return project, state, env, trace_dir
 
 
@@ -967,7 +996,7 @@ def test_rt_say_concurrent_same_target_delivers_both_once(tmp_path):
 
 def test_rt_say_contended_explicit_legacy_lock_fails_fast_without_mail(tmp_path):
     project, state, env, trace_dir = say_project(tmp_path)
-    env["CMUX_FAKE_SEND_DELAY"] = "0.30"
+    env["CMUX_FAKE_SEND_DELAY"] = "1.00"
     env["RT_FROM"] = "codex"
     process_env = os.environ.copy()
     process_env.update(env)

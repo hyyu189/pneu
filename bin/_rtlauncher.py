@@ -11,10 +11,13 @@ import uuid
 from pathlib import Path
 
 from _rtlib import (
+    ProjectRegistryError,
+    active_project_entries,
     emit_registry_warnings,
     is_project_root,
     load_agents_doc,
-    load_project_registry,
+    load_project_registry_strict,
+    resolve_project_mailbox_checked,
 )
 from _rtruntime import (
     RuntimeStateError,
@@ -401,6 +404,19 @@ def _choose_git(stdin, stderr, harness: str) -> bool:
     return answer in {"y", "yes"}
 
 
+def _preflight_launch_project(root: Path, harness: str) -> Path:
+    """Validate durable identity and layout before any seat can be claimed."""
+
+    try:
+        mailbox = resolve_project_mailbox_checked(root)
+    except ProjectRegistryError as error:
+        raise SelectionError(
+            f"rt-{harness}: project registration preflight failed for "
+            f"{root}: {error}"
+        ) from error
+    return mailbox.project_root
+
+
 def choose_launch_cwd(
     harness: str,
     *,
@@ -415,15 +431,23 @@ def choose_launch_cwd(
     stderr = stderr or sys.stderr
     anchored = project_at_or_above(cwd)
     if anchored is not None:
-        return anchored
+        return _preflight_launch_project(anchored, harness)
     if not stdin.isatty():
         raise SelectionError(
             f"rt-{harness}: not in a Roundtable project and stdin is not a TTY"
         )
 
-    entries, warnings = load_project_registry()
+    try:
+        entries, warnings = load_project_registry_strict()
+    except ProjectRegistryError as error:
+        raise SelectionError(
+            f"rt-{harness}: invalid project registry: {error}"
+        ) from error
     emit_registry_warnings(warnings, stream=stderr, tool=f"rt-{harness}")
-    roots = [entry["root"] for entry in entries]
+    roots = [
+        entry["root"]
+        for entry in active_project_entries(entries, available_only=True)
+    ]
     print("Roundtable projects:", file=stderr)
     for index, root in enumerate(roots, 1):
         print(f"  {index}) {root}", file=stderr)
@@ -452,7 +476,7 @@ def choose_launch_cwd(
     except ValueError as error:
         raise SelectionError(f"rt-{harness}: invalid selection: {raw!r}") from error
     if 1 <= selected <= len(roots):
-        return roots[selected - 1]
+        return _preflight_launch_project(roots[selected - 1], harness)
     if setup_here_index is not None and selected == setup_here_index:
         init = Path(__file__).resolve().parent / "roundtable-init"
         command = [str(init), "--here"]
@@ -467,7 +491,7 @@ def choose_launch_cwd(
             raise SelectionError(
                 f"rt-{harness}: roundtable-init did not configure {cwd}"
             )
-        return cwd
+        return _preflight_launch_project(cwd, harness)
     if selected == create_index:
         name = _read_choice(stdin, stderr, "New project name: ")
         if not name:
@@ -486,7 +510,7 @@ def choose_launch_cwd(
             raise SelectionError(
                 f"rt-{harness}: roundtable-init did not create {root}"
             )
-        return root
+        return _preflight_launch_project(root, harness)
     if unanchored_index is not None and selected == unanchored_index:
         print(
             f"rt-{harness}: advisory: starting without a Roundtable project anchor from {cwd}",

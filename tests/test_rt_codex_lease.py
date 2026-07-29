@@ -17,6 +17,7 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtruntime
+from _rtlib import register_project, resolve_project_mailbox
 
 
 def load_script(name: str, module_name: str):
@@ -29,6 +30,11 @@ def load_script(name: str, module_name: str):
 
 
 wake = load_script("rt-codex-wake", "rt_codex_lease_wake")
+
+
+@pytest.fixture(autouse=True)
+def isolate_project_registry(tmp_path, monkeypatch):
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(tmp_path / "projects.yaml"))
 
 
 def write_project(path: Path, *, agent_id: str = "codex") -> Path:
@@ -44,6 +50,7 @@ def write_project(path: Path, *, agent_id: str = "codex") -> Path:
         "    instances:\n"
         f"      - id: {agent_id}\n"
     )
+    register_project(project)
     return project
 
 
@@ -435,7 +442,7 @@ def test_custom_codex_instance_scans_and_wakes_its_own_mailbox(
     selected_thread = thread(project)
     store = wake.StateStore(tmp_path / "wake-state.json")
     store.bind(project, selected_thread, lease=token)
-    inbox = project / ".roundtable" / "inbox" / agent_id / "new"
+    inbox = resolve_project_mailbox(project).inbox_dir / agent_id / "new"
     inbox.mkdir(parents=True)
     message_id = "20260719T120000Z-claude-to-codex-review-1"
     (inbox / f"{message_id}.md").write_text(
@@ -458,7 +465,7 @@ def test_binding_agent_change_after_scan_requires_rescan_without_wake(
     store = wake.StateStore(tmp_path / "wake-state.json")
     old_thread = thread(project)
     store.bind(project, old_thread)
-    inbox = project / ".roundtable" / "inbox" / "codex" / "new"
+    inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
     inbox.mkdir(parents=True)
     message_id = "20260719T120001Z-claude-to-codex-1"
     (inbox / f"{message_id}.md").write_text(

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Wait for project mail while keeping host-local wake state fenced.
+"""Wait for resolved project mail while keeping host-local wake state fenced.
 
-The durable maildir remains under ``<project>/.roundtable/inbox``.  Process
-identity, activity, heartbeat, and adaptive-backoff state belong to the
-currently claimed host-local seat in ``RT_RUNTIME_DIR``.
+The registry-pinned mailbox layout owns durable mail. Process identity,
+activity, heartbeat, and adaptive-backoff state belong to the currently
+claimed host-local seat in ``RT_RUNTIME_DIR``.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from _rtlib import is_project_root
+from _rtlib import is_project_root, resolve_project_mailbox
 from _rtruntime import (
     FenceRejected,
     RuntimeStateError,
@@ -204,7 +204,7 @@ def run(
     if claude_hook and watcher_is_live(lease):
         return 0
 
-    inbox = project / ".roundtable" / "inbox" / agent
+    inbox = resolve_project_mailbox(project).inbox_dir / agent
     new_dir = inbox / "new"
     for path in (new_dir, inbox / "cur", inbox / "tmp"):
         path.mkdir(parents=True, exist_ok=True)
@@ -299,6 +299,7 @@ def run(
                 wake_attempts=attempts,
                 expected_watcher_pid=watcher_pid,
             )
+            print(f"rt-wait-inbox: new-dir {json.dumps(str(new_dir))}")
             print(f"rt-wait-inbox: mail after {ticks * POLL_SECONDS}s:")
             print("\n".join(mail))
             if claude_hook:

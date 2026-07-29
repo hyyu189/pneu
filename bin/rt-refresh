@@ -16,6 +16,7 @@ from _rtlib import (
     caller_workspace_ref,
     find_project_root,
     load_agents_doc,
+    resolve_project_mailbox,
     workspace_by_id,
 )
 
@@ -23,9 +24,10 @@ TOOL_DIR = Path(__file__).resolve().parent
 
 
 ROOT = find_project_root("rt-refresh", allow_cmux_workspace=True)
+MAILBOX = resolve_project_mailbox(ROOT)
 STATE_DIR = ROOT / ".roundtable"
 RUNTIME = STATE_DIR / "runtime.json"
-LOCK_DIR = STATE_DIR / "locks"
+LOCK_DIR = MAILBOX.locks_dir
 LEDGER_LOCK = LOCK_DIR / "ledger.lock"
 
 

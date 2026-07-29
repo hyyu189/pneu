@@ -8,7 +8,7 @@ import os
 import sys
 from pathlib import Path
 
-from _rtlib import is_project_root, load_agents_doc
+from _rtlib import is_project_root, load_agents_doc, resolve_project_mailbox
 from _rtruntime import (
     FenceRejected,
     RuntimeStateError,
@@ -125,7 +125,7 @@ def run(agent: str, hook_input: str) -> int:
     load_validated_lease(project, agent, session_id, revision)
     update_activity(project, agent, session_id, revision)
 
-    inbox = project / ".roundtable" / "inbox" / agent
+    inbox = resolve_project_mailbox(project).inbox_dir / agent
     new_dir = inbox / "new"
     try:
         undrained = sorted(

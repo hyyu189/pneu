@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from _rtlib import (
@@ -11,7 +12,9 @@ from _rtlib import (
     load_project_registry,
     projects_registry_path,
     register_project,
+    resolve_project_mailbox,
     unregister_project,
+    upgrade_project_registry,
 )
 
 
@@ -24,10 +27,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="registry path (default: ~/.roundtable/projects.yaml)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("list")
-    add = subparsers.add_parser("add")
+    subparsers.add_parser("list", help="list registry rows and diagnostics")
+    subparsers.add_parser(
+        "upgrade",
+        help="explicitly back up and upgrade a v1 registry to v2",
+    )
+    add = subparsers.add_parser("add", help="register one project")
     add.add_argument("root", type=Path)
-    remove = subparsers.add_parser("rm")
+    resolve = subparsers.add_parser(
+        "resolve",
+        help="print the UUID-pinned mailbox as diagnostic JSON",
+    )
+    resolve.add_argument("root", type=Path)
+    remove = subparsers.add_parser("rm", help="tombstone one project")
     remove.add_argument("root", type=Path)
     return parser
 
@@ -39,16 +51,48 @@ def main() -> int:
         emit_registry_warnings(warnings, tool="rt-projects")
         for entry in entries:
             registered_at = entry.get("registered_at") or "unknown"
-            print(f"{entry['root']}\t{registered_at}")
+            project_uuid = entry.get("uuid") or "legacy"
+            status = entry.get("status") or "active"
+            layout = entry.get("layout") or "local"
+            print(
+                f"{entry['root']}\t{registered_at}\t{project_uuid}\t"
+                f"{status}\t{layout}"
+            )
+        return 0
+    if args.command == "upgrade":
+        changed = upgrade_project_registry(args.registry)
+        print(f"{'upgraded' if changed else 'already current'} {args.registry}")
         return 0
     if args.command == "add":
+        changed = register_project(args.root, args.registry)
         root = args.root.expanduser().resolve()
-        changed = register_project(root, args.registry)
         print(f"{'added' if changed else 'already registered'} {root}")
         return 0
+    if args.command == "resolve":
+        mailbox = resolve_project_mailbox(
+            args.root,
+            registry_path=args.registry,
+        )
+        print(
+            json.dumps(
+                {
+                    "uuid": mailbox.project_uuid,
+                    "project_root": str(mailbox.project_root),
+                    "layout": mailbox.layout,
+                    "state_dir": str(mailbox.state_dir),
+                    "mail_root": str(mailbox.mail_root),
+                    "inbox_dir": str(mailbox.inbox_dir),
+                    "messages_dir": str(mailbox.messages_dir),
+                    "locks_dir": str(mailbox.locks_dir),
+                    "layout_lock": str(mailbox.layout_lock),
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    changed = unregister_project(args.root, args.registry)
     root = args.root.expanduser().resolve()
-    changed = unregister_project(root, args.registry)
-    print(f"{'removed' if changed else 'not registered'} {root}")
+    print(f"{'tombstoned' if changed else 'not registered'} {root}")
     return 0 if changed else 1
 
 

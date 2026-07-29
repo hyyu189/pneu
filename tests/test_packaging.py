@@ -14,13 +14,16 @@ from pathlib import Path
 
 import pytest
 
-from roundtable_packaging import MANAGED_ASSETS, MANAGED_HELPERS, VERSION
-from roundtable_packaging import cli as packaging_cli
-
-
 ROOT = Path(__file__).resolve().parents[1]
+BIN = ROOT / "bin"
 INSTALL = ROOT / "scripts" / "install.sh"
 UNINSTALL = ROOT / "scripts" / "uninstall.sh"
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(BIN))
+
+from _rtlib import resolve_project_mailbox
+from roundtable_packaging import MANAGED_ASSETS, MANAGED_HELPERS, VERSION
+from roundtable_packaging import cli as packaging_cli
 
 
 def packaging_env(home: Path) -> dict[str, str]:
@@ -346,7 +349,11 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
     assert initialized.returncode == 0, initialized.stderr
 
     project = project_parent / "demo"
-    inbox = project / ".roundtable" / "inbox" / "claude" / "new"
+    mailbox = resolve_project_mailbox(
+        project,
+        registry_path=prefix / "projects.yaml",
+    )
+    inbox = mailbox.inbox_dir / "claude" / "new"
     inbox.mkdir(parents=True)
     mail = inbox / "keep.md"
     mail.write_text("[codex→claude fyi id=keep] preserve me\n")

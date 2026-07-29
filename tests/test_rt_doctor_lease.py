@@ -28,6 +28,14 @@ def load_script(name: str, module_name: str):
 
 doctor = load_script("rt-doctor", "rt_doctor_lease")
 import _rtruntime
+import _rtlib
+
+
+@pytest.fixture(autouse=True)
+def isolated_project_registry(tmp_path, monkeypatch) -> Path:
+    registry = tmp_path / "projects.json"
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
+    return registry
 
 
 def write_project(path: Path, agents: list[tuple[str, str]]) -> Path:
@@ -53,21 +61,13 @@ def write_project(path: Path, agents: list[tuple[str, str]]) -> Path:
 
 
 def write_registry(path: Path, projects: list[Path]) -> Path:
-    path.write_text(
-        json.dumps(
-            {
-                "schema": "roundtable.projects.v1",
-                "projects": [
-                    {
-                        "root": str(project),
-                        "registered_at": "2026-07-19T00:00:00Z",
-                    }
-                    for project in projects
-                ],
-            }
+    assert path.resolve() == Path(os.environ["RT_PROJECTS_FILE"]).resolve()
+    for project in projects:
+        _rtlib.register_project(
+            project,
+            path=path,
+            registered_at="2026-07-19T00:00:00Z",
         )
-        + "\n"
-    )
     return path
 
 
@@ -185,13 +185,9 @@ def test_doctor_reports_every_configured_seat_and_legacy_markers(
     project = write_project(tmp_path / "project", configured)
     registry = write_registry(tmp_path / "projects.json", [project])
     state_file = write_wake_state(tmp_path / "wake-state.json")
-    marker = (
-        project
-        / ".roundtable"
-        / "inbox"
-        / "healthy"
-        / ".armed-123"
-    )
+    mailbox = _rtlib.resolve_project_mailbox(project, registry)
+    assert mailbox.layout == "local"
+    marker = mailbox.inbox_dir / "healthy" / ".armed-123"
     marker.parent.mkdir(parents=True)
     marker.write_text("")
     statuses = {
@@ -230,6 +226,55 @@ def test_doctor_reports_every_configured_seat_and_legacy_markers(
     assert f"WARN legacy-tripwire-marker: {marker}" in output
     assert "tripwire-anchor" not in output
     assert report.failed
+
+
+def test_doctor_distinguishes_registry_tombstone_and_orphan(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    tombstoned = write_project(
+        tmp_path / "tombstoned", [("claude", "claude-code")]
+    )
+    orphan = write_project(
+        tmp_path / "orphan", [("hermes", "hermes-agent")]
+    )
+    registry = write_registry(
+        tmp_path / "projects.json",
+        [tombstoned, orphan],
+    )
+    tombstoned_uuid = _rtlib._read_project_identity(tombstoned)
+    orphan_uuid = _rtlib._read_project_identity(orphan)
+    assert _rtlib.unregister_project(tombstoned, path=registry)
+    orphan.rename(tmp_path / "orphan-archived")
+    state_file = write_wake_state(tmp_path / "wake-state.json")
+    monkeypatch.setattr(
+        doctor,
+        "inspect_project_seats",
+        lambda _report, _registered: ({}, []),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "report_legacy_markers",
+        lambda *_args, **_kwargs: None,
+    )
+    report = doctor.Report()
+
+    doctor.project_health_checks(
+        report,
+        registry,
+        state_file,
+        tmp_path / "app.sock",
+        rpc_ok=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "WARN registry-tombstone:" in output
+    assert f"uuid={tombstoned_uuid}" in output
+    assert f"last_path={tombstoned}" in output
+    assert "WARN registry-orphan:" in output
+    assert f"uuid={orphan_uuid}" in output
+    assert f"path={orphan}" in output
 
 
 def test_doctor_checks_owner_and_watcher_process_anchors(

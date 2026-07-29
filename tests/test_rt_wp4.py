@@ -78,10 +78,15 @@ def write_project(path: Path, *, codex: bool = True) -> Path:
     return root
 
 
-def write_registry(path: Path, entries: list[dict]) -> Path:
+def write_registry(
+    path: Path,
+    entries: list[dict],
+    *,
+    schema: str = _rtlib.PROJECTS_SCHEMA,
+) -> Path:
     path.write_text(
         json.dumps(
-            {"schema": _rtlib.PROJECTS_SCHEMA, "projects": entries}, indent=2
+            {"schema": schema, "projects": entries}, indent=2
         )
         + "\n"
     )
@@ -89,7 +94,12 @@ def write_registry(path: Path, entries: list[dict]) -> Path:
 
 
 def add_mail(project: Path, msg_id: str = "20260717T050000Z-claude-to-codex-1"):
-    inbox = project / ".roundtable" / "inbox" / "codex" / "new"
+    _rtlib.register_project(project)
+    inbox = (
+        _rtlib.resolve_project_mailbox(project).inbox_dir
+        / "codex"
+        / "new"
+    )
     inbox.mkdir(parents=True, exist_ok=True)
     mail = inbox / f"{msg_id}.md"
     mail.write_text(f"[CLAUDE→CODEX directive id={msg_id}] test\n")
@@ -155,6 +165,9 @@ def test_rt_projects_add_list_rm_and_canonical_idempotence(tmp_path):
     registry = tmp_path / "projects.yaml"
 
     added = run_tool(
+        "rt-projects", "--registry", str(registry), "add", str(project)
+    )
+    rejected_alias = run_tool(
         "rt-projects", "--registry", str(registry), "add", str(alias)
     )
     duplicate = run_tool(
@@ -164,6 +177,8 @@ def test_rt_projects_add_list_rm_and_canonical_idempotence(tmp_path):
 
     assert added.returncode == 0, added.stderr
     assert f"added {project}" in added.stdout
+    assert rejected_alias.returncode != 0
+    assert "symbolic-link project root" in rejected_alias.stderr
     assert duplicate.returncode == 0, duplicate.stderr
     assert f"already registered {project}" in duplicate.stdout
     assert listed.returncode == 0, listed.stderr
@@ -171,14 +186,19 @@ def test_rt_projects_add_list_rm_and_canonical_idempotence(tmp_path):
         str(project)
     ]
 
-    removed = run_tool(
+    rejected_remove_alias = run_tool(
         "rt-projects", "--registry", str(registry), "rm", str(alias)
+    )
+    removed = run_tool(
+        "rt-projects", "--registry", str(registry), "rm", str(project)
     )
     absent = run_tool(
         "rt-projects", "--registry", str(registry), "rm", str(project)
     )
+    assert rejected_remove_alias.returncode != 0
+    assert "symbolic-link project root" in rejected_remove_alias.stderr
     assert removed.returncode == 0, removed.stderr
-    assert f"removed {project}" in removed.stdout
+    assert f"tombstoned {project}" in removed.stdout
     assert absent.returncode == 1
     assert f"not registered {project}" in absent.stdout
 
@@ -193,6 +213,7 @@ def test_rt_projects_list_warns_and_preserves_invalid_entries(tmp_path):
             {"root": str(stale), "registered_at": "2026-07-17T00:01:00Z"},
             {"root": "relative/project", "registered_at": "2026-07-17T00:02:00Z"},
         ],
+        schema=_rtlib.LEGACY_PROJECTS_SCHEMA,
     )
     before = registry.read_text()
 
@@ -202,7 +223,7 @@ def test_rt_projects_list_warns_and_preserves_invalid_entries(tmp_path):
     assert listed.stdout.split("\t", 1)[0] == str(project)
     assert "registry warning" in listed.stderr
     assert str(stale) in listed.stderr
-    assert "root is not absolute" in listed.stderr
+    assert "path is not absolute" in listed.stderr
     assert registry.read_text() == before
 
 
@@ -231,8 +252,13 @@ def test_roundtable_init_registers_via_rt_projects_file(tmp_path):
     assert entries[0]["registered_at"].endswith("Z")
 
 
-def test_launcher_project_ancestor_normalizes_to_root_even_without_tty(tmp_path):
+def test_launcher_project_ancestor_normalizes_to_root_even_without_tty(
+    tmp_path, monkeypatch
+):
     project = write_project(tmp_path / "project")
+    registry = tmp_path / "projects.yaml"
+    _rtlib.register_project(project, registry)
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
     nested = project / "nested" / "deeper"
     nested.mkdir(parents=True)
 
@@ -241,6 +267,26 @@ def test_launcher_project_ancestor_normalizes_to_root_even_without_tty(tmp_path)
     )
 
     assert selected == project
+
+
+def test_launcher_anchored_project_fails_before_launch_when_unregistered(
+    tmp_path,
+    monkeypatch,
+):
+    project = write_project(tmp_path / "project")
+    registry = write_registry(tmp_path / "projects.yaml", [])
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
+
+    with pytest.raises(
+        _rtlauncher.SelectionError,
+        match="project registration preflight failed",
+    ):
+        _rtlauncher.choose_launch_cwd(
+            "codex",
+            cwd=project,
+            stdin=io.StringIO(),
+            stderr=io.StringIO(),
+        )
 
 
 def test_launcher_outside_project_non_tty_fails_without_prompt(tmp_path):
@@ -280,7 +326,8 @@ def test_launcher_menu_creates_then_selects_project(tmp_path, monkeypatch):
 
     def fake_init(command, check):
         calls.append((command, check))
-        write_project(tmp_path / "new-project")
+        project = write_project(tmp_path / "new-project")
+        _rtlib.register_project(project, registry)
         return SimpleNamespace(returncode=0)
 
     selected = _rtlauncher.choose_launch_cwd(
@@ -313,7 +360,8 @@ def test_launcher_menu_only_opts_into_git_after_yes(tmp_path, monkeypatch):
 
     def fake_init(command, check):
         calls.append((command, check))
-        write_project(tmp_path / "new-project")
+        project = write_project(tmp_path / "new-project")
+        _rtlib.register_project(project, registry)
         return SimpleNamespace(returncode=0)
 
     selected = _rtlauncher.choose_launch_cwd(
@@ -366,6 +414,7 @@ def test_launcher_menu_can_safely_set_up_the_current_folder(
     def fake_init(command, cwd, check):
         calls.append((command, cwd, check))
         write_project(cwd)
+        _rtlib.register_project(cwd, registry)
         return SimpleNamespace(returncode=0)
 
     selected = _rtlauncher.choose_launch_cwd(
@@ -598,6 +647,28 @@ def test_bridge_default_unbound_keeps_mail_without_rpc_or_turn(tmp_path):
     assert mail.is_file()
 
 
+def test_bridge_isolates_bad_project_identity_and_continues(
+    tmp_path, monkeypatch
+):
+    registry = tmp_path / "projects.yaml"
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
+    bad = write_project(tmp_path / "bad")
+    good = write_project(tmp_path / "good")
+    _rtlib.register_project(bad, registry)
+    _rtlib.register_project(good, registry)
+    _rtlib.project_identity_path(bad).write_text("{not-json\n")
+    store = wake.StateStore(tmp_path / "wake-state.json")
+    client = FakeClient(codex_thread(good))
+
+    results = wake.WakeBridge(client, [bad, good], store).step()
+
+    assert len(results) == 2
+    assert not results[0].ok
+    assert "mailbox resolution failed" in results[0].detail
+    assert results[1].ok and results[1].detail == "empty"
+    assert store.project_state(bad)["phase"] == "IDENTITY_ERROR"
+
+
 def test_bridge_auto_discover_is_explicit_opt_in(tmp_path):
     project = write_project(tmp_path / "project")
     add_mail(project)
@@ -653,21 +724,11 @@ def test_bridge_discovers_watch_roots_from_registry_only(
 ):
     codex_project = write_project(tmp_path / "codex")
     non_codex_project = write_project(tmp_path / "claude", codex=False)
-    stale = tmp_path / "stale"
-    registry = write_registry(
-        tmp_path / "projects.yaml",
-        [
-            {
-                "root": str(codex_project),
-                "registered_at": "2026-07-17T00:00:00Z",
-            },
-            {
-                "root": str(non_codex_project),
-                "registered_at": "2026-07-17T00:01:00Z",
-            },
-            {"root": str(stale), "registered_at": "2026-07-17T00:02:00Z"},
-        ],
-    )
+    stale = write_project(tmp_path / "stale")
+    registry = tmp_path / "projects.yaml"
+    for project in (codex_project, non_codex_project, stale):
+        _rtlib.register_project(project, registry)
+    (stale / ".roundtable" / "agents.yaml").unlink()
     monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
 
     projects = wake.discover_projects([])
@@ -679,15 +740,17 @@ def test_bridge_discovers_watch_roots_from_registry_only(
 def test_doctor_reports_tripwire_and_codex_wrong_anchor(tmp_path, monkeypatch, capsys):
     project = write_project(tmp_path / "registered")
     wrong = write_project(tmp_path / "wrong")
-    marker = project / ".roundtable" / "inbox" / "claude" / ".armed-123"
+    registry = tmp_path / "projects.yaml"
+    _rtlib.register_project(project, registry)
+    marker = (
+        _rtlib.resolve_project_mailbox(
+            project, registry_path=registry
+        ).inbox_dir
+        / "claude"
+        / ".armed-123"
+    )
     marker.parent.mkdir(parents=True)
     marker.write_text("")
-    registry = write_registry(
-        tmp_path / "projects.yaml",
-        [
-            {"root": str(project), "registered_at": "2026-07-17T00:00:00Z"}
-        ],
-    )
     state_file = tmp_path / "wake-state.json"
     state_file.write_text(
         json.dumps(
@@ -731,7 +794,7 @@ def test_doctor_reports_tripwire_and_codex_wrong_anchor(tmp_path, monkeypatch, c
 
     output = capsys.readouterr().out
     assert report.failed
-    assert f"OK registry: {project}" in output
+    assert f"path={project}" in output
     assert f"WARN legacy-tripwire-marker: {marker}" in output
     assert "tripwire-anchor" not in output
     assert f"FAIL codex-anchor: thread=thread-1 cwd={wrong} expected={project}" in output
@@ -770,3 +833,26 @@ def test_startup_advisory_ignores_unregistered_peer_projects(tmp_path):
         == registered
     )
     assert advisory.peer_project(caller, listing, "surface:self", set()) is None
+
+
+def test_startup_advisory_silences_malformed_registry(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("CMUX_SURFACE_ID", "surface:self")
+    monkeypatch.setattr(advisory, "project_at_or_above", lambda _cwd: None)
+
+    def malformed_registry():
+        raise _rtlib.ProjectRegistryError("malformed fixture")
+
+    monkeypatch.setattr(
+        advisory, "load_project_registry_strict", malformed_registry
+    )
+    monkeypatch.setattr(
+        advisory,
+        "command_json",
+        lambda *_args, **_kwargs: pytest.fail(
+            "malformed registry must suppress advisory before cmux"
+        ),
+    )
+
+    assert advisory.main() == 0

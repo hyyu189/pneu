@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
+from _rtlib import register_project
+
 
 def load_script():
     loader = importlib.machinery.SourceFileLoader(
@@ -145,6 +147,7 @@ def test_anchored_project_goes_directly_to_configured_seat_selector(
             "hermes": ("hermes-agent", ["hermes"]),
         },
     )
+    register_project(project, isolated_registry)
     nested = project / "nested"
     nested.mkdir()
     stderr = io.StringIO()
@@ -174,6 +177,31 @@ def test_anchored_project_goes_directly_to_configured_seat_selector(
     assert exec_calls == [(str(expected), [str(expected)])]
 
 
+def test_anchored_unregistered_project_fails_before_seat_setup(
+    tmp_path,
+    isolated_registry,
+    fake_commands,
+):
+    project = write_project(tmp_path / "project")
+    stderr = io.StringIO()
+    exec_calls = []
+
+    result = roundtable.main(
+        [],
+        cwd=project,
+        home=tmp_path / "home",
+        stdin=TTYInput("1\n"),
+        stderr=stderr,
+        environ={},
+        exec_runner=lambda *args: exec_calls.append(args),
+        chdir_runner=lambda _: None,
+    )
+
+    assert result == 2
+    assert "project registration preflight failed" in stderr.getvalue()
+    assert exec_calls == []
+
+
 def test_onboarding_can_safely_set_up_current_folder_without_git(
     tmp_path, isolated_registry, fake_commands
 ):
@@ -186,6 +214,7 @@ def test_onboarding_can_safely_set_up_current_folder_without_git(
         init_calls.append((command, cwd, check))
         assert "--git" not in command
         write_project(cwd)
+        register_project(cwd, isolated_registry)
         return SimpleNamespace(returncode=0)
 
     environment = {}
@@ -225,6 +254,7 @@ def test_onboarding_can_set_up_another_existing_folder(
     def fake_init(command, cwd, check):
         init_calls.append((command, cwd, check))
         write_project(cwd)
+        register_project(cwd, isolated_registry)
         return SimpleNamespace(returncode=0)
 
     result = roundtable.main(
@@ -257,7 +287,8 @@ def test_onboarding_creates_new_folder_and_only_passes_git_after_yes(
     def fake_init(command, cwd, check):
         init_calls.append((command, cwd, check))
         parent = Path(command[command.index("--parent") + 1])
-        write_project(parent / command[1])
+        project = write_project(parent / command[1])
+        register_project(project, isolated_registry)
         return SimpleNamespace(returncode=0)
 
     result = roundtable.main(
@@ -348,19 +379,10 @@ def test_registered_project_can_be_selected_without_reinitializing(
     tmp_path, isolated_registry, fake_commands
 ):
     project = write_project(tmp_path / "registered")
-    isolated_registry.write_text(
-        json.dumps(
-            {
-                "schema": "roundtable.projects.v1",
-                "projects": [
-                    {
-                        "root": str(project),
-                        "registered_at": "2026-07-19T00:00:00Z",
-                    }
-                ],
-            }
-        )
-        + "\n"
+    register_project(
+        project,
+        isolated_registry,
+        registered_at="2026-07-19T00:00:00Z",
     )
     cwd = tmp_path / "outside"
     cwd.mkdir()
@@ -387,23 +409,15 @@ def test_registered_projects_are_grouped_in_a_second_level_menu(
 ):
     first = write_project(tmp_path / "first")
     second = write_project(tmp_path / "second")
-    isolated_registry.write_text(
-        json.dumps(
-            {
-                "schema": "roundtable.projects.v1",
-                "projects": [
-                    {
-                        "root": str(first),
-                        "registered_at": "2026-07-19T00:00:00Z",
-                    },
-                    {
-                        "root": str(second),
-                        "registered_at": "2026-07-20T00:00:00Z",
-                    },
-                ],
-            }
-        )
-        + "\n"
+    register_project(
+        first,
+        isolated_registry,
+        registered_at="2026-07-19T00:00:00Z",
+    )
+    register_project(
+        second,
+        isolated_registry,
+        registered_at="2026-07-20T00:00:00Z",
     )
     cwd = tmp_path / "outside"
     cwd.mkdir()
@@ -430,19 +444,10 @@ def test_registered_project_second_level_rejects_zero(
     tmp_path, isolated_registry
 ):
     project = write_project(tmp_path / "registered")
-    isolated_registry.write_text(
-        json.dumps(
-            {
-                "schema": "roundtable.projects.v1",
-                "projects": [
-                    {
-                        "root": str(project),
-                        "registered_at": "2026-07-19T00:00:00Z",
-                    }
-                ],
-            }
-        )
-        + "\n"
+    register_project(
+        project,
+        isolated_registry,
+        registered_at="2026-07-19T00:00:00Z",
     )
     cwd = tmp_path / "outside"
     cwd.mkdir()
@@ -463,6 +468,7 @@ def test_installed_onboarding_previews_and_applies_selected_harness_once(
     tmp_path, isolated_registry, fake_commands
 ):
     project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
     prefix = tmp_path / "installed"
     prefix.mkdir()
     calls = []
@@ -515,6 +521,7 @@ def test_installed_onboarding_decline_does_not_launch(
     tmp_path, isolated_registry, fake_commands
 ):
     project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
     prefix = tmp_path / "installed"
     prefix.mkdir()
     calls = []

@@ -15,12 +15,13 @@ from _rtlib import (
     load_agents_doc,
     read_records,
     require_fenced_seat,
+    resolve_project_mailbox,
 )
 
 ROOT = find_project_root("rt-inbox")
-STATE_DIR = ROOT / ".roundtable"
-MSG_DIR = STATE_DIR / "messages"
-INBOX_DIR = STATE_DIR / "inbox"
+MAILBOX = resolve_project_mailbox(ROOT)
+MSG_DIR = MAILBOX.messages_dir
+INBOX_DIR = MAILBOX.inbox_dir
 AGENT_COMPONENT_RE = re.compile(r"^[a-z0-9#_-]+$")
 MAIL_HEADER_RE = re.compile(
     r"^\[(?P<from>[a-z0-9#_-]+)→(?P<to>[a-z0-9#_-]+) "

@@ -24,6 +24,7 @@ HOOK = BIN / "rt-codex-session-start"
 sys.path.insert(0, str(BIN))
 
 import _rtruntime
+from _rtlib import register_project, resolve_project_mailbox
 
 
 def load_wake_module():
@@ -65,6 +66,7 @@ def write_project(path: Path) -> Path:
         "    instances:\n"
         "      - id: codex\n"
     )
+    register_project(project)
     return project
 
 
@@ -180,6 +182,7 @@ def isolate_environment(tmp_path, monkeypatch):
     runtime = tmp_path / "runtime"
     monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
     monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(tmp_path / "projects.yaml"))
     monkeypatch.setattr(wake, "RUNTIME_DIR", runtime)
 
 
@@ -779,7 +782,7 @@ def test_clear_replacing_request_during_drain_never_wakes_old_thread(
         hook_payload(project, "thread-before-clear", "startup"), environment
     ).returncode == 0
     message_id = "20260720T120000Z-claude-to-codex-clear-race"
-    inbox = project / ".roundtable" / "inbox" / "codex" / "new"
+    inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
     inbox.mkdir(parents=True)
     (inbox / f"{message_id}.md").write_text(
         f"[CLAUDE→CODEX directive id={message_id}] test\n"

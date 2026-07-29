@@ -29,6 +29,7 @@ _REQUIRED_ENV = (
     "RT_LEASE_REVISION",
 )
 _MAIL_MARKER = "rt-wait-inbox: mail after "
+_NEW_DIR_MARKER = "rt-wait-inbox: new-dir "
 _HEARTBEAT_MARKER = "rt-wait-inbox: heartbeat timeout after "
 _SUPERSEDED_MARKER = "rt-wait-inbox: seat lease or watcher was superseded"
 _MAIL_DRAIN_POLL_SECONDS = 0.25
@@ -132,12 +133,32 @@ def _triggered_non_ack_mail(output: str) -> tuple[str, ...] | None:
     return tuple(dict.fromkeys(names)) or None
 
 
+def _triggered_new_dir(output: str) -> Path | None:
+    """Return the resolver-owned maildir path emitted for this wake."""
+
+    values = [
+        line.removeprefix(_NEW_DIR_MARKER)
+        for line in output.splitlines()
+        if line.startswith(_NEW_DIR_MARKER)
+    ]
+    if len(values) != 1:
+        return None
+    try:
+        raw = json.loads(values[0])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(raw, str) or not raw or "\x00" in raw:
+        return None
+    path = Path(raw)
+    if not path.is_absolute() or path.name != "new":
+        return None
+    return path
+
+
 def _generation_is_pending(
-    project_root: Path,
-    agent: str,
+    new_dir: Path,
     generation: tuple[str, ...],
 ) -> bool:
-    new_dir = project_root / ".roundtable" / "inbox" / agent / "new"
     try:
         return any((new_dir / name).exists() for name in generation)
     except OSError:
@@ -296,7 +317,8 @@ class _RoundtableBridge:
             output = output or ""
             if process.returncode == 0 and _MAIL_MARKER in output:
                 generation = _triggered_non_ack_mail(output)
-                if generation is None:
+                new_dir = _triggered_new_dir(output)
+                if generation is None or new_dir is None:
                     self._fail(_CONFIG_MESSAGE)
                     return
                 if not self._deliver(
@@ -316,8 +338,7 @@ class _RoundtableBridge:
                 while (
                     not self._stop.is_set()
                     and _generation_is_pending(
-                        project_root,
-                        agent,
+                        new_dir,
                         generation,
                     )
                 ):

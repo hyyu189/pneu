@@ -7,7 +7,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from _rtlib import find_project_root, require_fenced_seat
+from _rtlib import find_project_root, require_fenced_seat, resolve_project_mailbox
 
 TOOL_DIR = Path(__file__).resolve().parent
 # Agent names may be multi-instance ids (claude#1, codex-build), so the from/to
@@ -17,6 +17,7 @@ MSG_ID_RE = re.compile(r"^\d{8}T\d{6}Z-([a-z0-9#_-]+)-to-([a-z0-9#_-]+)-[^-]+$")
 
 
 ROOT = find_project_root("rt-ack")
+MAILBOX = resolve_project_mailbox(ROOT)
 
 
 def usage():
@@ -61,7 +62,7 @@ def archive_inbound(ref, recipient):
     a valid ref after a manual drain or when only legacy ledger state remained.
     """
 
-    mail_root = ROOT / ".roundtable" / "inbox"
+    mail_root = MAILBOX.inbox_dir
     inbox = mail_root / recipient
     new_dir = inbox / "new"
     cur_dir = inbox / "cur"

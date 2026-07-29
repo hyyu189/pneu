@@ -83,7 +83,8 @@ roundtable-init new-git-project --git
 | `rt-say <agent> <kind> "body"` | Write the message into the target's project mailbox (atomic maildir). |
 | `rt-ack <id>[,<id>...] ["note"]` | Acknowledge and archive received message(s). Comma-batches. The sender gets a quiet `ack-*` file. |
 | `rt-inbox` | List un-ack'd inbound messages. |
-| `rt-projects <list\|add\|rm>` | Maintain the validated project registry (single discovery source). |
+| `rt-projects <list\|add\|rm\|upgrade>` | Maintain the validated project registry; `upgrade` is the explicit, backed-up v1→v2 gate. |
+| `rt-projects resolve ROOT` | Diagnostic JSON view of the UUID-pinned mailbox selected by the registry. |
 | `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit. |
 | `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: where does cmux think an agent sits. Not part of sending. |
 

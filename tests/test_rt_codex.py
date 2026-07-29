@@ -23,6 +23,7 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtcodex
+from _rtlib import register_project, resolve_project_mailbox
 
 
 def load_wake_module():
@@ -87,7 +88,9 @@ agents:
       - id: claude
 """
     )
-    return path.resolve()
+    project = path.resolve()
+    register_project(project)
+    return project
 
 
 def test_project_config_parser_preserves_yaml_comment_characters(tmp_path):
@@ -141,7 +144,7 @@ def test_project_config_rejects_relative_project_outside_config_root(tmp_path):
 
 
 def add_mail(project: Path, msg_id: str) -> Path:
-    inbox = project / ".roundtable" / "inbox" / "codex" / "new"
+    inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
     inbox.mkdir(parents=True, exist_ok=True)
     path = inbox / f"{msg_id}.md"
     path.write_text(f"[CLAUDE→CODEX directive id={msg_id}] test")
@@ -251,7 +254,8 @@ def test_idle_three_messages_produce_one_wake(tmp_path):
     assert first[0].ok and second[0].ok
     assert len(starts) == 1
     assert "drain inbox at" in starts[0][1]["input"][0]["text"]
-    assert len(list((project / ".roundtable/inbox/codex/new").iterdir())) == 3
+    inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
+    assert len(list(inbox.iterdir())) == 3
 
 
 def test_busy_waits_for_matching_turn_completed(tmp_path):
@@ -1110,7 +1114,7 @@ def test_discovery_does_not_claim_uniqueness_when_a_thread_read_fails(tmp_path):
 
 def test_malformed_or_symlink_mail_fails_closed(tmp_path):
     project = write_project(tmp_path / "project")
-    inbox = project / ".roundtable/inbox/codex/new"
+    inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
     inbox.mkdir(parents=True)
     target = tmp_path / "outside.md"
     target.write_text("outside")

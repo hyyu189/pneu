@@ -11,17 +11,23 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from _rtlib import find_project_root, load_agents_doc, require_fenced_seat
+from _rtlib import (
+    find_project_root,
+    load_agents_doc,
+    require_fenced_seat,
+    resolve_project_mailbox,
+)
 
 TOOL_DIR = Path(__file__).resolve().parent
 
 
 ROOT = find_project_root("rt-say")
+MAILBOX = resolve_project_mailbox(ROOT)
 STATE_DIR = ROOT / ".roundtable"
 RUNTIME = STATE_DIR / "runtime.json"
-LOCK_DIR = STATE_DIR / "locks"
-MSG_DIR = STATE_DIR / "messages"
-INBOX_DIR = STATE_DIR / "inbox"
+LOCK_DIR = MAILBOX.locks_dir
+MSG_DIR = MAILBOX.messages_dir
+INBOX_DIR = MAILBOX.inbox_dir
 LEDGER_LOCK = LOCK_DIR / "ledger.lock"
 LIFECYCLE_ORDINAL = {"pending": 0, "injected": 1, "submitted": 2, "accepted": 3, "acked": 4}
 AGENT_COMPONENT_RE = re.compile(r"^[a-z0-9#_-]+$")

@@ -9,6 +9,17 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
+sys.path.insert(0, str(BIN))
+
+from _rtlib import register_project, resolve_project_mailbox
+
+
+def registry_for(path):
+    return path.resolve().parent / "projects.yaml"
+
+
+def mailbox_for(project):
+    return resolve_project_mailbox(project, registry_path=registry_for(project))
 
 
 def no_cmux_env(**updates):
@@ -22,7 +33,6 @@ def no_cmux_env(**updates):
             "ROUNDTABLE_PROJECT_DIR": "",
             "RT_FALLBACK_PROJECT": "",
             "RT_FROM": "",
-            "RT_PROJECTS_FILE": "/dev/null",
         }
     )
     env.update(updates)
@@ -46,10 +56,12 @@ def fake_cmux(tmp_path, body, exit_code=0):
 
 
 def run_tool(name, *args, cwd, env=None):
+    environment = dict(env or no_cmux_env())
+    environment["RT_PROJECTS_FILE"] = str(registry_for(cwd))
     return subprocess.run(
         [sys.executable, str(BIN / name), *args],
         cwd=cwd,
-        env=env or no_cmux_env(),
+        env=environment,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -78,11 +90,12 @@ agents:
       - id: hermes
 """
     )
+    register_project(path, path=registry_for(path))
     return state
 
 
 def write_mail(state, msg_id, sender, target, body="test"):
-    directory = state / "inbox" / target / "new"
+    directory = mailbox_for(state.parent).inbox_dir / target / "new"
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{msg_id}.md"
     path.write_text(
@@ -282,7 +295,9 @@ def test_ack_infers_sender_from_message_recipient_without_cmux(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("sent maildir-only ")
-    ack_files = list((state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    ack_files = list(
+        (mailbox_for(project).inbox_dir / "codex" / "new").glob("ack-*.md")
+    )
     assert len(ack_files) == 1
     ack = ack_files[0].read_text()
     assert ack.startswith("[CLAUDE→CODEX sync-ack id=")
@@ -298,9 +313,10 @@ def test_ack_infers_sender_from_message_recipient_without_cmux(tmp_path):
 def test_ack_failure_never_archives_inbound_mail(tmp_path):
     project = tmp_path / "project"
     state = write_project(project)
+    mailbox = mailbox_for(project)
     original = "20260718T120001Z-codex-to-claude-106"
     mail = write_mail(state, original, "codex", "claude")
-    (state / "inbox" / "codex").write_text("blocks ack delivery")
+    (mailbox.inbox_dir / "codex").write_text("blocks ack delivery")
 
     result = run_tool("rt-ack", original, cwd=project)
 
@@ -389,7 +405,9 @@ def test_ack_reports_committed_ack_without_overwriting_archive_conflict(tmp_path
     assert "refusing to overwrite conflicting archive" in result.stderr
     assert mail.read_text().endswith(" new copy")
     assert conflict.read_text() == "different archived copy"
-    ack_files = list((state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    ack_files = list(
+        (mailbox_for(project).inbox_dir / "codex" / "new").glob("ack-*.md")
+    )
     assert len(ack_files) == 1
     assert f"refs={original}" in ack_files[0].read_text()
 
@@ -397,13 +415,14 @@ def test_ack_reports_committed_ack_without_overwriting_archive_conflict(tmp_path
 def test_ack_rejects_path_traversal_ref_before_delivery(tmp_path):
     project = tmp_path / "project"
     state = write_project(project)
+    mailbox = mailbox_for(project)
     unsafe = "20260718T120009Z-codex-to-claude-../../outside"
 
     result = run_tool("rt-ack", unsafe, cwd=project)
 
     assert result.returncode != 0
     assert result.stderr == f"rt-ack: cannot parse msg_id: {unsafe}\n"
-    assert not (state / "inbox").exists()
+    assert not mailbox.inbox_dir.exists()
 
 
 def test_ack_validated_sender_does_not_invoke_ambient_cmux(tmp_path):
@@ -443,7 +462,9 @@ def test_ack_validated_sender_does_not_invoke_ambient_cmux(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
-    ack_file = next((state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    ack_file = next(
+        (mailbox_for(project).inbox_dir / "codex" / "new").glob("ack-*.md")
+    )
     assert ack_file.read_text().startswith("[CLAUDE→CODEX sync-ack id=")
     assert not sentinel.exists()
 
@@ -451,6 +472,7 @@ def test_ack_validated_sender_does_not_invoke_ambient_cmux(tmp_path):
 def test_ack_rejects_explicit_sender_mismatch_before_delivery(tmp_path):
     project = tmp_path / "project"
     state = write_project(project)
+    mailbox = mailbox_for(project)
     original = "20260718T120000Z-codex-to-claude-102"
     write_mail(state, original, "codex", "claude")
 
@@ -465,12 +487,13 @@ def test_ack_rejects_explicit_sender_mismatch_before_delivery(tmp_path):
     assert result.stderr == (
         "rt-ack: RT_FROM=codex does not match message recipient claude\n"
     )
-    assert not (state / "inbox" / "codex").exists()
+    assert not (mailbox.inbox_dir / "codex").exists()
 
 
 def test_ack_rejects_mixed_recipients_before_delivery(tmp_path):
     project = tmp_path / "project"
     state = write_project(project)
+    mailbox = mailbox_for(project)
     claude_ref = "20260718T120000Z-codex-to-claude-103"
     hermes_ref = "20260718T120001Z-codex-to-hermes-104"
     write_mail(state, claude_ref, "codex", "claude")
@@ -485,4 +508,4 @@ def test_ack_rejects_mixed_recipients_before_delivery(tmp_path):
         "rt-ack: refs target multiple recipients: claude, hermes; "
         "acknowledge one recipient at a time\n"
     )
-    assert not (state / "inbox" / "codex").exists()
+    assert not (mailbox.inbox_dir / "codex").exists()
