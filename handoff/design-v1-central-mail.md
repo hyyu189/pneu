@@ -247,7 +247,34 @@ after the flip lives only in the central store, and restoring the pre-cutover
 backup alone would discard it. A rollback takes the same exclusive lock and
 copies the current central state back before flipping the pointer.
 
-## 8. Non-goals
+## 8. Codex seat binding: preallocate the thread
+
+**In scope for v1.** The launcher calls `thread/start` itself, takes the id
+from `ThreadStartResponse`, binds it to the lease immediately, and launches the
+TUI as `codex --remote unix:// resume <id>`. `thread/start` creates a thread
+without a model turn, so the human opens a normal empty session and the token
+cost is zero.
+
+The reason is not the convenience. It removes the SessionStart hook from the
+binding path, replacing an event we have to wait for with a call whose result
+we already hold. That hook has misled this project twice in one week: its
+turn-gating was misdiagnosed as non-dispatch, and a deadline measured from the
+wrong instant left three seats silently unbindable for days.
+
+Requirements, from review:
+
+- the already-bound path must be idempotent, since the queued `Startup` source
+  still drains on the first human turn;
+- ownership and configuration must transfer correctly to the resumed TUI;
+- a thread created but not bound must be cleaned up rather than leaked;
+- an end-to-end smoke test, because this is deeper app-server coupling than
+  the launch intent it replaces.
+
+The launch intent is **not** deleted. It becomes the fallback for any seat that
+was not preallocated — a hand-started `codex` the user later wants bound, or a
+preallocation that failed.
+
+## 9. Non-goals
 
 Stated so the design does not accrete:
 
@@ -325,43 +352,7 @@ Recorded so they are decisions rather than omissions.
 1. Does deferring the host-runtime key migration leave a state where a renamed
    project has central mail under its UUID but a Codex binding under its old
    path hash, and is the required rebind detectable by `doctor`?
-3. **Can a Codex seat bind without the human typing first?** Three options,
-   reviewed at source level.
-
-   *Inject a prompt.* Works — a positional `[PROMPT]` reaches `run_turn` and
-   fires the hook — but the TUI renders it optimistically as a user message,
-   so the human opens their session and finds a row they did not write, and it
-   costs a full sampling turn.
-
-   *Do nothing.* Bind on the first human turn. Zero cost, no fabricated
-   transcript row, and since the TTL fix the wait is unbounded rather than
-   fatal.
-
-   *Preallocate the thread.* Roundtable calls `thread/start` itself, takes the
-   exact thread id from `ThreadStartResponse`, binds it to the lease directly,
-   and launches the TUI as `codex --remote unix:// resume <id>`.
-   `thread/start` creates a thread **without a model turn**, so the human sees
-   a normal empty session and the token cost is zero. The queued `Startup`
-   source simply drains harmlessly on the first human turn, provided the bind
-   path is idempotent.
-
-   Preallocation is the strongest option and not only for convenience: it
-   removes the SessionStart hook from the binding path entirely, replacing an
-   event we must wait for with a protocol call whose result we already hold.
-   That path has misled us repeatedly. It costs deeper app-server coupling —
-   though the wake bridge already depends on that protocol — plus an
-   idempotent already-bound path, ownership and config transfer, and failure
-   cleanup.
-
-   Recommended: keep first-turn binding for human-launched seats now, give a
-   Roundtable-spawned worker its task and preamble in **one combined prompt**
-   so only the preamble is incremental on a turn that had to happen anyway,
-   and prototype preallocation before committing to ready-at-launch.
-
-   Constraint carried over from review: prompt text is not a security fence and
-   must not carry lease secrets. A preamble may hand an agent its non-secret
-   identity — which agent it is — but `--fenced` needs `RT_SESSION_ID` and
-   `RT_LEASE_REVISION`, and those are **proven not to reach a remote thread's
-   shell**: the app-server spawns it from the launchd environment, which
-   carries no per-seat fence. That is a separate filed defect, and no preamble
-   fixes it.
+2. Resolved — see §8. Preallocation is in scope for v1; the three options and
+   the constraint that prompt text is never a security fence are recorded
+   there, together with the fact that the fence variables provably do not
+   reach a remote thread's shell, which no preamble can fix.
