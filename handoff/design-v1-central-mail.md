@@ -1,10 +1,8 @@
 # v1 — central mail, stable identity, cross-worktree addressing
 
-Status: **round 2 draft.** Round 1 review by Codex is incorporated; every
-structural claim it made was independently verified against the tree before
-being accepted. Hermes has the round-1 draft in its mailbox but its watcher is
-unarmed, so its review is still outstanding and will be folded in when it
-lands. Decided by Ocean unless marked open.
+Status: **converged.** Reviewed by Codex and Hermes; every structural claim
+either made was independently verified against the tree before being accepted.
+Decided by Ocean unless marked open.
 
 ## The need
 
@@ -75,12 +73,22 @@ continue`), so a deleted project disappears from the registry entirely — and
 with it, any way for `doctor` to report that its central mail is now orphaned.
 A removed project must leave a tombstoned entry carrying at least its UUID.
 
-`agents.yaml` stays project-local; it describes the project, not the delivery
-state.
+`agents.yaml` and `runtime.json` stay project-local. `agents.yaml` describes
+the project rather than the delivery state; `runtime.json` holds the cmux
+workspace binding read by `project_for_current_workspace`
+(`_rtlib.py:330`) and is meaningful only where the working tree is.
 
-Routing resolves through the registry to the real central path. A symlink at
-`<project>/.roundtable/inbox` may exist for humans to `ls`, but **no code path
-ever traverses it**.
+Routing resolves through the registry to the real central path. A convenience
+symlink may exist for humans to `ls`, but **no code path ever traverses it** —
+and for that to hold it must not sit at a path existing code already builds.
+`<project>/.roundtable/inbox` is exactly such a path: `rt-doctor`'s
+`report_legacy_markers` globs `inbox.glob("*/.armed-*")`, and pathlib follows
+symlinked directories, so a bookmark placed there would be walked by code that
+believes it is reading a real mailbox. The bookmark is therefore
+`<project>/.roundtable/mail`, a name nothing constructs. Renaming it is
+cheaper and more durable than adding an `is_symlink()` guard to every existing
+glob, and it fails safe: old code that builds the `inbox` path simply finds
+nothing rather than silently traversing.
 
 That distinction is what keeps the existing symlink guards intact.
 `rt-ack:71-75` and `rt-inbox:318-323` refuse a symlinked `INBOX_DIR`, `inbox`,
@@ -125,6 +133,13 @@ rt-say claude@frontend   ...    a sibling worktree in the same group
 ```
 
 Resolution: sender's group → entry whose name is `frontend` → target UUID.
+
+**The agent name must be validated against the target's `agents.yaml`, not the
+sender's.** This is the easiest thing to implement wrongly: `rt-say:572` calls
+`configured_target(ROOT, target)` where `ROOT` is the *sender's* project root,
+so extending it naively would check whether the sender declares `claude`
+rather than whether the target does. Target validation has to happen after the
+target root is resolved.
 Name resolution must return **exactly one** entry; duplicate names in a group
 fail closed rather than picking one. Sender and target are pinned from a
 single registry snapshot so the pair cannot change underneath the send, and a
@@ -246,9 +261,21 @@ Stated so the design does not accrete:
   format. The test: could someone else write their own against the format,
   without our cooperation?
 
-## Round-1 review outcome
+## Review outcome — converged
 
-Codex raised four objections. All four were verified against the tree and all
+Both reviewers answered. They independently reached the same conclusion on the
+one structural question, which is the strongest signal in the review: **delete
+the bridge.** Codex showed it could address nothing under the document's own
+group rule; Hermes called it over-engineering for an overview use case. Two
+independent paths to the same verdict on the section that was mine to defend.
+
+Review is closed at one round rather than the three available. Every remaining
+point was concrete, verifiable and accepted, so a further round would be
+spending the budget rather than using it.
+
+### Codex
+
+Four objections. All four were verified against the tree and all
 four were accepted:
 
 - The bridge could not address anything under this document's own group rule.
@@ -263,6 +290,19 @@ four were accepted:
 - §7's migration lacked a lock, a cutover pointer, and an honest rollback.
   Replaced wholesale; the rollback correction — that restoring the backup alone
   discards post-cutover mail — was the most valuable single point of the review.
+
+### Hermes
+
+Four, all verified before acceptance:
+
+- Target agent validation resolves against the sender's `agents.yaml`. Fixed
+  in §4.
+- §2 omitted `runtime.json`, the ledger location, and `agents.yaml` session
+  scoping. Added.
+- `rt-doctor`'s `report_legacy_markers` globs through symlinks. Resolved by
+  moving the bookmark off the `inbox` path entirely rather than guarding the
+  glob, which is a narrower fix than it first appeared.
+- Delete the bridge. Agreed independently with Codex.
 
 ## Deferred past v1, on purpose
 
@@ -282,9 +322,7 @@ Recorded so they are decisions rather than omissions.
 
 ## Still open
 
-1. Hermes's review has not landed; its watcher is unarmed and the round-1
-   message is waiting in its mailbox.
-2. Does deferring the host-runtime key migration leave a state where a renamed
+1. Does deferring the host-runtime key migration leave a state where a renamed
    project has central mail under its UUID but a Codex binding under its old
    path hash, and is the required rebind detectable by `doctor`?
 3. **Can a Codex seat bind without the human typing first?** Three options,
