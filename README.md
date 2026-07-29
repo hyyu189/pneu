@@ -140,13 +140,29 @@ roundtable projects rollback ROOT --manifest PATH
 ```
 
 Migration holds that project's exclusive layout lock through the verified
-copy and registry cutover. Its JSON result reports the immutable manifest
-path, file/byte counts, `lock_wait_ms`, `exclusive_hold_ms`, copy/fsync time,
-registry-flip time, commitment state, and recovery warnings. Backups default
-to
-`~/Documents/Workspace/backups/roundtable-central-mail/<project-uuid>/`.
-Rollback accepts only the exact active forward manifest and snapshots current
-central mail first, so messages delivered after migration are retained.
+copy and registry cutover. Its JSON result reports the durable recovery-record
+path, preflight/projected-hold data, file/byte counts, `lock_wait_ms`,
+`exclusive_hold_ms`, the admitted `registry_wait_cap_ms`, copy/fsync time,
+registry-flip time, commitment state, and recovery warnings. Verified archival
+backups default to
+`<registry-parent>/backups/roundtable-central-mail/<project-uuid>/`; set the
+absolute `RT_MAIL_BACKUP_DIR` or pass `--backup-dir` to override it. Recovery
+records live separately under `<registry-parent>/migration-records/`, so
+losing an archival bundle does not disable post-cutover repair or rollback.
+An unreleased pre-v1 `0.2` central marker is imported once, under the
+exclusive layout lock, while its legacy archive is still verifiable; the
+marker is then rebound to the durable recovery record.
+
+The command refuses a mailbox whose conservative projected exclusive hold
+exceeds half of the normal ten-second consumer lock timeout. Stop every seat
+and mailbox command for that project, then explicitly retry with
+`--confirm-quiesced`; rejected sends must still be retried by their caller.
+Without that confirmation, exclusive layout admission is capped at five
+seconds and registry-lock wait is capped again to the time remaining in a
+five-second hold budget. The projection remains an admission heuristic rather
+than an interruptible filesystem deadline. Rollback accepts only the exact
+active forward recovery record and snapshots current central mail first, so
+messages delivered after migration are retained.
 
 All participants in one Roundtable currently run on the same host. The durable
 mailbox core does not require cmux and uses the same path in Terminal.app,

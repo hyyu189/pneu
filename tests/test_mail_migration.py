@@ -5,6 +5,7 @@ import fcntl
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -184,12 +185,310 @@ def test_migrate_and_rollback_are_idempotent_for_exact_generation(
     ]
 
 
+def archive_bundle_for(record: Path) -> Path:
+    document = json.loads(record.read_text())
+    return Path(document["archive_manifest"]).parent
+
+
+def restore_legacy_archive_marker(
+    project: Path,
+    registry: Path,
+    recovery_record: Path,
+) -> Path:
+    record = json.loads(recovery_record.read_text())
+    archive_manifest = Path(record["archive_manifest"])
+    marker_path = (
+        _rtlib.resolve_project_mailbox_checked(
+            project,
+            registry_path=registry,
+        ).mail_root
+        / _rtlib.CENTRAL_MAIL_MARKER_NAME
+    )
+    marker = json.loads(marker_path.read_text())
+    marker.update(
+        {
+            "manifest": str(archive_manifest),
+            "manifest_sha256": record["archive_manifest_sha256"],
+        }
+    )
+    marker_path.write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n"
+    )
+    shutil.rmtree(registry.parent / _rtmigrate.RECOVERY_RECORDS_DIRECTORY)
+    return archive_manifest
+
+
+def test_legacy_central_marker_import_is_crash_retryable_and_durable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    migrated = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+    original_record = Path(migrated["manifest"])
+    legacy_manifest = restore_legacy_archive_marker(
+        project,
+        registry,
+        original_record,
+    )
+    central = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    late = central.inbox_dir / "claude" / "new" / "legacy-import-late.md"
+    late.write_bytes(b"preserve after legacy import\n")
+    original_rebind = _rtmigrate._rebind_central_marker
+
+    def interrupt_rebind(*_args, **_kwargs):
+        raise _rtmigrate.MailMigrationError(
+            "simulated marker rebind interruption"
+        )
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_rebind_central_marker",
+        interrupt_rebind,
+    )
+    with pytest.raises(
+        _rtmigrate.MailMigrationError,
+        match="simulated marker rebind interruption",
+    ):
+        _rtmigrate.migrate_project(
+            project,
+            registry_path=registry,
+            backup_root=backup_root,
+        )
+
+    canonical = _rtmigrate._recovery_record_path(
+        registry,
+        central.project_uuid,
+        json.loads(legacy_manifest.read_text())["operation_id"],
+    )
+    assert canonical.is_file()
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_rebind_central_marker",
+        original_rebind,
+    )
+    repaired = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert repaired["status"] == "already central"
+    assert Path(repaired["manifest"]) == canonical
+    marker = _rtlib.validate_central_mail_marker(
+        central.mail_root,
+        central.project_uuid,
+    )
+    assert Path(marker["manifest"]) == canonical
+
+    shutil.rmtree(legacy_manifest.parent)
+    rolled_back = _rtmigrate.rollback_project(
+        project,
+        canonical,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert rolled_back["status"] == "rolled back"
+    local = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    assert (
+        local.inbox_dir / "claude" / "new" / "legacy-import-late.md"
+    ).read_bytes() == b"preserve after legacy import\n"
+
+
+def test_rollback_accepts_active_legacy_manifest_as_one_time_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    migrated = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+    legacy_manifest = restore_legacy_archive_marker(
+        project,
+        registry,
+        Path(migrated["manifest"]),
+    )
+    original_load = _rtmigrate.load_manifest
+    legacy_loads = 0
+
+    def remove_archive_after_import(*args, **kwargs):
+        nonlocal legacy_loads
+        loaded = original_load(*args, **kwargs)
+        if Path(args[0]) == legacy_manifest:
+            legacy_loads += 1
+            shutil.rmtree(legacy_manifest.parent)
+        return loaded
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "load_manifest",
+        remove_archive_after_import,
+    )
+
+    rolled_back = _rtmigrate.rollback_project(
+        project,
+        legacy_manifest,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert rolled_back["status"] == "rolled back"
+    assert legacy_loads == 1
+    assert not legacy_manifest.exists()
+    assert Path(rolled_back["manifest"]) != legacy_manifest
+    assert Path(rolled_back["manifest"]).is_file()
+    assert registry_layout(project, registry) == "local"
+
+
+def test_post_cutover_repair_survives_deleted_archive_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
+        "after_registry_flip",
+    )
+    with pytest.raises(_rtmigrate.MailMigrationCommittedError):
+        _rtmigrate.migrate_project(
+            project,
+            registry_path=registry,
+            backup_root=backup_root,
+        )
+    mailbox = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    marker = _rtlib.validate_central_mail_marker(
+        mailbox.mail_root,
+        mailbox.project_uuid,
+    )
+    record = Path(marker["manifest"])
+    shutil.rmtree(archive_bundle_for(record))
+
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
+    repaired = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert repaired["status"] == "already central"
+    assert Path(repaired["manifest"]) == record
+    assert (project / ".roundtable" / "mail").is_symlink()
+    assert not (project / ".roundtable" / "inbox").exists()
+
+
+def test_rollback_preserves_postcutover_mail_after_forward_archive_loss(
+    tmp_path: Path,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    migrated = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+    record = Path(migrated["manifest"])
+    shutil.rmtree(archive_bundle_for(record))
+    central = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    late = central.inbox_dir / "claude" / "new" / "after-archive-loss.md"
+    late.write_bytes(b"still recoverable\n")
+
+    rolled_back = _rtmigrate.rollback_project(
+        project,
+        record,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert rolled_back["status"] == "rolled back"
+    local = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    assert (
+        local.inbox_dir / "claude" / "new" / "after-archive-loss.md"
+    ).read_bytes() == b"still recoverable\n"
+
+
+def test_rollback_repair_survives_both_deleted_archive_bundles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    migrated = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+    forward_record = Path(migrated["manifest"])
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
+        "rollback_after_registry_flip",
+    )
+    with pytest.raises(_rtmigrate.MailMigrationCommittedError):
+        _rtmigrate.rollback_project(
+            project,
+            forward_record,
+            registry_path=registry,
+            backup_root=backup_root,
+        )
+    marker = json.loads(
+        (project / ".roundtable" / _rtmigrate.ROLLBACK_MARKER_NAME).read_text()
+    )
+    rollback_record = Path(marker["rollback_manifest"])
+    shutil.rmtree(archive_bundle_for(forward_record))
+    shutil.rmtree(archive_bundle_for(rollback_record))
+    fresh = (
+        project
+        / ".roundtable"
+        / "inbox"
+        / "claude"
+        / "new"
+        / "after-rollback-cutover.md"
+    )
+    fresh.write_bytes(b"new local authority\n")
+
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
+    repaired = _rtmigrate.rollback_project(
+        project,
+        forward_record,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert repaired["status"] == "already local"
+    assert Path(repaired["rollback_manifest"]) == rollback_record
+    assert fresh.read_bytes() == b"new local authority\n"
+
+
 def test_pre_cutover_published_candidate_is_rebuilt_after_local_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, registry, backup_root = write_registered_project(tmp_path)
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", "after_central_publish")
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
+        "after_central_publish",
+    )
 
     with pytest.raises(
         _rtmigrate.InjectedMigrationFailure,
@@ -217,7 +516,7 @@ def test_pre_cutover_published_candidate_is_rebuilt_after_local_drift(
     )
     late.write_bytes(b"local stayed authoritative\n")
 
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     result = _rtmigrate.migrate_project(
         project,
         registry_path=registry,
@@ -239,7 +538,11 @@ def test_post_cutover_failure_reports_committed_and_retry_repairs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, registry, backup_root = write_registered_project(tmp_path)
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", "after_registry_flip")
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
+        "after_registry_flip",
+    )
 
     with pytest.raises(
         _rtmigrate.MailMigrationCommittedError,
@@ -253,7 +556,7 @@ def test_post_cutover_failure_reports_committed_and_retry_repairs(
 
     assert registry_layout(project, registry) == "central"
     assert (project / ".roundtable" / "inbox").is_dir()
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     repaired = _rtmigrate.migrate_project(
         project,
         registry_path=registry,
@@ -280,7 +583,7 @@ def test_forward_precommit_failpoints_remain_local_and_retry(
     phase: str,
 ) -> None:
     project, registry, backup_root = write_registered_project(tmp_path)
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", phase)
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", phase)
 
     with pytest.raises(_rtmigrate.InjectedMigrationFailure, match=phase):
         _rtmigrate.migrate_project(
@@ -291,7 +594,7 @@ def test_forward_precommit_failpoints_remain_local_and_retry(
 
     assert registry_layout(project, registry) == "local"
     assert_internal_hardlink(project / ".roundtable")
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     retried = _rtmigrate.migrate_project(
         project,
         registry_path=registry,
@@ -320,7 +623,7 @@ def test_forward_postcommit_failpoints_report_commit_and_repair(
     phase: str,
 ) -> None:
     project, registry, backup_root = write_registered_project(tmp_path)
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", phase)
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", phase)
 
     with pytest.raises(_rtmigrate.MailMigrationCommittedError, match="committed"):
         _rtmigrate.migrate_project(
@@ -330,7 +633,7 @@ def test_forward_postcommit_failpoints_report_commit_and_repair(
         )
 
     assert registry_layout(project, registry) == "central"
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     repaired = _rtmigrate.migrate_project(
         project,
         registry_path=registry,
@@ -350,7 +653,11 @@ def test_partial_post_cutover_cleanup_resumes_without_stale_active_paths(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, registry, backup_root = write_registered_project(tmp_path)
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", "after_registry_flip")
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
+        "after_registry_flip",
+    )
     with pytest.raises(_rtmigrate.MailMigrationCommittedError):
         _rtmigrate.migrate_project(
             project,
@@ -370,7 +677,7 @@ def test_partial_post_cutover_cleanup_resumes_without_stale_active_paths(
     partial.mkdir()
     (state / "inbox").rename(partial / "inbox")
 
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     repaired = _rtmigrate.migrate_project(
         project,
         registry_path=registry,
@@ -395,8 +702,9 @@ def test_rollback_retry_before_flip_resnapshots_new_central_mail(
         registry_path=registry,
         backup_root=backup_root,
     )
-    monkeypatch.setenv(
-        "RT_MIGRATION_FAILPOINT",
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
         "rollback_after_local_install",
     )
     with pytest.raises(_rtmigrate.InjectedMigrationFailure):
@@ -413,7 +721,7 @@ def test_rollback_retry_before_flip_resnapshots_new_central_mail(
     late = central.inbox_dir / "claude" / "new" / "after-failed-rollback.md"
     late.write_bytes(b"still central authority\n")
 
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     result = _rtmigrate.rollback_project(
         project,
         migrated["manifest"],
@@ -444,8 +752,9 @@ def test_rollback_retry_after_flip_never_overwrites_new_local_mail(
         registry_path=registry,
         backup_root=backup_root,
     )
-    monkeypatch.setenv(
-        "RT_MIGRATION_FAILPOINT",
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
         "rollback_after_registry_flip",
     )
     with pytest.raises(_rtmigrate.MailMigrationCommittedError):
@@ -462,7 +771,7 @@ def test_rollback_retry_after_flip_never_overwrites_new_local_mail(
     fresh = local.inbox_dir / "claude" / "new" / "new-local.md"
     fresh.write_bytes(b"local after rollback cutover\n")
 
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     result = _rtmigrate.rollback_project(
         project,
         migrated["manifest"],
@@ -493,7 +802,7 @@ def test_rollback_precommit_failpoints_remain_central_and_retry(
         registry_path=registry,
         backup_root=backup_root,
     )
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", phase)
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", phase)
 
     with pytest.raises(_rtmigrate.InjectedMigrationFailure, match=phase):
         _rtmigrate.rollback_project(
@@ -504,7 +813,7 @@ def test_rollback_precommit_failpoints_remain_central_and_retry(
         )
 
     assert registry_layout(project, registry) == "central"
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     retried = _rtmigrate.rollback_project(
         project,
         migrated["manifest"],
@@ -538,7 +847,7 @@ def test_rollback_postcommit_failpoints_report_commit_and_repair(
         registry_path=registry,
         backup_root=backup_root,
     )
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", phase)
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", phase)
 
     with pytest.raises(_rtmigrate.MailMigrationCommittedError, match="committed"):
         _rtmigrate.rollback_project(
@@ -549,7 +858,7 @@ def test_rollback_postcommit_failpoints_report_commit_and_repair(
         )
 
     assert registry_layout(project, registry) == "local"
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     repaired = _rtmigrate.rollback_project(
         project,
         migrated["manifest"],
@@ -765,6 +1074,239 @@ def test_exclusive_hold_metric_covers_copy_delay(
     assert result["lock_wait_ms"] < result["exclusive_hold_ms"]
 
 
+def test_exclusive_hold_metric_starts_at_resource_acquisition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    original = _rtlib.resolve_project_mailbox_checked
+    calls = 0
+
+    def delayed_resolve(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            time.sleep(0.08)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _rtlib,
+        "resolve_project_mailbox_checked",
+        delayed_resolve,
+    )
+    result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert calls >= 2
+    assert result["exclusive_hold_ms"] >= 75
+
+
+def test_exclusive_hold_includes_post_flock_scheduling_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    original = _rtlib._acquire_flock_before
+    calls = 0
+
+    def delayed_return(*args, **kwargs):
+        nonlocal calls
+        acquired_at = original(*args, **kwargs)
+        calls += 1
+        if calls == 4:
+            time.sleep(0.08)
+        return acquired_at
+
+    monkeypatch.setattr(
+        _rtlib,
+        "_acquire_flock_before",
+        delayed_return,
+    )
+    result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert calls >= 4
+    assert result["exclusive_hold_ms"] >= 75
+
+
+def test_unconfirmed_migration_composes_layout_and_registry_budgets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    budget = 2.0
+    observed_layout = []
+    observed_registry = []
+    original_locked = _rtmigrate.locked_project_mailbox_checked
+    original_flip = _rtmigrate._flip_layout
+
+    def capture_locked(*args, **kwargs):
+        observed_layout.append(
+            (kwargs.get("exclusive", False), kwargs["timeout"])
+        )
+        return original_locked(*args, **kwargs)
+
+    def capture_flip(*args, **kwargs):
+        observed_registry.append(kwargs["lock_timeout"])
+        return original_flip(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_BUDGET_SECONDS",
+        budget,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "locked_project_mailbox_checked",
+        capture_locked,
+    )
+    monkeypatch.setattr(_rtmigrate, "_flip_layout", capture_flip)
+
+    result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+        layout_lock_timeout=10.0,
+        registry_lock_timeout=10.0,
+    )
+
+    assert observed_layout == [(False, 10.0), (True, budget)]
+    assert len(observed_registry) == 1
+    assert 0 < observed_registry[0] < budget
+    assert result["registry_wait_cap_ms"] == pytest.approx(
+        observed_registry[0] * 1000,
+        abs=0.001,
+    )
+
+
+def test_exhausted_hold_budget_refuses_before_registry_cutover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    original_gitignore = _rtmigrate._ensure_gitignore
+
+    def delayed_gitignore(*args, **kwargs):
+        result = original_gitignore(*args, **kwargs)
+        time.sleep(0.08)
+        return result
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_BASE_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_ENTRY_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_MIB_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_BUDGET_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_ensure_gitignore",
+        delayed_gitignore,
+    )
+
+    with pytest.raises(
+        _rtmigrate.MailMigrationError,
+        match="exhausted its safety budget",
+    ):
+        _rtmigrate.migrate_project(
+            project,
+            registry_path=registry,
+            backup_root=backup_root,
+            registry_lock_timeout=1.0,
+        )
+
+    assert registry_layout(project, registry) == "local"
+
+
+def test_confirmed_quiescence_bypasses_normal_hold_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    original_gitignore = _rtmigrate._ensure_gitignore
+
+    def delayed_gitignore(*args, **kwargs):
+        result = original_gitignore(*args, **kwargs)
+        time.sleep(0.08)
+        return result
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_BASE_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_ENTRY_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_MIB_SECONDS",
+        0.0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "MIGRATION_PREFLIGHT_BUDGET_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_ensure_gitignore",
+        delayed_gitignore,
+    )
+
+    result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+        registry_lock_timeout=0.7,
+        confirm_quiesced=True,
+    )
+
+    assert result["committed"] is True
+    assert result["registry_wait_cap_ms"] == pytest.approx(700.0)
+
+
+def test_quiescence_override_requires_an_explicit_boolean(
+    tmp_path: Path,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+
+    with pytest.raises(
+        _rtmigrate.MailMigrationError,
+        match="explicit boolean",
+    ):
+        _rtmigrate.migrate_project(
+            project,
+            registry_path=registry,
+            backup_root=backup_root,
+            confirm_quiesced="false",
+        )
+
+    assert registry_layout(project, registry) == "local"
+    assert not backup_root.exists()
+
+
 @pytest.mark.parametrize(
     "location",
     ["local-locks", "local-inbox", "central-parent"],
@@ -870,9 +1412,14 @@ def test_rollback_rejects_backup_roots_overlapping_recovery_state(
     )
     late = central.inbox_dir / "claude" / "new" / "late.md"
     late.write_bytes(b"central remains authoritative\n")
+    archive_manifest = Path(
+        json.loads(manifest.read_text())["archive_manifest"]
+    )
     locations = {
         "local-state": project / ".roundtable" / "locks" / "backup",
-        "forward-bundle": manifest.parent / "payload" / "inbox" / "backup",
+        "forward-bundle": (
+            archive_manifest.parent / "payload" / "inbox" / "backup"
+        ),
     }
     selected = locations[location]
     manifest_before = manifest.read_bytes()
@@ -1095,7 +1642,11 @@ def test_tampered_pre_cutover_candidate_is_never_quarantined(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, registry, backup_root = write_registered_project(tmp_path)
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", "after_central_publish")
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
+        "after_central_publish",
+    )
     with pytest.raises(_rtmigrate.InjectedMigrationFailure):
         _rtmigrate.migrate_project(
             project,
@@ -1109,7 +1660,7 @@ def test_tampered_pre_cutover_candidate_is_never_quarantined(
     tampered = candidate / "inbox" / "claude" / "new" / "tampered.md"
     tampered.write_bytes(b"not in the candidate manifest\n")
 
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     with pytest.raises(_rtmigrate.MailMigrationError):
         _rtmigrate.migrate_project(
             project,
@@ -1286,7 +1837,11 @@ def test_completed_rollback_leaves_later_pre_cutover_candidate_untouched(
         registry_path=registry,
         backup_root=backup_root,
     )
-    monkeypatch.setenv("RT_MIGRATION_FAILPOINT", "after_central_publish")
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
+        "after_central_publish",
+    )
     with pytest.raises(_rtmigrate.InjectedMigrationFailure):
         _rtmigrate.migrate_project(
             project,
@@ -1302,7 +1857,7 @@ def test_completed_rollback_leaves_later_pre_cutover_candidate_untouched(
         candidate / _rtlib.CENTRAL_MAIL_MARKER_NAME
     ).read_bytes()
 
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     repeated = _rtmigrate.rollback_project(
         project,
         first["manifest"],
@@ -1456,8 +2011,9 @@ def test_tampered_rollback_marker_never_retires_central_evidence(
         registry_path=registry,
         backup_root=backup_root,
     )
-    monkeypatch.setenv(
-        "RT_MIGRATION_FAILPOINT",
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_TEST_FAILPOINT",
         "rollback_after_registry_flip",
     )
     with pytest.raises(_rtmigrate.MailMigrationCommittedError):
@@ -1482,7 +2038,7 @@ def test_tampered_rollback_marker_never_retires_central_evidence(
     central = _rtlib.central_mail_root(registry, project_uuid)
     central_inode = (central.stat().st_dev, central.stat().st_ino)
 
-    monkeypatch.delenv("RT_MIGRATION_FAILPOINT")
+    monkeypatch.setattr(_rtmigrate, "_TEST_FAILPOINT", None)
     with pytest.raises(_rtmigrate.MailMigrationError):
         _rtmigrate.rollback_project(
             project,
@@ -1493,6 +2049,427 @@ def test_tampered_rollback_marker_never_retires_central_evidence(
 
     assert (central.stat().st_dev, central.stat().st_ino) == central_inode
     assert registry_layout(project, registry) == "local"
+
+
+def test_hold_projection_is_conservative_for_entries_and_large_bytes() -> None:
+    many_entries = _rtmigrate.MailPreflight(
+        files=844,
+        directories=2,
+        bytes=0,
+    )
+    huge_payload = _rtmigrate.MailPreflight(
+        files=1,
+        directories=2,
+        bytes=700 * 1024 * 1024,
+    )
+
+    assert (
+        many_entries.projected_seconds
+        > _rtmigrate.MIGRATION_PREFLIGHT_BUDGET_SECONDS
+    )
+    assert (
+        huge_payload.projected_seconds
+        > _rtmigrate.MIGRATION_PREFLIGHT_BUDGET_SECONDS
+    )
+
+
+def test_large_hold_preflight_refuses_before_backup_or_cutover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    oversized = _rtmigrate.MailPreflight(
+        files=900,
+        directories=2,
+        bytes=0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "count_mail_tree",
+        lambda _root, **_kwargs: oversized,
+    )
+
+    with pytest.raises(
+        _rtmigrate.MailMigrationError,
+        match="--confirm-quiesced",
+    ):
+        _rtmigrate.migrate_project(
+            project,
+            registry_path=registry,
+            backup_root=backup_root,
+        )
+
+    assert registry_layout(project, registry) == "local"
+    assert not backup_root.exists()
+    project_uuid = json.loads(
+        _rtlib.project_identity_path(project).read_text()
+    )["uuid"]
+    assert not _rtlib.central_mail_root(registry, project_uuid).exists()
+
+
+def test_exclusive_recheck_closes_preflight_growth_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    counts = iter(
+        (
+            _rtmigrate.MailPreflight(files=3, directories=8, bytes=64),
+            _rtmigrate.MailPreflight(files=900, directories=2, bytes=64),
+        )
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "count_mail_tree",
+        lambda _root, **_kwargs: next(counts),
+    )
+
+    with pytest.raises(
+        _rtmigrate.MailMigrationError,
+        match="hold preflight refused",
+    ):
+        _rtmigrate.migrate_project(
+            project,
+            registry_path=registry,
+            backup_root=backup_root,
+        )
+
+    assert registry_layout(project, registry) == "local"
+    assert not backup_root.exists()
+
+
+def test_confirmed_quiescence_allows_large_projected_hold_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    oversized = _rtmigrate.MailPreflight(
+        files=900,
+        directories=2,
+        bytes=0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "count_mail_tree",
+        lambda _root, **_kwargs: oversized,
+    )
+
+    result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+        confirm_quiesced=True,
+    )
+
+    assert result["committed"] is True
+    assert result["preflight_files"] == 900
+    assert result["projected_exclusive_hold_ms"] > 5000
+    assert any(
+        "operator confirmed project quiescence" in warning
+        for warning in result["warnings"]
+    )
+
+
+def test_large_rollback_preflight_refuses_before_backup_or_cutover(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    migrated = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+    before_manifests = set(backup_root.rglob("manifest.json"))
+    oversized = _rtmigrate.MailPreflight(
+        files=900,
+        directories=2,
+        bytes=0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "count_mail_tree",
+        lambda _root, **_kwargs: oversized,
+    )
+
+    with pytest.raises(
+        _rtmigrate.MailMigrationError,
+        match="--confirm-quiesced",
+    ):
+        _rtmigrate.rollback_project(
+            project,
+            migrated["manifest"],
+            registry_path=registry,
+            backup_root=backup_root,
+        )
+
+    assert registry_layout(project, registry) == "central"
+    assert set(backup_root.rglob("manifest.json")) == before_manifests
+    assert not (project / ".roundtable" / "inbox").exists()
+
+
+def test_confirmed_quiescence_allows_large_rollback_with_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    migrated = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+    oversized = _rtmigrate.MailPreflight(
+        files=900,
+        directories=2,
+        bytes=0,
+    )
+    monkeypatch.setattr(
+        _rtmigrate,
+        "count_mail_tree",
+        lambda _root, **_kwargs: oversized,
+    )
+
+    result = _rtmigrate.rollback_project(
+        project,
+        migrated["manifest"],
+        registry_path=registry,
+        backup_root=backup_root,
+        confirm_quiesced=True,
+    )
+
+    assert result["committed"] is True
+    assert result["preflight_files"] == 900
+    assert result["projected_exclusive_hold_ms"] > 5000
+    assert result["registry_wait_cap_ms"] == pytest.approx(10000.0)
+    assert any(
+        "operator confirmed project quiescence" in warning
+        for warning in result["warnings"]
+    )
+    assert registry_layout(project, registry) == "local"
+
+
+def test_detached_forward_cleanup_cannot_delete_concurrent_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    original_purge = _rtmigrate._purge_retired_local_mail
+    observed = []
+
+    def rollback_before_purge(quarantine, state_dir, metrics):
+        central = _rtlib.resolve_project_mailbox_checked(
+            project,
+            registry_path=registry,
+        )
+        assert central.layout == "central"
+        marker = _rtlib.validate_central_mail_marker(
+            central.mail_root,
+            central.project_uuid,
+        )
+        rolled_back = _rtmigrate.rollback_project(
+            project,
+            marker["manifest"],
+            registry_path=registry,
+            backup_root=backup_root,
+        )
+        observed.append(rolled_back["status"])
+        return original_purge(quarantine, state_dir, metrics)
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_purge_retired_local_mail",
+        rollback_before_purge,
+    )
+    _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    local = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    assert observed == ["rolled back"]
+    assert local.layout == "local"
+    assert_internal_hardlink(local.mail_root)
+    assert not (project / ".roundtable" / "mail").exists()
+
+
+def test_detached_cleanup_time_is_outside_exclusive_hold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    original = _rtmigrate._purge_retired_local_mail
+
+    def delayed_purge(*args, **kwargs):
+        time.sleep(0.1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_purge_retired_local_mail",
+        delayed_purge,
+    )
+    started = time.monotonic()
+    result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+    elapsed_ms = (time.monotonic() - started) * 1000
+
+    assert elapsed_ms - result["exclusive_hold_ms"] >= 90
+
+
+def test_partial_detached_purge_is_preserved_and_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, backup_root = write_registered_project(tmp_path)
+    original = _rtmigrate.shutil.rmtree
+    interrupted = False
+
+    def partial_rmtree(path, *args, **kwargs):
+        nonlocal interrupted
+        selected = Path(path)
+        if (
+            not interrupted
+            and selected.name.startswith(".central-mail-retired.")
+        ):
+            interrupted = True
+            original(selected / "inbox")
+            raise OSError("simulated partial purge")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(_rtmigrate.shutil, "rmtree", partial_rmtree)
+    migrated = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert migrated["committed"] is True
+    assert any("could not purge detached" in item for item in migrated["warnings"])
+    retired = list(
+        (project / ".roundtable").glob(".central-mail-retired.*")
+    )
+    assert len(retired) == 1
+
+    repaired = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=backup_root,
+    )
+
+    assert repaired["status"] == "already central"
+    assert any("preserved incomplete" in item for item in repaired["warnings"])
+    assert retired[0].is_dir()
+    central = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    assert central.layout == "central"
+    assert_internal_hardlink(central.mail_root)
+
+
+def test_backup_root_defaults_to_registry_and_honors_precedence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry, _backup_root = write_registered_project(
+        tmp_path / "default"
+    )
+    default_result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+    )
+    default_archive = Path(
+        json.loads(Path(default_result["manifest"]).read_text())[
+            "archive_manifest"
+        ]
+    )
+    assert default_archive.is_relative_to(
+        registry.parent / "backups" / "roundtable-central-mail"
+    )
+
+    configured = (tmp_path / "configured-backups").resolve()
+    explicit = (tmp_path / "explicit-backups").resolve()
+    monkeypatch.setenv(_rtmigrate.MAIL_BACKUP_ENV, str(configured))
+    project, registry, _backup_root = write_registered_project(
+        tmp_path / "explicit"
+    )
+    explicit_result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+        backup_root=explicit,
+    )
+    explicit_archive = Path(
+        json.loads(Path(explicit_result["manifest"]).read_text())[
+            "archive_manifest"
+        ]
+    )
+    assert explicit_archive.is_relative_to(explicit)
+    assert not configured.exists()
+
+    project, registry, _backup_root = write_registered_project(
+        tmp_path / "environment"
+    )
+    environment_result = _rtmigrate.migrate_project(
+        project,
+        registry_path=registry,
+    )
+    environment_archive = Path(
+        json.loads(Path(environment_result["manifest"]).read_text())[
+            "archive_manifest"
+        ]
+    )
+    assert environment_archive.is_relative_to(configured)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("path", "/different/project", "project path changed before cutover"),
+        ("layout", "central", "project layout changed before cutover"),
+    ],
+)
+def test_flip_layout_rejects_registry_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    project, registry, _backup_root = write_registered_project(tmp_path)
+    project_uuid = json.loads(
+        _rtlib.project_identity_path(project).read_text()
+    )["uuid"]
+    document, _payload = _rtlib._read_projects_snapshot(registry)
+    document = json.loads(json.dumps(document))
+    document["projects"][0][field] = value
+
+    def inject_document(mutator, *_args, **_kwargs):
+        return mutator(document, b"", None)
+
+    monkeypatch.setattr(
+        _rtmigrate,
+        "_update_project_registry",
+        inject_document,
+    )
+
+    with pytest.raises(_rtmigrate.MailMigrationError, match=message):
+        _rtmigrate._flip_layout(
+            registry,
+            project_uuid,
+            project,
+            "local",
+            "central",
+            guard=lambda: None,
+            lock_timeout=1.0,
+            metrics=_rtmigrate.MigrationMetrics(),
+        )
 
 
 def test_rt_projects_cli_exposes_only_project_scoped_migration(
@@ -1546,6 +2523,31 @@ def test_rt_projects_cli_exposes_only_project_scoped_migration(
         check=True,
     )
     assert "{list,upgrade,add,resolve,rm,migrate,rollback}" in help_result.stdout
+    migrate_help = subprocess.run(
+        [sys.executable, str(BIN / "rt-projects"), "migrate", "--help"],
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    )
+    assert "--confirm-quiesced" in migrate_help.stdout
+    assert "capped at five seconds" in " ".join(
+        migrate_help.stdout.split()
+    )
+    rollback_help = subprocess.run(
+        [
+            sys.executable,
+            str(BIN / "rt-projects"),
+            "rollback",
+            "--help",
+        ],
+        text=True,
+        stdout=subprocess.PIPE,
+        check=True,
+    )
+    assert "--confirm-quiesced" in rollback_help.stdout
+    assert "remaining five-second hold budget" in " ".join(
+        rollback_help.stdout.split()
+    )
 
 
 def test_rt_projects_cli_reports_registry_errors_without_traceback(

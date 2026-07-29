@@ -111,13 +111,29 @@ def _acquire_flock_before(
     deadline,
     timeout_error,
     timeout_message,
+    allow_initial_attempt=False,
 ):
     """Acquire one advisory lock without exceeding an absolute deadline."""
 
+    first_attempt = True
     while True:
+        attempted_at = time.monotonic()
+        permitted_initial_attempt = (
+            first_attempt and allow_initial_attempt
+        )
+        first_attempt = False
+        if (
+            deadline is not None
+            and attempted_at >= deadline
+            and not permitted_initial_attempt
+        ):
+            raise timeout_error(timeout_message)
         try:
             fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
-            return
+            # The process may be descheduled immediately after flock succeeds.
+            # Returning the pre-syscall sample conservatively includes that
+            # interval in any caller's hold accounting.
+            return attempted_at
         except BlockingIOError:
             if deadline is not None and time.monotonic() >= deadline:
                 raise timeout_error(timeout_message) from None
@@ -370,7 +386,27 @@ class _ProjectMailboxLock:
         self._gate_path = None
         self._lock_path = None
         self._gate_held = False
+        self._gate_acquired_at = None
+        self._acquired_at = None
         self._entered = False
+
+    @property
+    def gate_acquired_at_monotonic(self):
+        """Return when this entrant began blocking later shared entrants."""
+
+        if self._gate_acquired_at is None:
+            raise ProjectRegistryError(
+                "layout lock writer gate has not been acquired"
+            )
+        return self._gate_acquired_at
+
+    @property
+    def acquired_at_monotonic(self):
+        """Return when the shared or exclusive layout resource was acquired."""
+
+        if self._acquired_at is None:
+            raise ProjectRegistryError("layout lock has not been acquired")
+        return self._acquired_at
 
     @staticmethod
     def _unlock_descriptor(descriptor):
@@ -436,7 +472,7 @@ class _ProjectMailboxLock:
             # An exclusive waiter keeps it while waiting for the resource lock,
             # so later readers cannot repeatedly overtake that writer.
             mode = "exclusive" if self.exclusive else "shared"
-            _acquire_flock_before(
+            self._gate_acquired_at = _acquire_flock_before(
                 self._gate_descriptor,
                 fcntl.LOCK_EX,
                 deadline=deadline,
@@ -445,9 +481,19 @@ class _ProjectMailboxLock:
                     f"timed out waiting for {mode} layout lock "
                     f"{self._lock_path}"
                 ),
+                allow_initial_attempt=self.timeout == 0,
             )
+            if (
+                deadline is not None
+                and self.timeout != 0
+                and time.monotonic() >= deadline
+            ):
+                raise ProjectLayoutLockTimeout(
+                    f"timed out waiting for {mode} layout lock "
+                    f"{self._lock_path}"
+                )
             self._gate_held = True
-            _acquire_flock_before(
+            self._acquired_at = _acquire_flock_before(
                 self._descriptor,
                 fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH,
                 deadline=deadline,
@@ -456,7 +502,17 @@ class _ProjectMailboxLock:
                     f"timed out waiting for {mode} layout lock "
                     f"{self._lock_path}"
                 ),
+                allow_initial_attempt=self.timeout == 0,
             )
+            if (
+                deadline is not None
+                and self.timeout != 0
+                and time.monotonic() >= deadline
+            ):
+                raise ProjectLayoutLockTimeout(
+                    f"timed out waiting for {mode} layout lock "
+                    f"{self._lock_path}"
+                )
             _verify_layout_lock_entry(
                 self._lock_dir_fd,
                 self._lock_path,
@@ -1465,17 +1521,61 @@ def _update_project_registry(
     *,
     guard=None,
     lock_timeout=REGISTRY_LOCK_TIMEOUT_SECONDS,
+    lock_deadline=None,
 ):
     path = _registry_path(path)
     lock_timeout = _validated_lock_timeout(
         lock_timeout,
         "registry lock timeout",
     )
-    deadline = (
+    timeout_deadline = (
         None
         if lock_timeout is None
         else time.monotonic() + lock_timeout
     )
+    if lock_deadline is not None:
+        if (
+            isinstance(lock_deadline, bool)
+            or not isinstance(lock_deadline, (int, float))
+        ):
+            raise ProjectRegistryError(
+                "registry lock deadline must be a finite non-negative number "
+                "or None"
+            )
+        try:
+            lock_deadline = float(lock_deadline)
+        except OverflowError:
+            raise ProjectRegistryError(
+                "registry lock deadline must be a finite non-negative number "
+                "or None"
+            ) from None
+        if not math.isfinite(lock_deadline) or lock_deadline < 0:
+            raise ProjectRegistryError(
+                "registry lock deadline must be a finite non-negative number "
+                "or None"
+            )
+    if timeout_deadline is None:
+        deadline = lock_deadline
+    elif lock_deadline is None:
+        deadline = timeout_deadline
+    else:
+        deadline = min(timeout_deadline, lock_deadline)
+
+    def enforce_absolute_deadline():
+        if (
+            lock_deadline is not None
+            and time.monotonic() >= lock_deadline
+        ):
+            raise ProjectRegistryLockTimeout(
+                f"timed out waiting for project registry lock {path}"
+            )
+
+    def update_guard():
+        enforce_absolute_deadline()
+        if guard is not None:
+            guard()
+
+    enforce_absolute_deadline()
     parent_fd = _open_registry_parent(path)
     lock_path = path.with_name(f"{path.name}.lock")
     flags = (
@@ -1515,7 +1615,17 @@ def _update_project_registry(
                 timeout_message=(
                     f"timed out waiting for project registry lock {path}"
                 ),
+                allow_initial_attempt=lock_timeout == 0,
             )
+            if (
+                deadline is not None
+                and lock_timeout != 0
+                and time.monotonic() >= deadline
+            ):
+                raise ProjectRegistryLockTimeout(
+                    f"timed out waiting for project registry lock {path}"
+                )
+            enforce_absolute_deadline()
             try:
                 document, source_payload = _read_projects_snapshot(
                     path, parent_fd=parent_fd
@@ -1524,21 +1634,22 @@ def _update_project_registry(
                 raise ProjectRegistryError(
                     f"refusing to overwrite invalid registry: {error}"
                 ) from error
+            enforce_absolute_deadline()
             changed = mutator(document, source_payload, parent_fd)
+            enforce_absolute_deadline()
             if changed:
                 _write_projects_doc(
                     path,
                     document,
                     parent_fd=parent_fd,
                     expected_payload=source_payload,
-                    guard=guard,
+                    guard=update_guard,
                 )
             else:
                 # A prior attempt may have completed its atomic rename and
                 # crashed before syncing the directory. An idempotent retry
                 # must make that already-visible registry entry durable.
-                if guard is not None:
-                    guard()
+                update_guard()
                 try:
                     os.fsync(parent_fd)
                 except OSError as error:
@@ -1546,8 +1657,7 @@ def _update_project_registry(
                         f"cannot sync project registry parent "
                         f"{path.parent}: {error}"
                     ) from error
-            if guard is not None:
-                guard()
+            update_guard()
             return changed
     finally:
         os.close(parent_fd)

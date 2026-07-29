@@ -428,6 +428,11 @@ def test_layout_lock_descriptor_is_close_on_exec(
         project, registry_path=registry
     )
     with guard:
+        assert (
+            guard.gate_acquired_at_monotonic
+            <= guard.acquired_at_monotonic
+            <= time.monotonic()
+        )
         flags = fcntl.fcntl(guard._descriptor, fcntl.F_GETFD)
         assert flags & fcntl.FD_CLOEXEC
         gate_flags = fcntl.fcntl(
@@ -435,6 +440,94 @@ def test_layout_lock_descriptor_is_close_on_exec(
             fcntl.F_GETFD,
         )
         assert gate_flags & fcntl.FD_CLOEXEC
+
+
+def test_layout_lock_rejects_free_lock_after_positive_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry = write_registered_project(tmp_path)
+    original = _rtlib._acquire_flock_before
+    calls = 0
+
+    def delayed_attempt(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            time.sleep(0.04)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        _rtlib,
+        "_acquire_flock_before",
+        delayed_attempt,
+    )
+
+    with pytest.raises(_rtlib.ProjectLayoutLockTimeout):
+        with _rtlib.locked_project_mailbox_checked(
+            project,
+            registry_path=registry,
+            exclusive=True,
+            timeout=0.02,
+        ):
+            raise AssertionError("expired free layout lock was admitted")
+
+
+def test_layout_lock_rejects_post_flock_deadline_gap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, registry = write_registered_project(tmp_path)
+    original = _rtlib._acquire_flock_before
+    calls = 0
+
+    def delayed_return(*args, **kwargs):
+        nonlocal calls
+        acquired_at = original(*args, **kwargs)
+        calls += 1
+        if calls == 1:
+            time.sleep(0.04)
+        return acquired_at
+
+    monkeypatch.setattr(
+        _rtlib,
+        "_acquire_flock_before",
+        delayed_return,
+    )
+
+    with pytest.raises(_rtlib.ProjectLayoutLockTimeout):
+        with _rtlib.locked_project_mailbox_checked(
+            project,
+            registry_path=registry,
+            exclusive=True,
+            timeout=0.02,
+        ):
+            raise AssertionError("post-flock deadline gap was admitted")
+
+    monkeypatch.setattr(
+        _rtlib,
+        "_acquire_flock_before",
+        original,
+    )
+    with _rtlib.locked_project_mailbox_checked(
+        project,
+        registry_path=registry,
+        timeout=0.2,
+    ):
+        pass
+
+
+def test_zero_timeout_keeps_one_free_lock_attempt(
+    tmp_path: Path,
+) -> None:
+    project, registry = write_registered_project(tmp_path)
+
+    with _rtlib.locked_project_mailbox_checked(
+        project,
+        registry_path=registry,
+        timeout=0,
+    ):
+        pass
 
 
 def test_registry_lock_wait_is_bounded_inside_exclusive_layout_section(
@@ -480,6 +573,99 @@ def test_registry_lock_wait_is_bounded_inside_exclusive_layout_section(
         timeout=0.5,
     ):
         pass
+
+
+def test_registry_lock_absolute_deadline_is_not_rebased(
+    tmp_path: Path,
+) -> None:
+    _project, registry = write_registered_project(tmp_path)
+    lock_path = registry.with_name(f"{registry.name}.lock")
+    held = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+        0o600,
+    )
+    fcntl.flock(held, fcntl.LOCK_EX)
+
+    def no_change(_document, _payload, _parent_fd):
+        return False
+
+    try:
+        expired = time.monotonic() - 0.01
+        started = time.monotonic()
+        with pytest.raises(_rtlib.ProjectRegistryLockTimeout):
+            _rtlib._update_project_registry(
+                no_change,
+                registry,
+                lock_timeout=1.0,
+                lock_deadline=expired,
+            )
+        assert time.monotonic() - started < 0.1
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        os.close(held)
+
+
+def test_expired_registry_deadline_does_not_mutate_when_lock_is_free(
+    tmp_path: Path,
+) -> None:
+    _project, registry = write_registered_project(tmp_path)
+    called = False
+
+    def unexpected_mutation(_document, _payload, _parent_fd):
+        nonlocal called
+        called = True
+        return True
+
+    before = registry.read_bytes()
+    with pytest.raises(_rtlib.ProjectRegistryLockTimeout):
+        _rtlib._update_project_registry(
+            unexpected_mutation,
+            registry,
+            lock_timeout=1.0,
+            lock_deadline=time.monotonic() - 0.01,
+        )
+
+    assert called is False
+    assert registry.read_bytes() == before
+
+
+def test_zero_registry_timeout_tries_once_without_waiting(
+    tmp_path: Path,
+) -> None:
+    _project, registry = write_registered_project(tmp_path)
+
+    def no_change(_document, _payload, _parent_fd):
+        return False
+
+    assert (
+        _rtlib._update_project_registry(
+            no_change,
+            registry,
+            lock_timeout=0,
+        )
+        is False
+    )
+
+    lock_path = registry.with_name(f"{registry.name}.lock")
+    held = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+        0o600,
+    )
+    fcntl.flock(held, fcntl.LOCK_EX)
+    started = time.monotonic()
+    try:
+        with pytest.raises(_rtlib.ProjectRegistryLockTimeout):
+            _rtlib._update_project_registry(
+                no_change,
+                registry,
+                lock_timeout=0,
+            )
+        assert time.monotonic() - started < 0.1
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        os.close(held)
 
 
 @pytest.mark.parametrize(

@@ -25,6 +25,7 @@ from _rtruntime import (
     SeatOccupied,
     arm_codex_launch_intent,
     claim,
+    release,
     runtime_root,
 )
 
@@ -550,6 +551,22 @@ def launch(harness: str, argv: list[str]) -> int:
             try:
                 arm_codex_launch_intent(token)
             except (RuntimeStateError, OSError) as error:
+                try:
+                    released = release(token)
+                except (RuntimeStateError, OSError) as release_error:
+                    clear_unanchored_lease_context()
+                    raise SelectionError(
+                        "rt-codex: could not arm native-thread binding "
+                        f"({error}) and could not release the claimed seat: "
+                        f"{release_error}"
+                    ) from error
+                clear_unanchored_lease_context()
+                if not released:
+                    raise SelectionError(
+                        "rt-codex: could not arm native-thread binding "
+                        f"({error}) and the claimed seat was no longer "
+                        "releasable"
+                    ) from error
                 raise SelectionError(
                     f"rt-codex: could not arm native-thread binding: {error}"
                 ) from error

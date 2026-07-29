@@ -556,6 +556,53 @@ def test_codex_does_not_exec_when_binding_intent_cannot_be_armed(
         tmp_path / "project", agent_id="codex", harness="codex"
     )
     calls = []
+    claimed = lease(project, "codex")
+    clear_lease_environment(monkeypatch)
+    monkeypatch.setenv("RT_FROM", "codex")
+    monkeypatch.setattr(_rtlauncher, "choose_launch_cwd", lambda _harness: project)
+    monkeypatch.setattr(_rtlauncher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(_rtlauncher, "harness_bin", lambda _harness: tmp_path / "codex")
+    monkeypatch.setattr(
+        _rtlauncher,
+        "claim",
+        lambda _root, _agent_id, _harness: claimed,
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "arm_codex_launch_intent",
+        lambda _token: (_ for _ in ()).throw(
+            _rtlauncher.RuntimeStateError("unsafe runtime")
+        ),
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "preflight_codex_services",
+        lambda *, ready_action: ready_action(),
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "release",
+        lambda token: calls.append(("release", token)) or True,
+    )
+    monkeypatch.setattr(_rtlauncher.os, "execv", lambda *_args: calls.append("exec"))
+
+    with pytest.raises(_rtlauncher.SelectionError, match="could not arm"):
+        _rtlauncher.launch("codex", [])
+
+    assert calls == [("release", claimed)]
+    assert os.environ.get("RT_FROM") == "codex"
+    assert os.environ.get("RT_PROJECT_ROOT") is None
+    assert os.environ.get("RT_SESSION_ID") is None
+    assert os.environ.get("RT_LEASE_REVISION") is None
+
+
+def test_codex_reports_arm_and_release_failures_together(
+    tmp_path,
+    monkeypatch,
+):
+    project = write_project(
+        tmp_path / "project", agent_id="codex", harness="codex"
+    )
     clear_lease_environment(monkeypatch)
     monkeypatch.setenv("RT_FROM", "codex")
     monkeypatch.setattr(_rtlauncher, "choose_launch_cwd", lambda _harness: project)
@@ -570,20 +617,68 @@ def test_codex_does_not_exec_when_binding_intent_cannot_be_armed(
         _rtlauncher,
         "arm_codex_launch_intent",
         lambda _token: (_ for _ in ()).throw(
-            _rtlauncher.RuntimeStateError("unsafe runtime")
+            _rtlauncher.RuntimeStateError("arm unsafe")
         ),
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "release",
+        lambda _token: (_ for _ in ()).throw(OSError("release failed")),
     )
     monkeypatch.setattr(
         _rtlauncher,
         "preflight_codex_services",
         lambda *, ready_action: ready_action(),
     )
-    monkeypatch.setattr(_rtlauncher.os, "execv", lambda *_args: calls.append("exec"))
 
-    with pytest.raises(_rtlauncher.SelectionError, match="could not arm"):
+    with pytest.raises(_rtlauncher.SelectionError) as captured:
         _rtlauncher.launch("codex", [])
 
-    assert calls == []
+    assert "arm unsafe" in str(captured.value)
+    assert "release failed" in str(captured.value)
+    assert os.environ.get("RT_PROJECT_ROOT") is None
+    assert os.environ.get("RT_SESSION_ID") is None
+    assert os.environ.get("RT_LEASE_REVISION") is None
+
+
+def test_codex_reports_fenced_release_miss_after_arm_failure(
+    tmp_path,
+    monkeypatch,
+):
+    project = write_project(
+        tmp_path / "project", agent_id="codex", harness="codex"
+    )
+    clear_lease_environment(monkeypatch)
+    monkeypatch.setenv("RT_FROM", "codex")
+    monkeypatch.setattr(_rtlauncher, "choose_launch_cwd", lambda _harness: project)
+    monkeypatch.setattr(_rtlauncher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(_rtlauncher, "harness_bin", lambda _harness: tmp_path / "codex")
+    monkeypatch.setattr(
+        _rtlauncher,
+        "claim",
+        lambda root, agent_id, _harness: lease(root, agent_id),
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "arm_codex_launch_intent",
+        lambda _token: (_ for _ in ()).throw(
+            _rtlauncher.RuntimeStateError("arm unsafe")
+        ),
+    )
+    monkeypatch.setattr(_rtlauncher, "release", lambda _token: False)
+    monkeypatch.setattr(
+        _rtlauncher,
+        "preflight_codex_services",
+        lambda *, ready_action: ready_action(),
+    )
+
+    with pytest.raises(
+        _rtlauncher.SelectionError,
+        match="no longer releasable",
+    ) as captured:
+        _rtlauncher.launch("codex", [])
+
+    assert "arm unsafe" in str(captured.value)
 
 
 def test_codex_injects_reserved_overrides_before_double_dash(monkeypatch):

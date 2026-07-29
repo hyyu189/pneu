@@ -40,3 +40,24 @@ def test_scan_text_finds_private_material_without_embedding_it_in_this_file():
     assert "personal absolute path" in labels
     assert "private Claude session URL" in labels
     assert "OpenAI-style secret" in labels
+
+
+def test_release_surfaces_do_not_ship_environment_fault_injection(
+    tmp_path,
+    monkeypatch,
+):
+    token = "RT_MIGRATION_" + "FAILPOINT"
+
+    assert token not in (ROOT / "bin" / "_rtmigrate.py").read_text()
+    assert token in SAFETY.RELEASE_FORBIDDEN_TOKENS
+    fake = tmp_path / "bin" / "faulty"
+    fake.parent.mkdir()
+    fake.write_text(f'os.environ.get("{token}")\n')
+    monkeypatch.setattr(SAFETY, "ROOT", tmp_path)
+
+    errors = SAFETY.scan_worktree(["bin/faulty"])
+
+    assert any(
+        "production-active test fault injection" in error
+        for error in errors
+    )

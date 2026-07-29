@@ -71,6 +71,10 @@ METADATA_RULES = (
         re.compile(r"claude\.ai/code/" + "session_", re.IGNORECASE),
     ),
 )
+RELEASE_SURFACE_PREFIXES = ("bin/", "roundtable_packaging/")
+RELEASE_FORBIDDEN_TOKENS = (
+    "RT_MIGRATION_" + "FAILPOINT",
+)
 
 
 def git(*args: str) -> str:
@@ -145,6 +149,12 @@ def scan_worktree(paths: list[str]) -> list[str]:
             continue
         text = payload.decode("utf-8", errors="replace")
         errors.extend(scan_text(path, text))
+        if relative.startswith(RELEASE_SURFACE_PREFIXES):
+            for token in RELEASE_FORBIDDEN_TOKENS:
+                if token in text:
+                    errors.append(
+                        f"{relative}: production-active test fault injection"
+                    )
     return errors
 
 

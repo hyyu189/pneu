@@ -85,8 +85,8 @@ roundtable-init new-git-project --git
 | `rt-inbox` | List un-ack'd inbound messages. |
 | `rt-projects <list\|add\|rm\|upgrade>` | Maintain the validated project registry; `upgrade` is the explicit, backed-up v1→v2 gate. |
 | `rt-projects resolve ROOT` | Diagnostic JSON view of the UUID-pinned mailbox selected by the registry. |
-| `rt-projects migrate ROOT` | Exclusively copy a local mailbox through a verified manifest backup into the central UUID store. |
-| `rt-projects rollback ROOT --manifest PATH` | Copy current central mail back to local; requires the exact active forward manifest and preserves post-cutover mail. |
+| `rt-projects migrate ROOT` | Exclusively copy a local mailbox through a verified archive and durable recovery record into the central UUID store. |
+| `rt-projects rollback ROOT --manifest PATH` | Copy current central mail back to local; requires the exact active forward recovery record and preserves post-cutover mail. |
 | `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit. |
 | `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: where does cmux think an agent sits. Not part of sending. |
 

@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 from _rtlib import (
     CENTRAL_MAIL_MARKER_NAME,
     CENTRAL_MAIL_MARKER_SCHEMA,
+    LAYOUT_LOCK_TIMEOUT_SECONDS,
     PROJECTS_SCHEMA,
     ProjectRegistryError,
     _clean_git_environment,
@@ -32,6 +33,7 @@ from _rtlib import (
     _registry_path,
     _strict_entries_from_document,
     _update_project_registry,
+    _validated_lock_timeout,
     _validate_owned_directory_fd,
     _verify_project_guard,
     central_mail_root,
@@ -43,19 +45,21 @@ from _rtlib import (
 
 
 MIGRATION_MANIFEST_SCHEMA = "roundtable.mail-migration.v1"
+RECOVERY_RECORD_SCHEMA = "roundtable.mail-recovery.v1"
 ROLLBACK_MARKER_SCHEMA = "roundtable.mail-rollback.v1"
 ROLLBACK_MARKER_NAME = ".mail-rollback.json"
-DEFAULT_BACKUP_ROOT = (
-    Path.home()
-    / "Documents"
-    / "Workspace"
-    / "backups"
-    / "roundtable-central-mail"
-)
+RECOVERY_RECORDS_DIRECTORY = "migration-records"
+MAIL_BACKUP_ENV = "RT_MAIL_BACKUP_DIR"
 PRIVATE_DIRECTORY_MODE = 0o700
 PRIVATE_FILE_MODE = 0o600
 COPY_CHUNK_SIZE = 1024 * 1024
 MAIL_TOP_LEVEL = ("inbox", "messages")
+MIGRATION_PREFLIGHT_BASE_SECONDS = 0.416
+MIGRATION_PREFLIGHT_ENTRY_SECONDS = 0.005422
+MIGRATION_PREFLIGHT_MIB_SECONDS = 0.007344
+MIGRATION_PREFLIGHT_BUDGET_SECONDS = (
+    LAYOUT_LOCK_TIMEOUT_SECONDS * 0.5
+)
 GITIGNORE_BEGIN = "# BEGIN Roundtable central mail"
 GITIGNORE_END = "# END Roundtable central mail"
 GITIGNORE_BLOCK = (
@@ -65,6 +69,9 @@ GITIGNORE_BLOCK = (
     ".mail-rollback.*",
     GITIGNORE_END,
 )
+
+
+_TEST_FAILPOINT: str | None = None
 
 
 class MailMigrationError(ProjectRegistryError):
@@ -90,6 +97,25 @@ class MailSnapshot:
     digest: str
     files: int
     bytes: int
+
+
+@dataclass(frozen=True)
+class MailPreflight:
+    files: int
+    directories: int
+    bytes: int
+
+    @property
+    def entries(self) -> int:
+        return self.files + self.directories
+
+    @property
+    def projected_seconds(self) -> float:
+        return (
+            MIGRATION_PREFLIGHT_BASE_SECONDS
+            + self.entries * MIGRATION_PREFLIGHT_ENTRY_SECONDS
+            + (self.bytes / (1024 * 1024)) * MIGRATION_PREFLIGHT_MIB_SECONDS
+        )
 
 
 @dataclass
@@ -133,7 +159,7 @@ def _json_bytes(document: dict) -> bytes:
 
 
 def _maybe_fail(phase: str) -> None:
-    if os.environ.get("RT_MIGRATION_FAILPOINT", "") == phase:
+    if _TEST_FAILPOINT == phase:
         raise InjectedMigrationFailure(
             f"injected central-mail migration failure at {phase}"
         )
@@ -449,6 +475,23 @@ def _paths_overlap(left: Path, right: Path) -> bool:
     )
 
 
+def _selected_backup_root(
+    registry: Path,
+    override: Path | str | None,
+) -> Path:
+    if override is not None:
+        return Path(override).expanduser()
+    configured = os.environ.get(MAIL_BACKUP_ENV)
+    if configured:
+        selected = Path(configured).expanduser()
+        if not selected.is_absolute():
+            raise MailMigrationError(
+                f"{MAIL_BACKUP_ENV} must be an absolute path: {selected}"
+            )
+        return selected
+    return registry.parent / "backups" / "roundtable-central-mail"
+
+
 def _validate_backup_location(
     backup_root: Path,
     project_uuid: str,
@@ -638,6 +681,115 @@ def _scan_directory(
                 "hardlink": None,
             }
         )
+
+
+def _count_mail_directory(
+    descriptor: int,
+    absolute: Path,
+) -> MailPreflight:
+    info = os.fstat(descriptor)
+    _validate_owned_node(info, absolute, "mail directory", directory=True)
+    files = 0
+    directories = 1
+    bytes_total = 0
+    try:
+        names = os.listdir(descriptor)
+    except OSError as error:
+        raise MailMigrationError(
+            f"cannot list mail directory {absolute}: {error}"
+        ) from error
+    for name in names:
+        if not isinstance(name, str) or name in {"", ".", ".."} or "/" in name:
+            raise MailMigrationError(
+                f"invalid mail entry name in {absolute}: {name!r}"
+            )
+        path = absolute / name
+        try:
+            visible = os.stat(
+                name,
+                dir_fd=descriptor,
+                follow_symlinks=False,
+            )
+        except OSError as error:
+            raise MailMigrationError(
+                f"cannot inspect mail entry {path}: {error}"
+            ) from error
+        if stat.S_ISDIR(visible.st_mode):
+            child = None
+            try:
+                child = _open_child_directory(descriptor, name, path)
+                held = os.fstat(child)
+                if (
+                    held.st_dev != visible.st_dev
+                    or held.st_ino != visible.st_ino
+                ):
+                    raise MailMigrationError(
+                        f"mail directory changed while opening: {path}"
+                    )
+                counted = _count_mail_directory(child, path)
+                files += counted.files
+                directories += counted.directories
+                bytes_total += counted.bytes
+            finally:
+                if child is not None:
+                    os.close(child)
+            continue
+        if not stat.S_ISREG(visible.st_mode):
+            raise MailMigrationError(
+                f"mail tree contains a symlink or special file: {path}"
+            )
+        _validate_owned_node(visible, path, "mail file", directory=False)
+        files += 1
+        bytes_total += visible.st_size
+    return MailPreflight(
+        files=files,
+        directories=directories,
+        bytes=bytes_total,
+    )
+
+
+def count_mail_tree(
+    root: Path,
+    *,
+    allow_missing_roots: bool = False,
+) -> MailPreflight:
+    """Count authoritative mail cheaply for migration hold admission."""
+
+    root = Path(root)
+    root_fd = _open_owned_directory(root, "mail root")
+    files = 0
+    directories = 0
+    bytes_total = 0
+    try:
+        for name in MAIL_TOP_LEVEL:
+            path = root / name
+            try:
+                descriptor = _open_child_directory(root_fd, name, path)
+            except FileNotFoundError:
+                if allow_missing_roots:
+                    directories += 1
+                    continue
+                raise MailMigrationError(
+                    f"mail directory is missing: {path}"
+                ) from None
+            except OSError as error:
+                raise MailMigrationError(
+                    f"cannot open mail directory {path}: {error}"
+                ) from error
+            try:
+                counted = _count_mail_directory(descriptor, path)
+            finally:
+                os.close(descriptor)
+            files += counted.files
+            directories += counted.directories
+            bytes_total += counted.bytes
+    finally:
+        os.close(root_fd)
+    return MailPreflight(
+        files=files,
+        directories=directories,
+        bytes=bytes_total,
+    )
 
 
 def scan_mail_tree(root: Path) -> MailSnapshot:
@@ -1065,6 +1217,7 @@ def _flip_layout(
     *,
     guard,
     lock_timeout: float,
+    lock_deadline: float | None = None,
     metrics: MigrationMetrics,
 ) -> None:
     def mutate(document, _source_payload, _parent_fd):
@@ -1110,6 +1263,7 @@ def _flip_layout(
             registry,
             guard=guard,
             lock_timeout=lock_timeout,
+            lock_deadline=lock_deadline,
         )
     finally:
         metrics.registry_flip_seconds += time.monotonic() - started
@@ -1348,6 +1502,354 @@ def load_manifest(
     return path, document, _sha256(payload)
 
 
+def _recovery_records_root(registry: Path) -> Path:
+    return registry.parent / RECOVERY_RECORDS_DIRECTORY
+
+
+def _recovery_record_path(
+    registry: Path,
+    project_uuid: str,
+    operation_id: str,
+) -> Path:
+    return (
+        _recovery_records_root(registry)
+        / project_uuid
+        / f"{operation_id}.json"
+    )
+
+
+def _recovery_record_document(
+    manifest: dict,
+    archive_manifest: Path,
+    archive_manifest_sha256: str,
+) -> dict:
+    record = json.loads(json.dumps(manifest))
+    record.update(
+        {
+            "schema": RECOVERY_RECORD_SCHEMA,
+            "archive_manifest": str(archive_manifest),
+            "archive_manifest_sha256": archive_manifest_sha256,
+        }
+    )
+    record.pop("bundle", None)
+    return record
+
+
+def _write_recovery_record(
+    *,
+    manifest: dict,
+    archive_manifest: Path,
+    archive_manifest_sha256: str,
+    registry: Path,
+    project_uuid: str,
+    operation_id: str,
+    metrics: MigrationMetrics,
+    reuse_identical: bool = False,
+) -> tuple[Path, dict, str]:
+    record = _recovery_record_document(
+        manifest,
+        archive_manifest,
+        archive_manifest_sha256,
+    )
+    root = _ensure_private_directory(
+        _recovery_records_root(registry),
+        "migration recovery-record root",
+        metrics,
+    )
+    project_root = _ensure_private_directory(
+        root / project_uuid,
+        "project migration recovery-record root",
+        metrics,
+    )
+    path = _recovery_record_path(
+        registry,
+        project_uuid,
+        operation_id,
+    )
+    temporary = project_root / f".{operation_id}.tmp"
+    payload = _json_bytes(record)
+    existing = _path_info(path)
+    staged = _path_info(temporary)
+    if existing is not None:
+        if not reuse_identical:
+            raise MailMigrationError(
+                f"migration recovery-record collision: {path}"
+            )
+        verified_path, verified, digest = load_recovery_record(
+            path,
+            expected_uuid=project_uuid,
+            expected_registry=registry,
+        )
+        if verified != record or digest != _sha256(payload):
+            raise MailMigrationError(
+                f"migration recovery-record collision: {path}"
+            )
+        if staged is not None:
+            if (
+                _read_private_file(
+                    temporary,
+                    "migration recovery-record staging",
+                )
+                != payload
+            ):
+                raise MailMigrationError(
+                    f"migration recovery-record staging collision: "
+                    f"{temporary}"
+                )
+            temporary.unlink()
+            _timed_fsync_directory(project_root, metrics)
+        return verified_path, verified, digest
+    if staged is not None:
+        if (
+            not reuse_identical
+            or _read_private_file(
+                temporary,
+                "migration recovery-record staging",
+            )
+            != payload
+        ):
+            raise MailMigrationError(
+                f"migration recovery-record staging collision: {temporary}"
+            )
+        _rename_noreplace(temporary, path)
+        _timed_fsync_directory(project_root, metrics)
+    try:
+        if _path_info(path) is None:
+            _write_private_file(temporary, payload, metrics)
+            _rename_noreplace(temporary, path)
+            _timed_fsync_directory(project_root, metrics)
+        verified_path, verified, digest = load_recovery_record(
+            path,
+            expected_uuid=project_uuid,
+            expected_registry=registry,
+        )
+        if (
+            verified_path != path
+            or verified != record
+            or digest != _sha256(payload)
+        ):
+            raise MailMigrationError(
+                f"published migration recovery record failed verification: "
+                f"{path}"
+            )
+        return path, verified, digest
+    except Exception:
+        if _path_info(temporary) is not None:
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def load_recovery_record(
+    record_path: Path | str,
+    *,
+    expected_uuid: str,
+    expected_registry: Path,
+) -> tuple[Path, dict, str]:
+    path = _manifest_path(record_path)
+    expected_parent = (
+        _recovery_records_root(expected_registry) / expected_uuid
+    )
+    if path.parent != expected_parent:
+        raise MailMigrationError(
+            f"migration recovery record is outside its UUID root: {path}"
+        )
+    payload = _read_private_file(path, "migration recovery record")
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise MailMigrationError(
+            f"cannot parse migration recovery record {path}: {error}"
+        ) from error
+    if not isinstance(document, dict):
+        raise MailMigrationError(
+            f"migration recovery record is not a mapping: {path}"
+        )
+    if document.get("schema") != RECOVERY_RECORD_SCHEMA:
+        raise MailMigrationError(
+            "unsupported migration recovery-record schema: "
+            f"{document.get('schema')!r}"
+        )
+    try:
+        operation_id = str(uuid.UUID(document.get("operation_id")))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise MailMigrationError(
+            f"migration recovery record has invalid operation UUID: {path}"
+        ) from error
+    if (
+        operation_id != document.get("operation_id")
+        or path
+        != _recovery_record_path(
+            expected_registry,
+            expected_uuid,
+            operation_id,
+        )
+    ):
+        raise MailMigrationError(
+            f"migration recovery record path binding is invalid: {path}"
+        )
+    if document.get("project_uuid") != expected_uuid:
+        raise MailMigrationError(
+            f"migration recovery record UUID does not match "
+            f"{expected_uuid}: {path}"
+        )
+    if document.get("registry_path") != str(expected_registry):
+        raise MailMigrationError(
+            f"migration recovery record registry does not match "
+            f"{expected_registry}: {path}"
+        )
+    direction = document.get("direction")
+    if direction not in {"local-to-central", "central-to-local"}:
+        raise MailMigrationError(
+            f"migration recovery record has invalid direction: "
+            f"{direction!r}"
+        )
+    expected_layouts = {
+        "local-to-central": ("local", "central"),
+        "central-to-local": ("central", "local"),
+    }[direction]
+    if (
+        document.get("source_layout"),
+        document.get("target_layout"),
+    ) != expected_layouts:
+        raise MailMigrationError(
+            f"migration recovery record layout binding is invalid: {path}"
+        )
+    expected_central = central_mail_root(
+        expected_registry,
+        expected_uuid,
+    )
+    if document.get("central_root") != str(expected_central):
+        raise MailMigrationError(
+            f"migration recovery record central root is invalid: {path}"
+        )
+    project_root = document.get("project_root")
+    if (
+        not isinstance(project_root, str)
+        or not Path(project_root).is_absolute()
+    ):
+        raise MailMigrationError(
+            f"migration recovery record project root is invalid: {path}"
+        )
+    registry_row = document.get("registry_row")
+    if (
+        not isinstance(registry_row, dict)
+        or registry_row.get("uuid") != expected_uuid
+        or registry_row.get("path") != project_root
+        or registry_row.get("status") != "active"
+        or registry_row.get("layout") != document.get("source_layout")
+    ):
+        raise MailMigrationError(
+            f"migration recovery record registry row is invalid: {path}"
+        )
+    entries = _manifest_entries(document)
+    files = sum(entry["kind"] == "file" for entry in entries)
+    bytes_total = sum(
+        int(entry.get("size") or 0)
+        for entry in entries
+        if entry["kind"] == "file"
+    )
+    if document.get("files") != files or document.get("bytes") != bytes_total:
+        raise MailMigrationError(
+            f"migration recovery record totals are invalid: {path}"
+        )
+    archive_manifest = document.get("archive_manifest")
+    archive_digest = document.get("archive_manifest_sha256")
+    if (
+        not isinstance(archive_manifest, str)
+        or not Path(archive_manifest).is_absolute()
+        or not isinstance(archive_digest, str)
+        or len(archive_digest) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in archive_digest
+        )
+    ):
+        raise MailMigrationError(
+            f"migration recovery record archive binding is invalid: {path}"
+        )
+    for field in ("registry_sha256", "project_witness_sha256"):
+        value = document.get(field)
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in value
+            )
+        ):
+            raise MailMigrationError(
+                f"migration recovery record {field} is invalid: {path}"
+            )
+    source_manifest = document.get("source_manifest")
+    if direction == "local-to-central":
+        if source_manifest is not None:
+            raise MailMigrationError(
+                f"forward recovery record has a source manifest: {path}"
+            )
+    elif (
+        not isinstance(source_manifest, str)
+        or not Path(source_manifest).is_absolute()
+    ):
+        raise MailMigrationError(
+            f"rollback recovery record source manifest is invalid: {path}"
+        )
+    return path, document, _sha256(payload)
+
+
+def _load_forward_recovery_record_alias(
+    manifest_path: Path | str,
+    *,
+    expected_uuid: str,
+    expected_registry: Path,
+) -> tuple[Path, dict, str]:
+    requested = _manifest_path(manifest_path)
+    expected_parent = (
+        _recovery_records_root(expected_registry) / expected_uuid
+    )
+    if requested.parent == expected_parent:
+        path, record, digest = load_recovery_record(
+            requested,
+            expected_uuid=expected_uuid,
+            expected_registry=expected_registry,
+        )
+    else:
+        archive_path, legacy, archive_digest = load_manifest(
+            requested,
+            expected_uuid=expected_uuid,
+            expected_registry=expected_registry,
+        )
+        canonical = _recovery_record_path(
+            expected_registry,
+            expected_uuid,
+            legacy["operation_id"],
+        )
+        if _path_info(canonical) is None:
+            raise MailMigrationError(
+                "legacy forward manifest has not been imported by an active "
+                f"central generation: {archive_path}"
+            )
+        path, record, digest = load_recovery_record(
+            canonical,
+            expected_uuid=expected_uuid,
+            expected_registry=expected_registry,
+        )
+        expected = _recovery_record_document(
+            legacy,
+            archive_path,
+            archive_digest,
+        )
+        if record != expected:
+            raise MailMigrationError(
+                f"legacy forward manifest does not match its imported "
+                f"recovery record: {archive_path}"
+            )
+    if record["direction"] != "local-to-central":
+        raise MailMigrationError(
+            f"rollback requires a forward migration manifest: {path}"
+        )
+    return path, record, digest
+
+
 def _create_backup(
     *,
     source_root: Path,
@@ -1494,25 +1996,13 @@ def _write_central_marker(
     return marker
 
 
-def _verify_central_generation(
+def _validate_central_generation_binding(
     root: Path,
-    project_uuid: str,
-    registry: Path,
-    *,
-    expected_manifest: Path | None = None,
-    expected_source_digest: str | None = None,
-) -> tuple[dict, Path, dict]:
-    expected_root = central_mail_root(registry, project_uuid)
-    if root != expected_root:
-        raise MailMigrationError(
-            f"central generation path is not UUID-derived: {root}"
-        )
-    marker = validate_central_mail_marker(root, project_uuid)
-    manifest_path, manifest, manifest_digest = load_manifest(
-        marker["manifest"],
-        expected_uuid=project_uuid,
-        expected_registry=registry,
-    )
+    marker: dict,
+    manifest_path: Path,
+    manifest: dict,
+    manifest_digest: str,
+) -> None:
     if marker["manifest_sha256"] != manifest_digest:
         raise MailMigrationError(
             f"central generation manifest digest mismatch: {root}"
@@ -1529,6 +2019,167 @@ def _verify_central_generation(
         raise MailMigrationError(
             f"central generation is not a forward manifest: {root}"
         )
+    if marker["manifest"] != str(manifest_path):
+        raise MailMigrationError(
+            f"central generation manifest path mismatch: {root}"
+        )
+
+
+def _rebind_central_marker(
+    root: Path,
+    marker: dict,
+    *,
+    recovery_record: Path,
+    recovery_record_digest: str,
+    metrics: MigrationMetrics,
+) -> dict:
+    rebound = json.loads(json.dumps(marker))
+    rebound.update(
+        {
+            "manifest": str(recovery_record),
+            "manifest_sha256": recovery_record_digest,
+        }
+    )
+    payload = _json_bytes(rebound)
+    marker_path = root / CENTRAL_MAIL_MARKER_NAME
+    temporary = root / (
+        f".{CENTRAL_MAIL_MARKER_NAME}.import."
+        f"{marker['operation_id']}.tmp"
+    )
+    staged = _path_info(temporary)
+    if staged is not None:
+        if (
+            _read_private_file(
+                temporary,
+                "central marker import staging",
+            )
+            != payload
+        ):
+            raise MailMigrationError(
+                f"central marker import staging collision: {temporary}"
+            )
+    else:
+        _write_private_file(temporary, payload, metrics)
+    if validate_central_mail_marker(root, marker["project_uuid"]) != marker:
+        raise MailMigrationError(
+            f"central generation changed during legacy import: {root}"
+        )
+    try:
+        os.replace(temporary, marker_path)
+    except OSError as error:
+        raise MailMigrationError(
+            f"cannot rebind imported central marker {marker_path}: {error}"
+        ) from error
+    _timed_fsync_directory(root, metrics)
+    observed = validate_central_mail_marker(
+        root,
+        marker["project_uuid"],
+    )
+    if observed != rebound:
+        raise MailMigrationError(
+            f"imported central marker failed verification: {marker_path}"
+        )
+    return observed
+
+
+def _import_legacy_central_generation(
+    root: Path,
+    marker: dict,
+    project_uuid: str,
+    registry: Path,
+    metrics: MigrationMetrics,
+) -> tuple[dict, Path, dict, str]:
+    archive_manifest, legacy, archive_digest = load_manifest(
+        marker["manifest"],
+        expected_uuid=project_uuid,
+        expected_registry=registry,
+    )
+    _validate_central_generation_binding(
+        root,
+        marker,
+        archive_manifest,
+        legacy,
+        archive_digest,
+    )
+    recovery_record, recovery, recovery_digest = (
+        _write_recovery_record(
+            manifest=legacy,
+            archive_manifest=archive_manifest,
+            archive_manifest_sha256=archive_digest,
+            registry=registry,
+            project_uuid=project_uuid,
+            operation_id=legacy["operation_id"],
+            metrics=metrics,
+            reuse_identical=True,
+        )
+    )
+    rebound = _rebind_central_marker(
+        root,
+        marker,
+        recovery_record=recovery_record,
+        recovery_record_digest=recovery_digest,
+        metrics=metrics,
+    )
+    return rebound, recovery_record, recovery, recovery_digest
+
+
+def _verify_central_generation(
+    root: Path,
+    project_uuid: str,
+    registry: Path,
+    *,
+    expected_manifest: Path | None = None,
+    expected_source_digest: str | None = None,
+    import_legacy: bool = False,
+    metrics: MigrationMetrics | None = None,
+) -> tuple[dict, Path, dict]:
+    expected_root = central_mail_root(registry, project_uuid)
+    if root != expected_root:
+        raise MailMigrationError(
+            f"central generation path is not UUID-derived: {root}"
+        )
+    marker = validate_central_mail_marker(root, project_uuid)
+    marker_manifest = Path(marker["manifest"])
+    expected_record_parent = (
+        _recovery_records_root(registry) / project_uuid
+    )
+    if (
+        import_legacy
+        and marker_manifest.parent != expected_record_parent
+    ):
+        if metrics is None:
+            raise MailMigrationError(
+                "legacy central generation import requires migration metrics"
+            )
+        (
+            marker,
+            manifest_path,
+            manifest,
+            manifest_digest,
+        ) = _import_legacy_central_generation(
+            root,
+            marker,
+            project_uuid,
+            registry,
+            metrics,
+        )
+    else:
+        manifest_path, manifest, manifest_digest = load_recovery_record(
+            marker["manifest"],
+            expected_uuid=project_uuid,
+            expected_registry=registry,
+        )
+    _validate_central_generation_binding(
+        root,
+        marker,
+        manifest_path,
+        manifest,
+        manifest_digest,
+    )
+    if import_legacy and metrics is not None:
+        # A retry after marker replacement but before its directory fsync
+        # must finish the durability step even though no import is now needed.
+        _timed_fsync_directory(root, metrics)
     if expected_manifest is not None and manifest_path != expected_manifest:
         raise MailMigrationError(
             f"central generation is bound to {manifest_path}, "
@@ -1541,7 +2192,7 @@ def _verify_central_generation(
         raise MailMigrationError(
             f"central generation is stale for current local snapshot: {root}"
         )
-    # The immutable manifest describes the cutover snapshot. Once the
+    # The durable recovery record describes the cutover snapshot. Once the
     # registry points at central, ordinary delivery legitimately changes the
     # live tree, so exact byte comparison is only valid for a pre-cutover
     # candidate or immediately after its publication.
@@ -1554,8 +2205,8 @@ def _publish_central_generation(
     *,
     verified_backup: Path,
     manifest: dict,
-    manifest_path: Path,
-    manifest_digest: str,
+    recovery_record: Path,
+    recovery_record_digest: str,
     central_root_path: Path,
     project_uuid: str,
     operation_id: str,
@@ -1589,8 +2240,8 @@ def _publish_central_generation(
             staging,
             project_uuid=project_uuid,
             operation_id=operation_id,
-            manifest=manifest_path,
-            manifest_sha256=manifest_digest,
+            manifest=recovery_record,
+            manifest_sha256=recovery_record_digest,
             snapshot_digest=manifest["snapshot_digest"],
             metrics=metrics,
         )
@@ -1604,7 +2255,7 @@ def _publish_central_generation(
             central_root_path,
             project_uuid,
             _registry_path(manifest["registry_path"]),
-            expected_manifest=manifest_path,
+            expected_manifest=recovery_record,
             expected_source_digest=manifest["snapshot_digest"],
         )
     except Exception:
@@ -1879,7 +2530,9 @@ def _cleanup_local_after_forward(
     expected: list[dict],
     operation_id: str,
     metrics: MigrationMetrics,
-) -> list[str]:
+    *,
+    trusted_pristine: bool = False,
+) -> tuple[list[str], Path | None]:
     existing_mail = [
         name
         for name in MAIL_TOP_LEVEL
@@ -1887,8 +2540,31 @@ def _cleanup_local_after_forward(
     ]
     locks_exist = _path_info(state_dir / "locks") is not None
     if not existing_mail and not locks_exist:
-        return []
-    if len(existing_mail) == len(MAIL_TOP_LEVEL):
+        retired = state_dir / f".central-mail-retired.{operation_id}"
+        if _path_info(retired) is not None:
+            try:
+                retired_snapshot = scan_mail_tree(retired)
+            except MailMigrationError:
+                return (
+                    [
+                        "preserved incomplete non-authoritative local mail "
+                        f"at {retired}"
+                    ],
+                    None,
+                )
+            if retired_snapshot.digest == _snapshot_digest(expected):
+                return [], retired
+            return (
+                [
+                    "preserved changed non-authoritative local mail at "
+                    f"{retired}"
+                ],
+                None,
+            )
+        return [], None
+    if trusted_pristine:
+        drifted = len(existing_mail) != len(MAIL_TOP_LEVEL)
+    elif len(existing_mail) == len(MAIL_TOP_LEVEL):
         current = scan_mail_tree(state_dir)
         expected_digest = _snapshot_digest(expected)
         drifted = current.digest != expected_digest
@@ -1901,14 +2577,34 @@ def _cleanup_local_after_forward(
         drifted = True
     quarantine = _quarantine_local_mail(state_dir, operation_id, metrics)
     if quarantine is None:
-        return []
+        return [], None
     if drifted:
-        return [
-            f"preserved changed non-authoritative local mail at {quarantine}"
-        ]
-    shutil.rmtree(quarantine)
-    _timed_fsync_directory(state_dir, metrics)
-    return []
+        return (
+            [
+                "preserved changed non-authoritative local mail at "
+                f"{quarantine}"
+            ],
+            None,
+        )
+    return [], quarantine
+
+
+def _purge_retired_local_mail(
+    quarantine: Path | None,
+    state_dir: Path,
+    metrics: MigrationMetrics,
+) -> str | None:
+    if quarantine is None:
+        return None
+    try:
+        shutil.rmtree(quarantine)
+        _timed_fsync_directory(state_dir, metrics)
+    except (OSError, MailMigrationError) as error:
+        return (
+            f"could not purge detached non-authoritative local mail at "
+            f"{quarantine}: {error}"
+        )
+    return None
 
 
 def _write_rollback_marker(
@@ -1918,6 +2614,7 @@ def _write_rollback_marker(
     source_manifest: Path,
     source_manifest_sha256: str,
     rollback_manifest: Path,
+    rollback_manifest_sha256: str,
     snapshot_digest: str,
     operation_id: str,
     metrics: MigrationMetrics,
@@ -1929,6 +2626,7 @@ def _write_rollback_marker(
         "source_manifest": str(source_manifest),
         "source_manifest_sha256": source_manifest_sha256,
         "rollback_manifest": str(rollback_manifest),
+        "rollback_manifest_sha256": rollback_manifest_sha256,
         "snapshot_digest": snapshot_digest,
         "created_at": _utc_now(),
     }
@@ -1964,6 +2662,12 @@ def _load_rollback_marker(
         or marker.get("project_uuid") != project_uuid
         or marker.get("source_manifest") != str(source_manifest)
         or marker.get("source_manifest_sha256") != source_manifest_sha256
+        or not isinstance(marker.get("rollback_manifest_sha256"), str)
+        or len(marker["rollback_manifest_sha256"]) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in marker["rollback_manifest_sha256"]
+        )
     ):
         raise MailMigrationError(
             f"mail rollback marker does not match requested manifest: {path}"
@@ -2000,6 +2704,7 @@ def _prepare_local_candidate(
     original_manifest: Path,
     original_manifest_sha256: str,
     rollback_manifest: Path,
+    rollback_manifest_sha256: str,
     project_uuid: str,
     operation_id: str,
     metrics: MigrationMetrics,
@@ -2037,6 +2742,7 @@ def _prepare_local_candidate(
             source_manifest=original_manifest,
             source_manifest_sha256=original_manifest_sha256,
             rollback_manifest=rollback_manifest,
+            rollback_manifest_sha256=rollback_manifest_sha256,
             snapshot_digest=source_snapshot.digest,
             operation_id=operation_id,
             metrics=metrics,
@@ -2047,6 +2753,106 @@ def _prepare_local_candidate(
         if _path_info(staging) is not None:
             shutil.rmtree(staging, ignore_errors=True)
         raise
+
+
+def _enforce_hold_preflight(
+    preflight: MailPreflight,
+    *,
+    confirm_quiesced: bool,
+) -> str | None:
+    if preflight.projected_seconds <= MIGRATION_PREFLIGHT_BUDGET_SECONDS:
+        return None
+    detail = (
+        f"{preflight.entries} entries, {preflight.files} files, "
+        f"{preflight.bytes} bytes project an exclusive hold of "
+        f"{preflight.projected_seconds:.3f}s, above the "
+        f"{MIGRATION_PREFLIGHT_BUDGET_SECONDS:.3f}s safety budget"
+    )
+    if not confirm_quiesced:
+        raise MailMigrationError(
+            "migration hold preflight refused: "
+            f"{detail}; stop all project seats and mailbox commands, then "
+            "retry with --confirm-quiesced. The projection is a conservative "
+            "workload admission estimate; an unconfirmed registry-lock wait "
+            "is separately capped to the remaining hold budget."
+        )
+    return (
+        "operator confirmed project quiescence for a large migration: "
+        f"{detail}; normal layout-admission and hold budgets were bypassed"
+    )
+
+
+def _bounded_migration_timeout(value: float, label: str) -> float:
+    timeout = _validated_lock_timeout(value, label)
+    if timeout is None:
+        raise MailMigrationError(
+            f"{label} must be finite for a destructive migration"
+        )
+    return timeout
+
+
+def _validated_quiescence_confirmation(value: bool) -> bool:
+    if not isinstance(value, bool):
+        raise MailMigrationError(
+            "confirm_quiesced must be an explicit boolean"
+        )
+    return value
+
+
+def _exclusive_layout_timeout(
+    requested: float,
+    *,
+    confirm_quiesced: bool,
+) -> float:
+    if confirm_quiesced:
+        return requested
+    return min(requested, MIGRATION_PREFLIGHT_BUDGET_SECONDS)
+
+
+def _remaining_registry_lock_timeout(
+    requested: float,
+    *,
+    exclusive_acquired_at: float,
+    confirm_quiesced: bool,
+) -> float:
+    if confirm_quiesced:
+        return requested
+    remaining = (
+        exclusive_acquired_at
+        + MIGRATION_PREFLIGHT_BUDGET_SECONDS
+        - time.monotonic()
+    )
+    if remaining <= 0:
+        raise MailMigrationError(
+            "exclusive migration hold exhausted its safety budget before "
+            "registry cutover; stop all project seats and mailbox commands, "
+            "then retry with --confirm-quiesced"
+        )
+    return min(requested, remaining)
+
+
+def _shared_hold_preflight(
+    project: Path,
+    registry: Path,
+    *,
+    layout_lock_timeout: float,
+    confirm_quiesced: bool,
+) -> MailPreflight:
+    with locked_project_mailbox_checked(
+        project,
+        registry_path=registry,
+        exclusive=False,
+        timeout=layout_lock_timeout,
+    ) as mailbox:
+        preflight = count_mail_tree(
+            mailbox.mail_root,
+            allow_missing_roots=mailbox.layout == "local",
+        )
+    _enforce_hold_preflight(
+        preflight,
+        confirm_quiesced=confirm_quiesced,
+    )
+    return preflight
 
 
 def _result(
@@ -2061,6 +2867,8 @@ def _result(
     metrics: MigrationMetrics,
     committed: bool,
     warnings: list[str],
+    preflight: MailPreflight,
+    registry_wait_cap: float | None,
 ) -> dict:
     return {
         "operation": operation,
@@ -2071,8 +2879,20 @@ def _result(
         ),
         "files": snapshot.files,
         "bytes": snapshot.bytes,
+        "preflight_files": preflight.files,
+        "preflight_entries": preflight.entries,
+        "preflight_bytes": preflight.bytes,
+        "projected_exclusive_hold_ms": round(
+            preflight.projected_seconds * 1000,
+            3,
+        ),
         "lock_wait_ms": round(lock_wait * 1000, 3),
         "exclusive_hold_ms": round(exclusive_hold * 1000, 3),
+        "registry_wait_cap_ms": (
+            round(registry_wait_cap * 1000, 3)
+            if registry_wait_cap is not None
+            else None
+        ),
         "copy_ms": round(metrics.copy_seconds * 1000, 3),
         "fsync_ms": round(metrics.fsync_seconds * 1000, 3),
         "registry_flip_ms": round(
@@ -2091,9 +2911,21 @@ def migrate_project(
     backup_root: Path | str | None = None,
     layout_lock_timeout: float = 10.0,
     registry_lock_timeout: float = 10.0,
+    confirm_quiesced: bool = False,
 ) -> dict:
     """Migrate one exact local mailbox into the UUID central store."""
 
+    confirm_quiesced = _validated_quiescence_confirmation(
+        confirm_quiesced
+    )
+    layout_lock_timeout = _bounded_migration_timeout(
+        layout_lock_timeout,
+        "layout lock timeout",
+    )
+    registry_lock_timeout = _bounded_migration_timeout(
+        registry_lock_timeout,
+        "registry lock timeout",
+    )
     registry = _registry_path(registry_path)
     root = Path(project).expanduser().resolve()
     initial = resolve_project_mailbox_checked(
@@ -2103,10 +2935,15 @@ def migrate_project(
     )
     project_uuid = initial.project_uuid
     central = central_mail_root(registry, project_uuid)
-    selected_backup_root = (
-        DEFAULT_BACKUP_ROOT
-        if backup_root is None
-        else Path(backup_root).expanduser()
+    selected_backup_root = _selected_backup_root(
+        registry,
+        backup_root,
+    )
+    preflight = _shared_hold_preflight(
+        root,
+        registry,
+        layout_lock_timeout=layout_lock_timeout,
+        confirm_quiesced=confirm_quiesced,
     )
     metrics = MigrationMetrics()
     operation_id, operation_name = _operation_name()
@@ -2117,14 +2954,31 @@ def migrate_project(
     snapshot: MailSnapshot | None = None
     warnings: list[str] = []
     status = "migrated"
+    retired_to_purge: Path | None = None
+    exclusive_exited_at = None
+    registry_wait_cap: float | None = None
     try:
-        with locked_project_mailbox_checked(
+        layout_guard = locked_project_mailbox_checked(
             root,
             registry_path=registry,
             exclusive=True,
-            timeout=layout_lock_timeout,
-        ) as mailbox:
-            entered_at = time.monotonic()
+            timeout=_exclusive_layout_timeout(
+                layout_lock_timeout,
+                confirm_quiesced=confirm_quiesced,
+            ),
+        )
+        with layout_guard as mailbox:
+            entered_at = layout_guard.acquired_at_monotonic
+            preflight = count_mail_tree(
+                mailbox.mail_root,
+                allow_missing_roots=mailbox.layout == "local",
+            )
+            preflight_warning = _enforce_hold_preflight(
+                preflight,
+                confirm_quiesced=confirm_quiesced,
+            )
+            if preflight_warning is not None:
+                warnings.append(preflight_warning)
             _registry_evidence(registry, project_uuid, root)
             root_fd, state_fd = _open_project_guard(root)
             try:
@@ -2150,12 +3004,14 @@ def migrate_project(
                             central,
                             project_uuid,
                             registry,
+                            import_legacy=True,
+                            metrics=metrics,
                         )
                     )
                     snapshot = scan_mail_tree(central)
                     committed = True
                     status = "already central"
-                    warnings.extend(
+                    cleanup_warnings, retired_to_purge = (
                         _cleanup_local_after_forward(
                             mailbox.state_dir,
                             manifest["entries"],
@@ -2163,12 +3019,14 @@ def migrate_project(
                             metrics,
                         )
                     )
+                    warnings.extend(cleanup_warnings)
                     _install_bookmark(root, central, metrics)
                 else:
                     forward_forbidden_roots = (
                         mailbox.state_dir,
                         central.parent,
                         registry.parent / "layout-locks",
+                        _recovery_records_root(registry),
                     )
                     _validate_backup_location(
                         selected_backup_root,
@@ -2197,6 +3055,8 @@ def migrate_project(
                             central,
                             project_uuid,
                             registry,
+                            import_legacy=True,
+                            metrics=metrics,
                         )
                         verify_snapshot_copy(
                             central,
@@ -2213,9 +3073,9 @@ def migrate_project(
                             stale_manifest_path = candidate_manifest_path
                     if not reusable:
                         (
-                            manifest_path,
+                            backup_manifest_path,
                             manifest,
-                            manifest_digest,
+                            backup_manifest_digest,
                         ) = _create_backup(
                             source_root=mailbox.state_dir,
                             source_snapshot=snapshot,
@@ -2233,6 +3093,19 @@ def migrate_project(
                             metrics=metrics,
                             forbidden_roots=forward_forbidden_roots,
                         )
+                        (
+                            manifest_path,
+                            _recovery,
+                            manifest_digest,
+                        ) = _write_recovery_record(
+                            manifest=manifest,
+                            archive_manifest=backup_manifest_path,
+                            archive_manifest_sha256=backup_manifest_digest,
+                            registry=registry,
+                            project_uuid=project_uuid,
+                            operation_id=operation_id,
+                            metrics=metrics,
+                        )
                         _maybe_fail("after_backup")
                         if stale_owned:
                             assert stale_manifest_path is not None
@@ -2247,10 +3120,10 @@ def migrate_project(
                                 metrics=metrics,
                             )
                         _publish_central_generation(
-                            verified_backup=manifest_path.parent,
+                            verified_backup=backup_manifest_path.parent,
                             manifest=manifest,
-                            manifest_path=manifest_path,
-                            manifest_digest=manifest_digest,
+                            recovery_record=manifest_path,
+                            recovery_record_digest=manifest_digest,
                             central_root_path=central,
                             project_uuid=project_uuid,
                             operation_id=operation_id,
@@ -2281,6 +3154,19 @@ def migrate_project(
                         )
 
                     try:
+                        registry_wait_cap = (
+                            _remaining_registry_lock_timeout(
+                                registry_lock_timeout,
+                                exclusive_acquired_at=entered_at,
+                                confirm_quiesced=confirm_quiesced,
+                            )
+                        )
+                        registry_wait_deadline = (
+                            None
+                            if confirm_quiesced
+                            else entered_at
+                            + MIGRATION_PREFLIGHT_BUDGET_SECONDS
+                        )
                         _flip_layout(
                             registry,
                             project_uuid,
@@ -2288,7 +3174,8 @@ def migrate_project(
                             "local",
                             "central",
                             guard=cutover_guard,
-                            lock_timeout=registry_lock_timeout,
+                            lock_timeout=registry_wait_cap,
+                            lock_deadline=registry_wait_deadline,
                             metrics=metrics,
                         )
                         committed = True
@@ -2306,19 +3193,29 @@ def migrate_project(
                         "local mailbox",
                     )
                     _maybe_fail("after_registry_flip")
-                    warnings.extend(
+                    cleanup_warnings, retired_to_purge = (
                         _cleanup_local_after_forward(
                             mailbox.state_dir,
                             list(snapshot.entries),
                             operation_id,
                             metrics,
+                            trusted_pristine=True,
                         )
                     )
+                    warnings.extend(cleanup_warnings)
                     _maybe_fail("after_local_cleanup")
                     _install_bookmark(root, central, metrics)
                     _maybe_fail("after_bookmark")
             finally:
                 _close_project_guard(root_fd, state_fd)
+        exclusive_exited_at = time.monotonic()
+        purge_warning = _purge_retired_local_mail(
+            retired_to_purge,
+            root / ".roundtable",
+            metrics,
+        )
+        if purge_warning is not None:
+            warnings.append(purge_warning)
     except Exception as error:
         if committed:
             raise MailMigrationCommittedError(
@@ -2326,8 +3223,8 @@ def migrate_project(
                 f"post-commit repair: {error}"
             ) from error
         raise
-    exited_at = time.monotonic()
     assert entered_at is not None
+    assert exclusive_exited_at is not None
     assert manifest_path is not None
     assert snapshot is not None
     return _result(
@@ -2337,10 +3234,12 @@ def migrate_project(
         rollback_manifest=None,
         snapshot=snapshot,
         lock_wait=entered_at - lock_started,
-        exclusive_hold=exited_at - entered_at,
+        exclusive_hold=exclusive_exited_at - entered_at,
         metrics=metrics,
         committed=True,
         warnings=warnings,
+        preflight=preflight,
+        registry_wait_cap=registry_wait_cap,
     )
 
 
@@ -2352,9 +3251,21 @@ def rollback_project(
     backup_root: Path | str | None = None,
     layout_lock_timeout: float = 10.0,
     registry_lock_timeout: float = 10.0,
+    confirm_quiesced: bool = False,
 ) -> dict:
     """Rollback one exact central generation using current central mail."""
 
+    confirm_quiesced = _validated_quiescence_confirmation(
+        confirm_quiesced
+    )
+    layout_lock_timeout = _bounded_migration_timeout(
+        layout_lock_timeout,
+        "layout lock timeout",
+    )
+    registry_lock_timeout = _bounded_migration_timeout(
+        registry_lock_timeout,
+        "registry lock timeout",
+    )
     registry = _registry_path(registry_path)
     root = Path(project).expanduser().resolve()
     initial = resolve_project_mailbox_checked(
@@ -2363,21 +3274,20 @@ def rollback_project(
         reconcile=True,
     )
     project_uuid = initial.project_uuid
-    original_manifest, forward, forward_digest = load_manifest(
-        manifest,
-        expected_uuid=project_uuid,
-        expected_registry=registry,
-    )
-    if forward["direction"] != "local-to-central":
-        raise MailMigrationError(
-            f"rollback requires a forward migration manifest: "
-            f"{original_manifest}"
-        )
+    requested_manifest = _manifest_path(manifest)
+    original_manifest: Path | None = None
+    forward: dict | None = None
+    forward_digest: str | None = None
     central = central_mail_root(registry, project_uuid)
-    selected_backup_root = (
-        DEFAULT_BACKUP_ROOT
-        if backup_root is None
-        else Path(backup_root).expanduser()
+    selected_backup_root = _selected_backup_root(
+        registry,
+        backup_root,
+    )
+    preflight = _shared_hold_preflight(
+        root,
+        registry,
+        layout_lock_timeout=layout_lock_timeout,
+        confirm_quiesced=confirm_quiesced,
     )
     metrics = MigrationMetrics()
     operation_id, operation_name = _operation_name()
@@ -2388,14 +3298,29 @@ def rollback_project(
     snapshot: MailSnapshot | None = None
     warnings: list[str] = []
     status = "rolled back"
+    registry_wait_cap: float | None = None
     try:
-        with locked_project_mailbox_checked(
+        layout_guard = locked_project_mailbox_checked(
             root,
             registry_path=registry,
             exclusive=True,
-            timeout=layout_lock_timeout,
-        ) as mailbox:
-            entered_at = time.monotonic()
+            timeout=_exclusive_layout_timeout(
+                layout_lock_timeout,
+                confirm_quiesced=confirm_quiesced,
+            ),
+        )
+        with layout_guard as mailbox:
+            entered_at = layout_guard.acquired_at_monotonic
+            preflight = count_mail_tree(
+                mailbox.mail_root,
+                allow_missing_roots=mailbox.layout == "local",
+            )
+            preflight_warning = _enforce_hold_preflight(
+                preflight,
+                confirm_quiesced=confirm_quiesced,
+            )
+            if preflight_warning is not None:
+                warnings.append(preflight_warning)
             _registry_evidence(registry, project_uuid, root)
             root_fd, state_fd = _open_project_guard(root)
             try:
@@ -2409,6 +3334,59 @@ def rollback_project(
                         )
 
                 guard()
+                active_manifest: Path | None = None
+                active_forward: dict | None = None
+                if mailbox.layout == "central":
+                    (
+                        _active_marker,
+                        active_manifest,
+                        active_forward,
+                    ) = _verify_central_generation(
+                        central,
+                        project_uuid,
+                        registry,
+                        import_legacy=True,
+                        metrics=metrics,
+                    )
+                active_aliases = (
+                    {
+                        active_manifest,
+                        Path(active_forward["archive_manifest"]),
+                    }
+                    if (
+                        active_manifest is not None
+                        and active_forward is not None
+                    )
+                    else set()
+                )
+                if requested_manifest in active_aliases:
+                    (
+                        original_manifest,
+                        forward,
+                        forward_digest,
+                    ) = load_recovery_record(
+                        active_manifest,
+                        expected_uuid=project_uuid,
+                        expected_registry=registry,
+                    )
+                else:
+                    (
+                        original_manifest,
+                        forward,
+                        forward_digest,
+                    ) = _load_forward_recovery_record_alias(
+                        requested_manifest,
+                        expected_uuid=project_uuid,
+                        expected_registry=registry,
+                    )
+                if (
+                    active_manifest is not None
+                    and active_manifest != original_manifest
+                ):
+                    raise MailMigrationError(
+                        f"central generation is bound to {active_manifest}, "
+                        f"not requested manifest {original_manifest}"
+                    )
                 _preflight_rollback_marker(
                     mailbox.state_dir,
                     project_uuid,
@@ -2421,8 +3399,8 @@ def rollback_project(
                         source_manifest=original_manifest,
                         source_manifest_sha256=forward_digest,
                     )
-                    rollback_manifest, rollback_doc, _rollback_digest = (
-                        load_manifest(
+                    rollback_manifest, rollback_doc, rollback_digest = (
+                        load_recovery_record(
                             marker["rollback_manifest"],
                             expected_uuid=project_uuid,
                             expected_registry=registry,
@@ -2434,6 +3412,8 @@ def rollback_project(
                         != str(original_manifest)
                         or marker.get("rollback_manifest")
                         != str(rollback_manifest)
+                        or marker.get("rollback_manifest_sha256")
+                        != rollback_digest
                         or marker.get("operation_id")
                         != rollback_doc["operation_id"]
                         or marker.get("snapshot_digest")
@@ -2491,9 +3471,11 @@ def rollback_project(
                         mailbox.state_dir,
                         central.parent,
                         registry.parent / "layout-locks",
+                        _recovery_records_root(registry),
                     )
                     rollback_bundle_forbidden_roots = (
                         original_manifest.parent,
+                        Path(forward["archive_manifest"]).parent,
                     )
                     _validate_backup_location(
                         selected_backup_root,
@@ -2532,9 +3514,9 @@ def rollback_project(
                         root,
                     )
                     (
-                        rollback_manifest,
+                        rollback_backup_manifest,
                         rollback_doc,
-                        _rollback_digest,
+                        rollback_backup_digest,
                     ) = _create_backup(
                         source_root=central,
                         source_snapshot=snapshot,
@@ -2555,14 +3537,28 @@ def rollback_project(
                             rollback_bundle_forbidden_roots
                         ),
                     )
+                    (
+                        rollback_manifest,
+                        _rollback_recovery,
+                        rollback_digest,
+                    ) = _write_recovery_record(
+                        manifest=rollback_doc,
+                        archive_manifest=rollback_backup_manifest,
+                        archive_manifest_sha256=rollback_backup_digest,
+                        registry=registry,
+                        project_uuid=project_uuid,
+                        operation_id=operation_id,
+                        metrics=metrics,
+                    )
                     _maybe_fail("rollback_after_backup")
                     quarantine = _prepare_local_candidate(
                         state_dir=mailbox.state_dir,
-                        verified_backup=rollback_manifest.parent,
+                        verified_backup=rollback_backup_manifest.parent,
                         source_snapshot=snapshot,
                         original_manifest=original_manifest,
                         original_manifest_sha256=forward_digest,
                         rollback_manifest=rollback_manifest,
+                        rollback_manifest_sha256=rollback_digest,
                         project_uuid=project_uuid,
                         operation_id=operation_id,
                         metrics=metrics,
@@ -2585,6 +3581,19 @@ def rollback_project(
                         )
 
                     try:
+                        registry_wait_cap = (
+                            _remaining_registry_lock_timeout(
+                                registry_lock_timeout,
+                                exclusive_acquired_at=entered_at,
+                                confirm_quiesced=confirm_quiesced,
+                            )
+                        )
+                        registry_wait_deadline = (
+                            None
+                            if confirm_quiesced
+                            else entered_at
+                            + MIGRATION_PREFLIGHT_BUDGET_SECONDS
+                        )
                         _flip_layout(
                             registry,
                             project_uuid,
@@ -2592,7 +3601,8 @@ def rollback_project(
                             "central",
                             "local",
                             guard=cutover_guard,
-                            lock_timeout=registry_lock_timeout,
+                            lock_timeout=registry_wait_cap,
+                            lock_deadline=registry_wait_deadline,
                             metrics=metrics,
                         )
                         committed = True
@@ -2638,6 +3648,9 @@ def rollback_project(
         raise
     exited_at = time.monotonic()
     assert entered_at is not None
+    assert original_manifest is not None
+    assert forward is not None
+    assert forward_digest is not None
     assert rollback_manifest is not None
     assert snapshot is not None
     return _result(
@@ -2651,4 +3664,6 @@ def rollback_project(
         metrics=metrics,
         committed=True,
         warnings=warnings,
+        preflight=preflight,
+        registry_wait_cap=registry_wait_cap,
     )

@@ -37,25 +37,48 @@ The default install creates:
 - `~/.local/bin/rt-*`: user-visible links to the stable wrappers.
 
 Project registries, persistent UUID layout locks, registry-selected local or
-central mailboxes, `.roundtable/mail` bookmarks, migration manifests/backups,
-and runtime state are data, not versioned program files. Central mail lives at
-`<registry-parent>/mail/<project-uuid>/`; verified migration bundles default to
-`~/Documents/Workspace/backups/roundtable-central-mail/<project-uuid>/`.
+central mailboxes, `.roundtable/mail` bookmarks, migration recovery records,
+archival backups, and runtime state are data, not versioned program files.
+Central mail lives at
+`<registry-parent>/mail/<project-uuid>/`; durable recovery records live at
+`<registry-parent>/migration-records/<project-uuid>/`, and verified archival
+bundles default to
+`<registry-parent>/backups/roundtable-central-mail/<project-uuid>/`.
+`RT_MAIL_BACKUP_DIR=/absolute/path` changes the archive default, while an
+explicit `--backup-dir` takes precedence. Archives contain plaintext mailbox
+history and are retained until the operator removes them; active repair and
+rollback use the separate recovery record rather than requiring archive bytes.
+The first migrate or rollback operation against an unreleased pre-v1 `0.2`
+central marker validates its legacy archive, imports a durable recovery record
+under the exclusive layout lock, and atomically rebinds the marker. That
+one-time import fails closed if the legacy archive has already been removed.
 
 Run `roundtable projects migrate ROOT` for the explicit local-to-central
-cutover. The command emits one JSON record containing its immutable manifest,
-file and byte totals, layout-lock wait and exclusive-hold durations, copy and
-fsync durations, registry-flip duration, commitment state, and any recovery
-warnings. No install or uninstall command migrates mail implicitly.
+cutover. The command emits one JSON record containing its durable recovery
+record and the file/byte totals, preflight counts, projected hold, layout-lock
+wait, exclusive-hold duration, admitted registry-wait cap, copy/fsync
+durations, registry-flip duration, commitment state, and recovery warnings.
+The reported manifest is the durable recovery record. No install or uninstall
+command migrates mail implicitly.
+
+Before taking the exclusive lock, migration counts entries and logical bytes
+under a shared lock. It refuses a conservative projected hold above five
+seconds, half the normal consumer acquisition timeout. Stop every project
+seat and mailbox command before retrying with `--confirm-quiesced`; retry any
+send previously rejected by a layout-lock timeout. On the normal unconfirmed
+path, exclusive layout admission is capped at five seconds and an embedded
+registry-lock wait is capped to the time remaining in a second five-second
+hold budget. The projection is an admission heuristic and filesystem calls or
+fsync are not asynchronously interrupted.
 
 Use `roundtable projects rollback ROOT --manifest PATH` only with the exact
-manifest reported by the active forward migration. Rollback first creates and
-verifies a new backup of current central mail, including post-cutover
-deliveries, then changes the registry pointer back to local. A pre-cutover
-failure leaves the source layout authoritative and is retryable; a reported
-post-cutover failure is repaired by rerunning the same command. An explicitly
-unknown registry-commit outcome fails closed and requires inspecting the
-registry pointer before retrying.
+recovery record reported by the active forward migration. Rollback first
+creates and verifies a new archival backup and recovery record for current
+central mail, including post-cutover deliveries, then changes the registry
+pointer back to local. A pre-cutover failure leaves the source layout
+authoritative and is retryable; a reported post-cutover failure is repaired
+by rerunning the same command. An explicitly unknown registry-commit outcome
+fails closed and requires inspecting the registry pointer before retrying.
 
 Harness onboarding is a second ownership layer. After
 `roundtable-setup apply`, it also records:
@@ -404,13 +427,16 @@ and preserves:
 - `~/.roundtable/projects.yaml` and its lock;
 - persistent UUID admission/resource locks beside the registry;
 - registry-selected central mail under the registry parent;
+- durable migration recovery records under the registry parent;
 - global runtime state under `~/.roundtable/.runtime`;
 - every project-local `.roundtable` mailbox, ledger, and exact central-mail
   bookmark;
-- external migration manifests and verified payload backups.
+- verified payload archives, including an operator-selected external archive
+  root.
 
 `--purge-runtime` additionally removes the global ephemeral runtime directory.
 It does not remove the registry, layout locks, local/central mail, bookmarks,
-or migration backups. Uninstall never runs a migration or rollback. Use
+recovery records, or migration archives. Uninstall never runs a migration or
+rollback. Use
 `roundtable projects rollback ROOT --manifest PATH` explicitly before
 uninstall when local placement is desired.

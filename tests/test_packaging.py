@@ -268,6 +268,11 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
     manifest_path = prefix / "install-manifest.json"
     manifest = json.loads(manifest_path.read_text())
     assert manifest["schema"] == "roundtable.install.v1"
+    assert (
+        "runtime-selected project registry and registry lock"
+        in manifest["preserved"]
+    )
+    assert str(prefix / "projects.yaml") not in manifest["preserved"]
     assert (prefix / "current").is_symlink()
     marker = json.loads(
         (prefix / "current" / ".roundtable-managed.json").read_text()
@@ -624,6 +629,60 @@ def test_same_version_reinstall_rejects_modified_installed_runtime(
     assert repeated.returncode == 1
     assert expected in repeated.stderr
     assert managed.read_text() == "#!/bin/sh\nexit 99\n"
+
+
+def test_same_version_source_reinstall_rejects_different_input_tree(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    prefix = home / ".roundtable"
+    link_dir = home / ".local" / "bin"
+    installed = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert installed.returncode == 0, installed.stderr
+    installed_helper = prefix / "current" / "bin" / "_rtlib.py"
+    helper_before = installed_helper.read_bytes()
+    manifest_before = (prefix / "install-manifest.json").read_bytes()
+
+    changed_source = tmp_path / "changed-source"
+    shutil.copytree(
+        ROOT,
+        changed_source,
+        ignore=shutil.ignore_patterns(
+            ".git",
+            ".pytest_cache",
+            "__pycache__",
+            "*.egg-info",
+            "*.pyc",
+            "build",
+            "dist",
+        ),
+    )
+    changed_helper = changed_source / "bin" / "_rtlib.py"
+    changed_helper.write_text(
+        changed_helper.read_text() + "\n# same-version input drift\n"
+    )
+
+    repeated = run_script(
+        INSTALL,
+        "--source-root",
+        str(changed_source),
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+
+    assert repeated.returncode == 1
+    assert "installed project wheel does not match this release" in repeated.stderr
+    assert installed_helper.read_bytes() == helper_before
+    assert (prefix / "install-manifest.json").read_bytes() == manifest_before
 
 
 def test_install_020_beside_pre_migration_019_runtime(tmp_path):

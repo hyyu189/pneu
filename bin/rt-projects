@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 from _rtmigrate import (
@@ -60,11 +61,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--layout-lock-timeout",
         type=float,
         default=10.0,
+        help=(
+            "maximum seconds to acquire each layout lock; normal exclusive "
+            "migration admission is capped at five seconds"
+        ),
     )
     migrate.add_argument(
         "--registry-lock-timeout",
         type=float,
         default=10.0,
+        help=(
+            "maximum registry wait; normal migration further caps it to the "
+            "remaining five-second hold budget"
+        ),
+    )
+    migrate.add_argument(
+        "--confirm-quiesced",
+        action="store_true",
+        help=(
+            "confirm every project seat and mailbox command is stopped and "
+            "permit bypassing normal migration admission/hold budgets"
+        ),
     )
     rollback = subparsers.add_parser(
         "rollback",
@@ -81,11 +98,27 @@ def build_parser() -> argparse.ArgumentParser:
         "--layout-lock-timeout",
         type=float,
         default=10.0,
+        help=(
+            "maximum seconds to acquire each layout lock; normal exclusive "
+            "migration admission is capped at five seconds"
+        ),
     )
     rollback.add_argument(
         "--registry-lock-timeout",
         type=float,
         default=10.0,
+        help=(
+            "maximum registry wait; normal migration further caps it to the "
+            "remaining five-second hold budget"
+        ),
+    )
+    rollback.add_argument(
+        "--confirm-quiesced",
+        action="store_true",
+        help=(
+            "confirm every project seat and mailbox command is stopped and "
+            "permit bypassing normal migration admission/hold budgets"
+        ),
     )
     return parser
 
@@ -145,6 +178,7 @@ def main() -> int:
                     backup_root=args.backup_dir,
                     layout_lock_timeout=args.layout_lock_timeout,
                     registry_lock_timeout=args.registry_lock_timeout,
+                    confirm_quiesced=args.confirm_quiesced,
                 )
             else:
                 result = rollback_project(
@@ -154,11 +188,14 @@ def main() -> int:
                     backup_root=args.backup_dir,
                     layout_lock_timeout=args.layout_lock_timeout,
                     registry_lock_timeout=args.registry_lock_timeout,
+                    confirm_quiesced=args.confirm_quiesced,
                 )
         except ProjectRegistryError as error:
             raise SystemExit(
                 f"rt-projects: {args.command} failed: {error}"
             ) from None
+        for warning in result.get("warnings", []):
+            print(f"rt-projects: warning: {warning}", file=sys.stderr)
         print(json.dumps(result, sort_keys=True))
         return 0
     changed = unregister_project(args.root, args.registry)

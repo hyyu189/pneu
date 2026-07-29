@@ -34,6 +34,7 @@ from . import (
 
 SUPPORTED_PYTHON_MIN = (3, 11)
 SUPPORTED_PYTHON_MAX = (3, 14)
+SOURCE_BUILD_EPOCH = "946684800"
 
 
 class InstallError(RuntimeError):
@@ -417,6 +418,11 @@ def _build_source_wheel(
 ) -> Path:
     copied = wheel_dir.parent / "source"
     _copy_source_for_build(source_root, copied)
+    build_environment = os.environ.copy()
+    # A source reinstall must be able to compare its input with the immutable
+    # version directory. Wheel ZIP timestamps otherwise make two builds of the
+    # same tree byte-different.
+    build_environment["SOURCE_DATE_EPOCH"] = SOURCE_BUILD_EPOCH
     _run(
         [
             str(bootstrap_python),
@@ -428,7 +434,8 @@ def _build_source_wheel(
             "--wheel-dir",
             str(wheel_dir),
             str(copied),
-        ]
+        ],
+        env=build_environment,
     )
     matches = sorted(wheel_dir.glob(f"roundtable_messaging-{VERSION}-*.whl"))
     if len(matches) != 1:
@@ -475,9 +482,7 @@ def _create_version(
     if destination.exists():
         _validate_version_dir(
             destination,
-            expected_project_wheel_sha256=(
-                None if source_mode else _sha256_path(project_wheel)
-            ),
+            expected_project_wheel_sha256=_sha256_path(project_wheel),
         )
         return destination
 
@@ -769,13 +774,13 @@ def install_main(argv: list[str] | None = None) -> int:
             },
             "launch_agents": list(LAUNCH_AGENT_LABELS),
             "preserved": [
-                str(prefix / "projects.yaml"),
-                str(prefix / "projects.yaml.lock"),
+                "runtime-selected project registry and registry lock",
                 str(prefix / ".runtime"),
                 "registry-selected local and central mailboxes",
                 "persistent UUID layout locks",
                 "project .roundtable/mail bookmarks",
-                "external migration backups and manifests",
+                "registry-adjacent migration recovery records",
+                "migration archival backups and manifests",
             ],
         }
         _atomic_write(_manifest_path(prefix), _json_bytes(manifest), 0o600)
@@ -978,7 +983,7 @@ def uninstall_main(argv: list[str] | None = None) -> int:
         print(
             "preserved project registry, UUID layout locks, "
             "registry-selected local/central mailboxes, bookmarks, "
-            "and migration backups"
+            "migration recovery records, and archival backups"
         )
         if not args.purge_runtime:
             print(f"preserved runtime state at {prefix / '.runtime'}")

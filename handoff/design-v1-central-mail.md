@@ -270,8 +270,18 @@ authoritative layout at all times and never a merge of two.
 2. Every mutator and scanner takes a per-project **shared** layout lock, so a
    migration can exclude them.
 3. The migrator takes the **exclusive** lock and quiesces legacy writers.
-4. It creates a manifest backup under `~/Documents/Workspace/backups/` and
-   **verifies it** before anything is moved.
+4. It creates and verifies a private archival backup, then atomically writes a
+   compact recovery record under `<registry-parent>/migration-records/`.
+   Archives default below the registry parent and can be redirected with
+   `RT_MAIL_BACKUP_DIR` or `--backup-dir`; repair and rollback depend on the
+   recovery record, not continued availability of the archive.
+   Unreleased `0.2` development markers that still point at an archive
+   manifest are imported once under the exclusive lock and rebound atomically;
+   the legacy archive must remain verifiable until that import completes.
+   A pre-recovery development build that already flipped back to local and
+   left the older `.mail-rollback.json` shape is not auto-imported; ordinary
+   local mail remains authoritative, but that old rollback command is not an
+   idempotent repair surface.
 5. It copies `inbox/` and `messages/` into a temporary central UUID directory,
    fsyncs, and renames that directory into place atomically.
 6. It flips one registry `layout` pointer, atomically. **This is the cutover.**
@@ -316,6 +326,21 @@ of blocking indefinitely; runtime lease locks are acquired and released
 before layout admission. Filesystem calls and fsync are not asynchronously
 interrupted. Migration reports its measured exclusive hold duration rather
 than claiming a machine-independent critical-section bound.
+
+Before exclusive admission, the migrator counts entries and logical bytes
+under a shared lock and applies the conservative measured projection
+`416ms + 5.422ms/entry + 7.344ms/MiB`. It repeats the count immediately after
+exclusive admission to close the growth race. Above five seconds it refuses
+before creating a backup unless the operator has stopped every project seat
+and mailbox command and passes `--confirm-quiesced`. Without that confirmation,
+exclusive admission is capped to five seconds, the hold clock begins at
+resource-lock acquisition (before inode validation and mailbox resolution),
+and any nested registry-lock wait is capped to the remaining time in a second
+five-second budget. The projection is intentionally an admission heuristic,
+not an interruptible deadline. Post-cutover cleanup atomically detaches the
+now-nonauthoritative local tree while still exclusive; only deletion of that
+exact detached tree moves outside the lock. Bookmark installation remains
+inside the lock so a concurrent rollback cannot make it stale.
 
 Long-running watchers release the shared lock before sleeping and re-resolve
 under a fresh short shared section on every scan. Hermes delegates its exact
