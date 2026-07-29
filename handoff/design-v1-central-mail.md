@@ -264,10 +264,33 @@ four were accepted:
   Replaced wholesale; the rollback correction — that restoring the backup alone
   discards post-cutover mail — was the most valuable single point of the review.
 
+## Deferred past v1, on purpose
+
+Recorded so they are decisions rather than omissions.
+
+1. **Host runtime keys stay path-based.** `_rtruntime.project_hash` and the
+   Codex wake bindings keep using `sha256(path)`. Renaming a project therefore
+   keeps its mail and its identity but requires relaunching its Codex seat.
+   Ocean rarely renames project folders, so the cost is small and the change
+   would touch exactly the binding code that took a full day to stabilise.
+   Revisit when renaming becomes common or when that code is being changed for
+   another reason.
+2. **Binding still requires a first turn.** SessionStart is turn-gated in
+   Codex, so a seat binds when the human first says something. Yesterday's fix
+   removed the five-minute deadline, so the wait is now unbounded rather than
+   fatal, but the requirement remains. See the open question below.
+
 ## Still open
 
 1. Hermes's review has not landed; its watcher is unarmed and the round-1
    message is waiting in its mailbox.
-2. Does deferring the host-runtime key migration (§2) leave a state where a
-   renamed project has central mail under its UUID but a Codex binding under
-   its old path hash, and is the required rebind detectable by `doctor`?
+2. Does deferring the host-runtime key migration leave a state where a renamed
+   project has central mail under its UUID but a Codex binding under its old
+   path hash, and is the required rebind detectable by `doctor`?
+3. Can a Codex seat bind without the human typing first? The launcher can pass
+   a positional `[PROMPT]`, which would run a turn and fire the hook, but that
+   puts a message the human did not write into their own session. The likely
+   split is: a human-launched seat keeps bind-on-first-turn, while a seat
+   Roundtable itself spawns for a task carries an injected preamble — which
+   binds it immediately and can also hand it its own identity, instead of
+   making it guess `RT_FROM` as it must today.
