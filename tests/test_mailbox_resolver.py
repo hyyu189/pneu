@@ -63,6 +63,22 @@ def write_document(path: Path, document: dict) -> None:
     path.write_text(json.dumps(document, indent=2) + "\n")
 
 
+def write_central_marker(root: Path, project_uuid: str) -> None:
+    (root / _rtlib.CENTRAL_MAIL_MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "schema": _rtlib.CENTRAL_MAIL_MARKER_SCHEMA,
+                "project_uuid": project_uuid,
+                "operation_id": "00000000-0000-4000-8000-000000000003",
+                "manifest": str(root.parent / "resolver-test-manifest.json"),
+                "manifest_sha256": "1" * 64,
+                "snapshot_digest": "2" * 64,
+            }
+        )
+        + "\n"
+    )
+
+
 def read_identity(root: Path) -> dict:
     return json.loads(_rtlib.project_identity_path(root).read_text())
 
@@ -1564,6 +1580,7 @@ def test_central_mailbox_uses_exact_uuid_path_without_scanning(
         central_root / "locks",
     ):
         directory.mkdir(parents=True, exist_ok=True)
+    write_central_marker(central_root, entry["uuid"])
     original_iterdir = Path.iterdir
 
     def reject_mail_root_scan(path: Path):
@@ -1649,6 +1666,7 @@ def test_central_mail_directory_group_write_fails_closed(
         central_root / "locks",
     ):
         directory.mkdir(parents=True, exist_ok=True)
+    write_central_marker(central_root, entry["uuid"])
     (central_root / "messages").chmod(0o777)
 
     with pytest.raises(SystemExit, match="group/other writable"):

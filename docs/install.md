@@ -36,8 +36,26 @@ The default install creates:
 - `~/.roundtable/skills/shared/roundtable`: the canonical installed skill link;
 - `~/.local/bin/rt-*`: user-visible links to the stable wrappers.
 
-Project registries, runtime state, and project-local `.roundtable` mailboxes are
-state, not versioned program files.
+Project registries, persistent UUID layout locks, registry-selected local or
+central mailboxes, `.roundtable/mail` bookmarks, migration manifests/backups,
+and runtime state are data, not versioned program files. Central mail lives at
+`<registry-parent>/mail/<project-uuid>/`; verified migration bundles default to
+`~/Documents/Workspace/backups/roundtable-central-mail/<project-uuid>/`.
+
+Run `roundtable projects migrate ROOT` for the explicit local-to-central
+cutover. The command emits one JSON record containing its immutable manifest,
+file and byte totals, layout-lock wait and exclusive-hold durations, copy and
+fsync durations, registry-flip duration, commitment state, and any recovery
+warnings. No install or uninstall command migrates mail implicitly.
+
+Use `roundtable projects rollback ROOT --manifest PATH` only with the exact
+manifest reported by the active forward migration. Rollback first creates and
+verifies a new backup of current central mail, including post-cutover
+deliveries, then changes the registry pointer back to local. A pre-cutover
+failure leaves the source layout authoritative and is retryable; a reported
+post-cutover failure is repaired by rerunning the same command. An explicitly
+unknown registry-commit outcome fails closed and requires inspecting the
+registry pointer before retrying.
 
 Harness onboarding is a second ownership layer. After
 `roundtable-setup apply`, it also records:
@@ -384,8 +402,15 @@ uninstaller then verifies its own manifest ownership and digests before removal
 and preserves:
 
 - `~/.roundtable/projects.yaml` and its lock;
+- persistent UUID admission/resource locks beside the registry;
+- registry-selected central mail under the registry parent;
 - global runtime state under `~/.roundtable/.runtime`;
-- every project-local `.roundtable` mailbox and ledger.
+- every project-local `.roundtable` mailbox, ledger, and exact central-mail
+  bookmark;
+- external migration manifests and verified payload backups.
 
 `--purge-runtime` additionally removes the global ephemeral runtime directory.
-It does not remove the registry or project data.
+It does not remove the registry, layout locks, local/central mail, bookmarks,
+or migration backups. Uninstall never runs a migration or rollback. Use
+`roundtable projects rollback ROOT --manifest PATH` explicitly before
+uninstall when local placement is desired.

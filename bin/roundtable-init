@@ -90,6 +90,7 @@ MARKER_BLOCKS = {
         "messages/\n"
         "locks/\n"
         "inbox/\n"
+        "mail\n"
         "topology.tmp.json\n"
         "# END Roundtable\n"
     ),

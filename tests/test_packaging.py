@@ -221,6 +221,7 @@ def test_wheel_contains_commands_helpers_templates_and_uninstaller(built_wheel):
         name.endswith(".data/scripts/rt-codex-session-start") for name in names
     )
     assert any(name.endswith(".data/scripts/_rtlib.py") for name in names)
+    assert any(name.endswith(".data/scripts/_rtmigrate.py") for name in names)
     assert any(name.endswith(".data/scripts/_rtruntime.py") for name in names)
     assert any(
         name.endswith(".data/data/share/roundtable/templates/agents.yaml.tmpl")
@@ -284,7 +285,8 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
             str(prefix / "current" / "bin" / "python"),
             "-c",
             (
-                "import _rtcodex, _rtlauncher, _rtlib, _rtruntime; "
+                "import _rtcodex, _rtlauncher, _rtlib, _rtmigrate, "
+                "_rtruntime; "
                 "print(_rtcodex.ROUND_ROOT)"
             ),
         ],
@@ -357,6 +359,90 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
     inbox.mkdir(parents=True)
     mail = inbox / "keep.md"
     mail.write_text("[codex→claude fyi id=keep] preserve me\n")
+    backup_root = tmp_path / "migration-backups"
+    migrated = subprocess.run(
+        [
+            str(link_dir / "roundtable"),
+            "projects",
+            "--registry",
+            str(prefix / "projects.yaml"),
+            "migrate",
+            str(project),
+            "--backup-dir",
+            str(backup_root),
+        ],
+        env=packaging_env(home),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert migrated.returncode == 0, migrated.stderr
+    first_migration = json.loads(migrated.stdout)
+    assert first_migration["committed"] is True
+    first_manifest = Path(first_migration["manifest"])
+    assert first_manifest.is_file()
+
+    rolled_back = subprocess.run(
+        [
+            str(link_dir / "roundtable"),
+            "projects",
+            "--registry",
+            str(prefix / "projects.yaml"),
+            "rollback",
+            str(project),
+            "--manifest",
+            str(first_manifest),
+            "--backup-dir",
+            str(backup_root),
+        ],
+        env=packaging_env(home),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert rolled_back.returncode == 0, rolled_back.stderr
+    assert json.loads(rolled_back.stdout)["committed"] is True
+    assert mail.read_text().endswith("preserve me\n")
+
+    migrated_again = subprocess.run(
+        [
+            str(link_dir / "roundtable"),
+            "projects",
+            "--registry",
+            str(prefix / "projects.yaml"),
+            "migrate",
+            str(project),
+            "--backup-dir",
+            str(backup_root),
+        ],
+        env=packaging_env(home),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert migrated_again.returncode == 0, migrated_again.stderr
+    second_migration = json.loads(migrated_again.stdout)
+    central_mailbox = resolve_project_mailbox(
+        project,
+        registry_path=prefix / "projects.yaml",
+    )
+    assert central_mailbox.layout == "central"
+    central_mail = (
+        central_mailbox.inbox_dir / "claude" / "new" / "keep.md"
+    )
+    central_marker = central_mailbox.mail_root / ".roundtable-mail.json"
+    bookmark = project / ".roundtable" / "mail"
+    layout_locks = prefix / "layout-locks"
+    second_manifest = Path(second_migration["manifest"])
+    assert central_mail.read_text().endswith("preserve me\n")
+    assert central_marker.is_file()
+    assert bookmark.is_symlink()
+    assert second_manifest.is_file()
+    assert layout_locks.is_dir()
+
     runtime = prefix / ".runtime"
     runtime.mkdir()
     runtime_file = runtime / "keep.json"
@@ -373,7 +459,12 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
     assert removed.returncode == 0, removed.stderr
     assert registry.read_bytes() == registry_before
     assert runtime_file.read_text() == "{}\n"
-    assert mail.read_text().endswith("preserve me\n")
+    assert central_mail.read_text().endswith("preserve me\n")
+    assert central_marker.is_file()
+    assert bookmark.is_symlink()
+    assert second_manifest.is_file()
+    assert layout_locks.is_dir()
+    assert backup_root.is_dir()
     assert not (link_dir / "rt-say").exists()
     assert not manifest_path.exists()
 
@@ -533,6 +624,68 @@ def test_same_version_reinstall_rejects_modified_installed_runtime(
     assert repeated.returncode == 1
     assert expected in repeated.stderr
     assert managed.read_text() == "#!/bin/sh\nexit 99\n"
+
+
+def test_install_020_beside_pre_migration_019_runtime(tmp_path):
+    assert VERSION == "0.2.0"
+    home = tmp_path / "home"
+    home.mkdir()
+    prefix = home / ".roundtable"
+    link_dir = home / ".local" / "bin"
+    installed = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    current_dir = prefix / "versions" / VERSION
+    old_dir = prefix / "versions" / "0.1.9"
+    current_dir.rename(old_dir)
+    old_marker_path = old_dir / ".roundtable-managed.json"
+    old_marker = json.loads(old_marker_path.read_text())
+    old_marker["version"] = "0.1.9"
+    old_marker["helpers"].pop("_rtmigrate.py")
+    old_marker_path.write_text(
+        json.dumps(old_marker, indent=2, sort_keys=True) + "\n"
+    )
+    (old_dir / "bin" / "_rtmigrate.py").unlink()
+    current = prefix / "current"
+    current.unlink()
+    current.symlink_to(Path("versions") / "0.1.9")
+    manifest_path = prefix / "install-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest.update(
+        {
+            "version": "0.1.9",
+            "current": "versions/0.1.9",
+            "versions": [str(old_dir)],
+        }
+    )
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+    )
+
+    upgraded = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+
+    assert upgraded.returncode == 0, upgraded.stderr
+    assert os.readlink(current) == "versions/0.2.0"
+    assert not (old_dir / "bin" / "_rtmigrate.py").exists()
+    assert (prefix / "versions" / "0.2.0" / "bin" / "_rtmigrate.py").is_file()
+    upgraded_manifest = json.loads(manifest_path.read_text())
+    assert upgraded_manifest["versions"] == sorted(
+        [str(old_dir), str(prefix / "versions" / "0.2.0")]
+    )
 
 
 def test_install_shell_rejects_unsupported_bootstrap_python(tmp_path):

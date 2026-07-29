@@ -173,7 +173,9 @@ FORBIDDEN_COMPONENTS = {
     ".runtime",
     "__pycache__",
     "inbox",
+    "layout-locks",
     "locks",
+    "mail",
     "messages",
 }
 
@@ -182,6 +184,7 @@ REQUIRED_PROJECT_ROOT_FILES = frozenset(
         "_rtcodex.py",
         "_rtlauncher.py",
         "_rtlib.py",
+        "_rtmigrate.py",
         "_rtruntime.py",
     }
 )
@@ -205,6 +208,7 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "_rtcodex.py",
         "_rtlauncher.py",
         "_rtlib.py",
+        "_rtmigrate.py",
         "_rtruntime.py",
         "roundtable",
         "roundtable-init",

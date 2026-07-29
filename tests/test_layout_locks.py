@@ -63,6 +63,19 @@ def flip_to_central(project: Path, registry: Path) -> None:
     ):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         directory.chmod(0o700)
+    (central / _rtlib.CENTRAL_MAIL_MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "schema": _rtlib.CENTRAL_MAIL_MARKER_SCHEMA,
+                "project_uuid": mailbox.project_uuid,
+                "operation_id": "00000000-0000-4000-8000-000000000001",
+                "manifest": str(registry.parent / "layout-test-manifest.json"),
+                "manifest_sha256": "1" * 64,
+                "snapshot_digest": "2" * 64,
+            }
+        )
+        + "\n"
+    )
 
     def mutate(document, _source_payload, _parent_fd):
         for entry in document["projects"]:
@@ -836,6 +849,23 @@ def test_rt_ack_allows_queued_cutover_between_delivery_and_archive(
                         central / name,
                     )
                 (central / "locks").mkdir(mode=0o700)
+                (central / _rtlib.CENTRAL_MAIL_MARKER_NAME).write_text(
+                    json.dumps(
+                        {
+                            "schema": _rtlib.CENTRAL_MAIL_MARKER_SCHEMA,
+                            "project_uuid": local.project_uuid,
+                            "operation_id": (
+                                "00000000-0000-4000-8000-000000000002"
+                            ),
+                            "manifest": str(
+                                registry.parent / "ack-test-manifest.json"
+                            ),
+                            "manifest_sha256": "1" * 64,
+                            "snapshot_digest": "2" * 64,
+                        }
+                    )
+                    + "\n"
+                )
 
                 def mutate(document, _source_payload, _parent_fd):
                     for entry in document["projects"]:

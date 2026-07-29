@@ -26,6 +26,8 @@ LIFECYCLE_ORDINAL = {"pending": 0, "injected": 1, "submitted": 2, "accepted": 3,
 LEGACY_PROJECTS_SCHEMA = "roundtable.projects.v1"
 PROJECTS_SCHEMA = "roundtable.projects.v2"
 PROJECT_ID_SCHEMA = "roundtable.project.v1"
+CENTRAL_MAIL_MARKER_SCHEMA = "roundtable.central-mail.v1"
+CENTRAL_MAIL_MARKER_NAME = ".roundtable-mail.json"
 PROJECT_LAYOUTS = frozenset({"local", "central"})
 PROJECT_STATUSES = frozenset({"active", "tombstoned"})
 ORPHAN_WARNING_PREFIX = "orphan: "
@@ -2667,6 +2669,78 @@ def _validate_owned_directory(path, label):
         )
 
 
+def validate_central_mail_marker(mail_root, project_uuid):
+    """Validate the UUID ownership witness for one central mailbox root."""
+
+    marker = Path(mail_root) / CENTRAL_MAIL_MARKER_NAME
+    payload = _read_owned_regular_bytes(
+        marker,
+        "central mail ownership marker",
+    )
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ProjectRegistryError(
+            f"central mail ownership marker is invalid: {marker}: {error}"
+        ) from error
+    if not isinstance(document, dict):
+        raise ProjectRegistryError(
+            f"central mail ownership marker is not a mapping: {marker}"
+        )
+    expected_uuid = _canonical_uuid(project_uuid, "central mail project")
+    if (
+        document.get("schema") != CENTRAL_MAIL_MARKER_SCHEMA
+        or document.get("project_uuid") != expected_uuid
+    ):
+        raise ProjectRegistryError(
+            f"central mail ownership marker does not match "
+            f"{expected_uuid}: {marker}"
+        )
+    operation_id = document.get("operation_id")
+    manifest = document.get("manifest")
+    manifest_sha256 = document.get("manifest_sha256")
+    snapshot_digest = document.get("snapshot_digest")
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            operation_id,
+            manifest,
+            manifest_sha256,
+            snapshot_digest,
+        )
+    ):
+        raise ProjectRegistryError(
+            f"central mail ownership marker is incomplete: {marker}"
+        )
+    try:
+        canonical_operation = str(uuid.UUID(operation_id))
+    except (ValueError, AttributeError) as error:
+        raise ProjectRegistryError(
+            f"central mail ownership marker operation is invalid: {marker}"
+        ) from error
+    if canonical_operation != operation_id or any(
+        len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+        for value in (manifest_sha256, snapshot_digest)
+    ):
+        raise ProjectRegistryError(
+            f"central mail ownership marker has invalid digests: {marker}"
+        )
+    manifest_path = Path(manifest).expanduser()
+    if not manifest_path.is_absolute():
+        raise ProjectRegistryError(
+            f"central mail ownership marker manifest is not absolute: "
+            f"{marker}"
+        )
+    return document
+
+
+def central_mail_root(registry_path, project_uuid):
+    registry = _registry_path(registry_path)
+    canonical_uuid = _canonical_uuid(project_uuid, "central mail project")
+    return registry.parent / "mail" / canonical_uuid
+
+
 def mailbox_from_registry_entry(entry, registry_path=None):
     """Resolve paths from one already-parsed immutable registry entry."""
 
@@ -2686,7 +2760,7 @@ def mailbox_from_registry_entry(entry, registry_path=None):
         mail_root = state_dir
         inbox_dir = state_dir / "inbox"
     else:
-        mail_root = registry.parent / "mail" / project_uuid
+        mail_root = central_mail_root(registry, project_uuid)
         inbox_dir = mail_root / "inbox"
         for directory, label in (
             (registry.parent / "mail", "central mail parent"),
@@ -2696,6 +2770,7 @@ def mailbox_from_registry_entry(entry, registry_path=None):
             (mail_root / "locks", "central locks"),
         ):
             _validate_owned_directory(directory, label)
+        validate_central_mail_marker(mail_root, project_uuid)
     return ProjectMailbox(
         project_uuid=project_uuid,
         project_root=root,

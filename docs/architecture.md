@@ -138,6 +138,17 @@ bounded registry mutation when required, then mailbox send/ledger locks.
 between them, so an exclusive cutover can safely occur at that boundary
 without a nested `rt-say` lock.
 
+Forward migration is a one-way copy transaction:
+local source → immutable verified backup → private central staging → atomic
+no-clobber central publication → exact registry-row compare-and-set. The
+registry `layout` field is the only authority transition. A central UUID
+ownership marker binds the published generation to the SHA-256 of its exact
+manifest; `.roundtable/mail` is a post-commit human bookmark, never a resolver
+input. Rollback requires that exact forward manifest, first backs up the
+current central tree (including post-cutover mail), builds a fresh local
+candidate, and only then compare-and-sets the row back to `local`. Neither
+direction merges two trees or restores an entire old registry snapshot.
+
 The lock threat model treats every process running as the Roundtable owning
 UID as one integrity domain. Private permissions, no-follow opens, and inode
 revalidation protect against other UIDs, unsafe configuration, and ordinary

@@ -14,6 +14,8 @@ def test_forbidden_path_rejects_runtime_and_backup_paths():
     assert SAFETY.forbidden_path(".roundtable/agents.yaml")
     assert SAFETY.forbidden_path("bin.bak-20260623/tool")
     assert SAFETY.forbidden_path("project/inbox/codex/new/message.md")
+    assert SAFETY.forbidden_path("registry/mail/project-uuid/message.md")
+    assert SAFETY.forbidden_path("registry/layout-locks/project-uuid.lock")
     assert SAFETY.forbidden_path("bin/__pycache__/tool.pyc")
 
 

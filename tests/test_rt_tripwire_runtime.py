@@ -322,6 +322,24 @@ def test_generation_follower_tracks_authoritative_layout_across_cutover(
             central_tmp = central_root / "inbox" / agent / "tmp"
             for directory in (central_new, central_cur, central_tmp):
                 directory.mkdir(parents=True, exist_ok=True)
+            (central_root / _rtlib.CENTRAL_MAIL_MARKER_NAME).write_text(
+                json.dumps(
+                    {
+                        "schema": _rtlib.CENTRAL_MAIL_MARKER_SCHEMA,
+                        "project_uuid": local_mailbox.project_uuid,
+                        "operation_id": (
+                            "00000000-0000-4000-8000-000000000004"
+                        ),
+                        "manifest": str(
+                            isolated_project_registry.parent
+                            / "tripwire-test-manifest.json"
+                        ),
+                        "manifest_sha256": "1" * 64,
+                        "snapshot_digest": "2" * 64,
+                    }
+                )
+                + "\n"
+            )
             (central_new / original_name).write_text(
                 original.read_text()
             )

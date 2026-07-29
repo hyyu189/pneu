@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roundtable-messaging"
-version = "0.1.9"
+version = "0.2.0"
 description = "Durable local maildir coordination for coding agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -40,11 +40,12 @@ roundtable-uninstall = "roundtable_packaging.cli:uninstall_main"
 [tool.setuptools]
 include-package-data = false
 packages = ["roundtable_packaging"]
-py-modules = ["_rtcodex", "_rtlauncher", "_rtlib", "_rtruntime"]
+py-modules = ["_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtruntime"]
 script-files = [
   "bin/_rtcodex.py",
   "bin/_rtlauncher.py",
   "bin/_rtlib.py",
+  "bin/_rtmigrate.py",
   "bin/_rtruntime.py",
   "bin/roundtable",
   "bin/roundtable-init",

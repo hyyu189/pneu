@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-VERSION = "0.1.9"
+VERSION = "0.2.0"
 MANIFEST_SCHEMA = "roundtable.install.v1"
 MANAGED_MARKER = ".roundtable-managed.json"
 
@@ -11,6 +11,7 @@ MANAGED_HELPERS = (
     "_rtcodex.py",
     "_rtlauncher.py",
     "_rtlib.py",
+    "_rtmigrate.py",
     "_rtruntime.py",
 )
 

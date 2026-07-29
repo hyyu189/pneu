@@ -7,7 +7,12 @@ import argparse
 import json
 from pathlib import Path
 
+from _rtmigrate import (
+    migrate_project,
+    rollback_project,
+)
 from _rtlib import (
+    ProjectRegistryError,
     emit_registry_warnings,
     load_project_registry,
     projects_registry_path,
@@ -41,6 +46,47 @@ def build_parser() -> argparse.ArgumentParser:
     resolve.add_argument("root", type=Path)
     remove = subparsers.add_parser("rm", help="tombstone one project")
     remove.add_argument("root", type=Path)
+    migrate = subparsers.add_parser(
+        "migrate",
+        help="copy one local mailbox into the central UUID store",
+    )
+    migrate.add_argument("root", type=Path)
+    migrate.add_argument(
+        "--backup-dir",
+        type=Path,
+        help="private migration backup root",
+    )
+    migrate.add_argument(
+        "--layout-lock-timeout",
+        type=float,
+        default=10.0,
+    )
+    migrate.add_argument(
+        "--registry-lock-timeout",
+        type=float,
+        default=10.0,
+    )
+    rollback = subparsers.add_parser(
+        "rollback",
+        help="copy current central mail back to local using an exact manifest",
+    )
+    rollback.add_argument("root", type=Path)
+    rollback.add_argument("--manifest", type=Path, required=True)
+    rollback.add_argument(
+        "--backup-dir",
+        type=Path,
+        help="private rollback backup root",
+    )
+    rollback.add_argument(
+        "--layout-lock-timeout",
+        type=float,
+        default=10.0,
+    )
+    rollback.add_argument(
+        "--registry-lock-timeout",
+        type=float,
+        default=10.0,
+    )
     return parser
 
 
@@ -89,6 +135,31 @@ def main() -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if args.command in {"migrate", "rollback"}:
+        try:
+            if args.command == "migrate":
+                result = migrate_project(
+                    args.root,
+                    registry_path=args.registry,
+                    backup_root=args.backup_dir,
+                    layout_lock_timeout=args.layout_lock_timeout,
+                    registry_lock_timeout=args.registry_lock_timeout,
+                )
+            else:
+                result = rollback_project(
+                    args.root,
+                    args.manifest,
+                    registry_path=args.registry,
+                    backup_root=args.backup_dir,
+                    layout_lock_timeout=args.layout_lock_timeout,
+                    registry_lock_timeout=args.registry_lock_timeout,
+                )
+        except ProjectRegistryError as error:
+            raise SystemExit(
+                f"rt-projects: {args.command} failed: {error}"
+            ) from None
+        print(json.dumps(result, sort_keys=True))
         return 0
     changed = unregister_project(args.root, args.registry)
     root = args.root.expanduser().resolve()

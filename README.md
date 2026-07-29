@@ -134,7 +134,19 @@ roundtable doctor                 diagnose setup, leases, and wake services
 rt-say AGENT KIND "MESSAGE"       deliver durable mail
 rt-inbox                          inspect waiting mail
 rt-ack ID                         acknowledge and archive a message
+roundtable projects migrate ROOT  move one local mailbox to central storage
+roundtable projects rollback ROOT --manifest PATH
+                                  copy current central mail back to the project
 ```
+
+Migration holds that project's exclusive layout lock through the verified
+copy and registry cutover. Its JSON result reports the immutable manifest
+path, file/byte counts, `lock_wait_ms`, `exclusive_hold_ms`, copy/fsync time,
+registry-flip time, commitment state, and recovery warnings. Backups default
+to
+`~/Documents/Workspace/backups/roundtable-central-mail/<project-uuid>/`.
+Rollback accepts only the exact active forward manifest and snapshots current
+central mail first, so messages delivered after migration are retained.
 
 All participants in one Roundtable currently run on the same host. The durable
 mailbox core does not require cmux and uses the same path in Terminal.app,
@@ -189,8 +201,12 @@ roundtable-uninstall
 ```
 
 Claude/Hermes-only onboarding uses plain `roundtable-setup remove`.
-Uninstallation preserves the project registry, host runtime state, and every
-project-local mailbox unless an explicit runtime purge is requested.
+Uninstallation preserves the project registry, UUID layout locks, every
+registry-selected local or central mailbox, project bookmarks, migration
+manifests/backups, and host runtime state. `--purge-runtime` removes only the
+ephemeral host runtime. To return a central mailbox to its project, run an
+explicit manifest-bound rollback before uninstalling; uninstall never migrates
+or rolls back data implicitly.
 
 See [Installation and ownership](docs/install.md) for isolated preview paths,
 offline release mode, upgrade gates, and precise removal behavior.

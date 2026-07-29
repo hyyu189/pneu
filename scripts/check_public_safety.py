@@ -18,7 +18,9 @@ FORBIDDEN_SEGMENTS = {
     ".runtime",
     "__pycache__",
     "inbox",
+    "layout-locks",
     "locks",
+    "mail",
     "messages",
     "skills/vendor",
 }

@@ -521,7 +521,8 @@ def _create_version(
             [
                 str(installed_python),
                 "-c",
-                "import _rtcodex, _rtlauncher, _rtlib, _rtruntime, yaml",
+                "import _rtcodex, _rtlauncher, _rtlib, _rtmigrate, "
+                "_rtruntime, yaml",
             ]
         )
 
@@ -771,7 +772,10 @@ def install_main(argv: list[str] | None = None) -> int:
                 str(prefix / "projects.yaml"),
                 str(prefix / "projects.yaml.lock"),
                 str(prefix / ".runtime"),
-                "all project-local .roundtable mailboxes",
+                "registry-selected local and central mailboxes",
+                "persistent UUID layout locks",
+                "project .roundtable/mail bookmarks",
+                "external migration backups and manifests",
             ],
         }
         _atomic_write(_manifest_path(prefix), _json_bytes(manifest), 0o600)
@@ -971,7 +975,11 @@ def uninstall_main(argv: list[str] | None = None) -> int:
             except OSError:
                 pass
         print(f"uninstalled Roundtable from {prefix}")
-        print("preserved project registry and every project-local mailbox")
+        print(
+            "preserved project registry, UUID layout locks, "
+            "registry-selected local/central mailboxes, bookmarks, "
+            "and migration backups"
+        )
         if not args.purge_runtime:
             print(f"preserved runtime state at {prefix / '.runtime'}")
         return 0
