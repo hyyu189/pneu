@@ -386,7 +386,7 @@ def test_idempotent_registry_sync_failure_is_typed_and_fail_closed(
         _rtlib.register_project(project, path=registry)
 
 
-def test_explicit_v1_upgrade_is_backed_up_idempotent_and_tombstones_missing_root(
+def test_explicit_v1_upgrade_rejects_unavailable_root_before_any_write(
     tmp_path: Path,
 ) -> None:
     registry = tmp_path / "projects.yaml"
@@ -406,43 +406,38 @@ def test_explicit_v1_upgrade_is_backed_up_idempotent_and_tombstones_missing_root
     assert _rtlib.active_project_entries(legacy_entries) == []
     assert any("run rt-projects upgrade" in item for item in legacy_warnings)
 
-    assert _rtlib.upgrade_project_registry(registry)
+    with pytest.raises(SystemExit, match="unavailable"):
+        _rtlib.upgrade_project_registry(registry)
 
-    assert backup == registry.with_name(f"{registry.name}.v1.backup")
-    assert backup.read_bytes() == legacy_bytes
-    upgraded = read_document(registry)
-    assert upgraded["schema"] == _rtlib.PROJECTS_SCHEMA
-    assert len(upgraded["projects"]) == 2
-    active = raw_entry_for(upgraded, existing)
-    tombstone = raw_entry_for(upgraded, missing)
-    assert active["status"] == "active"
-    assert active["layout"] == "local"
-    assert tombstone["status"] == "tombstoned"
-    assert tombstone["layout"] == "local"
-    assert isinstance(tombstone.get("tombstoned_at"), str)
-    assert_canonical_uuid(active["uuid"])
-    assert_canonical_uuid(tombstone["uuid"])
-    assert read_identity(existing) == {
-        "schema": _rtlib.PROJECT_ID_SCHEMA,
-        "uuid": active["uuid"],
-    }
+    assert registry.read_bytes() == legacy_bytes
+    assert not backup.exists()
+    assert not _rtlib.project_identity_path(existing).exists()
     assert not _rtlib.project_identity_path(missing).exists()
 
-    entries, warnings = _rtlib.load_project_registry(registry)
-    assert len(entries) == 2
-    assert loaded_entry_for(entries, existing)["status"] == "active"
-    assert loaded_entry_for(entries, missing)["status"] == "tombstoned"
-    assert not [
-        warning for warning in warnings if "invalid" in warning.lower()
-    ]
-    with pytest.raises(FAIL_CLOSED):
-        _rtlib.resolve_project_mailbox(missing, registry_path=registry)
 
-    upgraded_bytes = registry.read_bytes()
-    backup_bytes = backup.read_bytes()
-    assert not _rtlib.upgrade_project_registry(registry)
-    assert registry.read_bytes() == upgraded_bytes
-    assert backup.read_bytes() == backup_bytes
+def test_missing_marker_on_legacy_registry_names_upgrade_not_add(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    project = write_project(tmp_path / "project")
+    write_document(
+        registry,
+        {
+            "schema": _rtlib.LEGACY_PROJECTS_SCHEMA,
+            "projects": [
+                {
+                    "root": str(project),
+                    "registered_at": REGISTERED_AT,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(
+        SystemExit,
+        match=r"rt-projects --registry .* upgrade",
+    ):
+        _rtlib.resolve_project_mailbox(project, registry_path=registry)
 
 
 def _write_legacy_registry(registry: Path, roots: list[Path]) -> bytes:
@@ -735,6 +730,56 @@ def test_duplicate_uuid_fails_closed_for_every_claimant(
             _rtlib.resolve_project_mailbox(project, registry_path=registry)
 
 
+def test_noncanonical_semantic_duplicate_uuid_fails_target_resolution(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    target = write_project(tmp_path / "target")
+    sibling = write_project(tmp_path / "sibling")
+    project_uuid = str(uuid.uuid4())
+    write_identity(target, project_uuid)
+    write_document(
+        registry,
+        {
+            "schema": _rtlib.PROJECTS_SCHEMA,
+            "projects": [
+                v2_entry(target, project_uuid),
+                v2_entry(sibling, f"{project_uuid} "),
+            ],
+        },
+    )
+
+    with pytest.raises(SystemExit, match="2 registry claims"):
+        _rtlib.resolve_project_mailbox(target, registry_path=registry)
+
+
+def test_invalid_status_row_at_target_path_is_an_ambiguous_claim(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    target = write_project(tmp_path / "target")
+    project_uuid = str(uuid.uuid4())
+    write_identity(target, project_uuid)
+    ambiguous = v2_entry(target, str(uuid.uuid4()))
+    ambiguous["status"] = "actve"
+    write_document(
+        registry,
+        {
+            "schema": _rtlib.PROJECTS_SCHEMA,
+            "projects": [
+                v2_entry(target, project_uuid),
+                ambiguous,
+            ],
+        },
+    )
+    before = registry.read_bytes()
+
+    with pytest.raises(SystemExit, match="aliases live project inode"):
+        _rtlib.resolve_project_mailbox(target, registry_path=registry)
+
+    assert registry.read_bytes() == before
+
+
 def test_structural_warning_containing_missing_is_never_classified_as_orphan(
     tmp_path: Path,
 ) -> None:
@@ -752,8 +797,48 @@ def test_structural_warning_containing_missing_is_never_classified_as_orphan(
 
     assert len(entries) == 1
     assert any("not missing a uuid" in warning for warning in warnings)
+    mailbox = _rtlib.resolve_project_mailbox(valid, registry_path=registry)
+    assert mailbox.project_uuid == read_identity(valid)["uuid"]
+    before = registry.read_bytes()
     with pytest.raises(FAIL_CLOSED):
-        _rtlib.resolve_project_mailbox(valid, registry_path=registry)
+        _rtlib.register_project(
+            write_project(tmp_path / "new-project"),
+            path=registry,
+        )
+    assert registry.read_bytes() == before
+
+
+def test_active_entry_with_tombstoned_timestamp_is_structurally_invalid(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    project = write_project(tmp_path / "project")
+    project_uuid = str(uuid.uuid4())
+    write_identity(project, project_uuid)
+    entry = v2_entry(project, project_uuid)
+    entry["tombstoned_at"] = TOMBSTONED_AT
+    write_document(
+        registry,
+        {
+            "schema": _rtlib.PROJECTS_SCHEMA,
+            "projects": [entry],
+        },
+    )
+    before = registry.read_bytes()
+
+    entries, warnings = _rtlib.load_project_registry(registry)
+    assert entries == []
+    assert any(
+        "active entry carries tombstoned_at" in warning
+        for warning in warnings
+    )
+    with pytest.raises(FAIL_CLOSED):
+        _rtlib.resolve_project_mailbox(project, registry_path=registry)
+    with pytest.raises(FAIL_CLOSED):
+        _rtlib.register_project(project, path=registry)
+    with pytest.raises(FAIL_CLOSED):
+        _rtlib.unregister_project(project, path=registry)
+    assert registry.read_bytes() == before
 
 
 def test_declared_group_cannot_override_and_is_reconciled_to_derived_group(
@@ -772,8 +857,9 @@ def test_declared_group_cannot_override_and_is_reconciled_to_derived_group(
     assert warnings == []
     assert len(entries) == 1
     derived = _rtlib.derive_project_group(project, entry["uuid"])
-    assert entries[0]["group"] == derived
+    assert entries[0]["group"] == "attacker-selected-group"
     assert entries[0]["declared_group"] == "attacker-selected-group"
+    assert not entries[0]["group_authoritative"]
 
     mailbox = _rtlib.resolve_project_mailbox(
         project, registry_path=registry
@@ -911,7 +997,7 @@ def test_missing_registered_root_can_be_explicitly_tombstoned(
     assert entry["status"] == "tombstoned"
 
 
-def test_replacement_without_marker_can_tombstone_stale_active_path(
+def test_replacement_without_marker_must_vacate_path_before_tombstone(
     tmp_path: Path,
 ) -> None:
     registry = tmp_path / "projects.yaml"
@@ -921,9 +1007,15 @@ def test_replacement_without_marker_can_tombstone_stale_active_path(
     archived = tmp_path / "archived"
     original.rename(archived)
     replacement = write_project(tmp_path / "same")
+    before = registry.read_bytes()
 
-    assert _rtlib.unregister_project(replacement, path=registry)
+    with pytest.raises(SystemExit, match=original_uuid):
+        _rtlib.unregister_project(replacement, path=registry)
+    assert registry.read_bytes() == before
     assert not _rtlib.project_identity_path(replacement).exists()
+    staged = tmp_path / "replacement-staged"
+    replacement.rename(staged)
+    assert _rtlib.unregister_project(replacement, path=registry)
     stale = [
         entry
         for entry in read_document(registry)["projects"]
@@ -932,6 +1024,7 @@ def test_replacement_without_marker_can_tombstone_stale_active_path(
     assert len(stale) == 1
     assert stale[0]["status"] == "tombstoned"
 
+    staged.rename(replacement)
     assert _rtlib.register_project(replacement, path=registry)
     assert read_identity(replacement)["uuid"] != original_uuid
 
@@ -977,6 +1070,141 @@ def test_linked_worktree_registration_mints_distinct_uuid_in_same_group(
     second = raw_entry_for(read_document(registry), linked)
     assert first["uuid"] != second["uuid"]
     assert first["group"] == second["group"]
+
+
+def test_broken_linked_worktree_sibling_cannot_block_healthy_mailbox(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    primary = write_project(tmp_path / "lab" / "primary")
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=primary, check=True)
+    _rtlib.register_project(primary, path=registry)
+    subprocess.run(
+        ["git", "add", ".roundtable/agents.yaml", ".roundtable/.gitignore"],
+        cwd=primary,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Roundtable Test",
+            "-c",
+            "user.email=roundtable@example.invalid",
+            "commit",
+            "-q",
+            "-m",
+            "fixture",
+        ],
+        cwd=primary,
+        check=True,
+    )
+    linked = tmp_path / "lab" / "linked"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", "-b", "linked-test", str(linked)],
+        cwd=primary,
+        check=True,
+    )
+    _rtlib.register_project(linked, path=registry)
+    healthy = write_project(tmp_path / "healthy")
+    _rtlib.register_project(healthy, path=registry)
+    healthy_uuid = read_identity(healthy)["uuid"]
+
+    primary.rename(tmp_path / "lab" / "primary-renamed")
+
+    mailbox = _rtlib.resolve_project_mailbox(
+        healthy,
+        registry_path=registry,
+    )
+    assert mailbox.project_uuid == healthy_uuid
+    entries, warnings = _rtlib.load_project_registry(registry)
+    assert any(entry["uuid"] == healthy_uuid for entry in entries)
+    assert any("orphan:" in warning for warning in warnings)
+
+
+def test_symlink_drift_sibling_cannot_block_healthy_mailbox(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    healthy = write_project(tmp_path / "healthy")
+    sibling = write_project(tmp_path / "sibling")
+    _rtlib.register_project(healthy, path=registry)
+    _rtlib.register_project(sibling, path=registry)
+    healthy_uuid = read_identity(healthy)["uuid"]
+    sibling_uuid = read_identity(sibling)["uuid"]
+    relocated = tmp_path / "sibling-relocated"
+    sibling.rename(relocated)
+    sibling.symlink_to(relocated, target_is_directory=True)
+
+    mailbox = _rtlib.resolve_project_mailbox(
+        healthy,
+        registry_path=registry,
+    )
+
+    assert mailbox.project_uuid == healthy_uuid
+    entries, warnings = _rtlib.load_project_registry(registry)
+    assert {entry["uuid"] for entry in entries} == {
+        healthy_uuid,
+        sibling_uuid,
+    }
+    assert any(
+        "row-runtime:" in warning and sibling_uuid in warning
+        for warning in warnings
+    )
+    before = registry.read_bytes()
+    with pytest.raises(FAIL_CLOSED):
+        _rtlib.unregister_project(healthy, path=registry)
+    with pytest.raises(FAIL_CLOSED):
+        _rtlib.register_project(
+            write_project(tmp_path / "new-project"),
+            path=registry,
+        )
+    assert registry.read_bytes() == before
+
+    sibling.unlink()
+    recovered = _rtlib.resolve_project_mailbox(
+        relocated,
+        registry_path=registry,
+    )
+    assert recovered.project_uuid == sibling_uuid
+    assert raw_entry_for(
+        read_document(registry),
+        relocated,
+    )["uuid"] == sibling_uuid
+
+
+def test_exact_resolve_derives_group_only_for_target_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    projects = [
+        write_project(tmp_path / name)
+        for name in ("target", "sibling-a", "sibling-b")
+    ]
+    for project in projects:
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main"],
+            cwd=project,
+            check=True,
+        )
+        _rtlib.register_project(project, path=registry)
+    calls: list[Path] = []
+    original = _rtlib._derive_project_group
+
+    def observe(root, project_uuid):
+        calls.append(Path(root))
+        return original(root, project_uuid)
+
+    monkeypatch.setattr(_rtlib, "_derive_project_group", observe)
+
+    mailbox = _rtlib.resolve_project_mailbox(
+        projects[0],
+        registry_path=registry,
+    )
+
+    assert mailbox.project_root == projects[0]
+    assert calls == [projects[0]]
 
 
 def test_git_negation_is_repaired_and_later_unignore_fails_closed(
@@ -1086,6 +1314,90 @@ def test_renamed_project_auto_reindexes_from_identity_marker(
     )
 
 
+def test_moved_target_cannot_bypass_current_path_claim_with_bad_sibling(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    original = write_project(tmp_path / "original")
+    claimed = write_project(tmp_path / "claimed")
+    _rtlib.register_project(original, path=registry)
+    _rtlib.register_project(claimed, path=registry)
+    original_uuid = read_identity(original)["uuid"]
+    claimed_uuid = read_identity(claimed)["uuid"]
+    claimed_moved = tmp_path / "claimed-moved"
+    claimed.rename(claimed_moved)
+    current = tmp_path / "claimed"
+    original.rename(current)
+    document = read_document(registry)
+    document["projects"].append(
+        v2_entry(
+            write_project(tmp_path / "malformed"),
+            "not-a-uuid",
+        )
+    )
+    write_document(registry, document)
+    before = registry.read_bytes()
+
+    with pytest.raises(SystemExit, match="aliases live project inode"):
+        _rtlib.resolve_project_mailbox(
+            current,
+            registry_path=registry,
+        )
+
+    assert registry.read_bytes() == before
+    assert read_identity(current)["uuid"] == original_uuid
+    assert read_identity(claimed_moved)["uuid"] == claimed_uuid
+
+
+def test_renamed_project_without_marker_refuses_to_mint_and_names_old_uuid(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    original = write_project(tmp_path / "original")
+    _rtlib.register_project(original, path=registry)
+    project_uuid = read_identity(original)["uuid"]
+    before = registry.read_bytes()
+    moved = tmp_path / "renamed"
+    original.rename(moved)
+    marker = _rtlib.project_identity_path(moved)
+    marker.unlink()
+
+    with pytest.raises(SystemExit, match=project_uuid):
+        _rtlib.resolve_project_mailbox(moved, registry_path=registry)
+    with pytest.raises(SystemExit, match=project_uuid):
+        _rtlib.register_project(moved, path=registry)
+    with pytest.raises(SystemExit, match=project_uuid):
+        _rtlib.unregister_project(moved, path=registry)
+
+    assert registry.read_bytes() == before
+    assert not marker.exists()
+
+
+def test_agents_only_old_path_cannot_be_tombstoned_as_moved_identity(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    original = write_project(tmp_path / "original")
+    _rtlib.register_project(original, path=registry)
+    project_uuid = read_identity(original)["uuid"]
+    moved = tmp_path / "moved"
+    original.rename(moved)
+    write_project(original)
+    before = registry.read_bytes()
+
+    with pytest.raises(SystemExit, match=project_uuid):
+        _rtlib.unregister_project(original, path=registry)
+
+    assert registry.read_bytes() == before
+    shutil.rmtree(original)
+    mailbox = _rtlib.resolve_project_mailbox(
+        moved,
+        registry_path=registry,
+    )
+    assert mailbox.project_uuid == project_uuid
+    assert raw_entry_for(read_document(registry), moved)["uuid"] == project_uuid
+
+
 def test_case_only_rename_reindexes_same_live_inode(
     tmp_path: Path,
 ) -> None:
@@ -1160,6 +1472,69 @@ def test_copied_live_identity_fails_closed_without_corrupting_original(
     )
     assert mailbox.project_uuid == project_uuid
     assert mailbox.project_root == original
+
+
+def test_copied_live_identity_cannot_hide_behind_bad_sibling(
+    tmp_path: Path,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    original = write_project(tmp_path / "original")
+    _rtlib.register_project(original, path=registry)
+    project_uuid = read_identity(original)["uuid"]
+    copied = tmp_path / "copied"
+    shutil.copytree(original, copied)
+    document = read_document(registry)
+    document["projects"].append(
+        v2_entry(
+            write_project(tmp_path / "malformed"),
+            "not-a-uuid",
+        )
+    )
+    write_document(registry, document)
+    before = registry.read_bytes()
+
+    with pytest.raises(SystemExit, match="refusing copied identity"):
+        _rtlib.resolve_project_mailbox(copied, registry_path=registry)
+
+    assert registry.read_bytes() == before
+    assert read_identity(original)["uuid"] == project_uuid
+
+
+@pytest.mark.parametrize("via_parent", [False, True])
+def test_copied_identity_rejects_witness_behind_symlink_drift(
+    tmp_path: Path,
+    via_parent: bool,
+) -> None:
+    registry = tmp_path / "projects.yaml"
+    parent = tmp_path / "parent" if via_parent else tmp_path
+    original = write_project(parent / "original")
+    _rtlib.register_project(original, path=registry)
+    project_uuid = read_identity(original)["uuid"]
+    if via_parent:
+        real_parent = tmp_path / "parent-real"
+        parent.rename(real_parent)
+        parent.symlink_to(real_parent, target_is_directory=True)
+        real_original = real_parent / "original"
+    else:
+        real_original = tmp_path / "original-real"
+        original.rename(real_original)
+        original.symlink_to(real_original, target_is_directory=True)
+    copied = tmp_path / "copied"
+    shutil.copytree(real_original, copied)
+    before = registry.read_bytes()
+
+    with pytest.raises(
+        SystemExit,
+        match="refusing copied identity|unverified old-path occupant",
+    ):
+        _rtlib.resolve_project_mailbox(copied, registry_path=registry)
+
+    assert registry.read_bytes() == before
+    actual = _rtlib.resolve_project_mailbox(
+        real_original,
+        registry_path=registry,
+    )
+    assert actual.project_uuid == project_uuid
 
 
 def test_central_mailbox_uses_exact_uuid_path_without_scanning(

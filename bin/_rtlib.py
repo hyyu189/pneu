@@ -29,6 +29,7 @@ PROJECT_ID_SCHEMA = "roundtable.project.v1"
 PROJECT_LAYOUTS = frozenset({"local", "central"})
 PROJECT_STATUSES = frozenset({"active", "tombstoned"})
 ORPHAN_WARNING_PREFIX = "orphan: "
+ROW_RUNTIME_WARNING_PREFIX = "row-runtime: "
 LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 LAYOUT_LOCK_POLL_SECONDS = 0.05
 GIT_ROUTING_ENVIRONMENT = frozenset(
@@ -76,7 +77,7 @@ class ProjectLayoutLockTimeout(ProjectRegistryError):
     """A healthy layout transition did not quiesce before the caller's bound."""
 
 
-def _project_identity_for_layout_lock(project):
+def _project_identity_for_layout_lock(project, registry):
     """Read the stable UUID before consulting its mutable layout pointer."""
 
     raw_root = Path(project).expanduser()
@@ -91,9 +92,9 @@ def _project_identity_for_layout_lock(project):
         )
     root_fd, state_fd = _open_project_guard(root)
     try:
-        project_uuid = _read_project_identity_at(
-            root, state_fd, required=True
-        )
+        project_uuid = _read_project_identity_at(root, state_fd)
+        if project_uuid is None:
+            raise _missing_project_identity_error(root, registry)
         _verify_project_guard(root, root_fd, state_fd)
         return root, project_uuid
     finally:
@@ -328,7 +329,10 @@ class _ProjectMailboxLock:
         if self._entered:
             raise ProjectRegistryError("layout lock context cannot be reused")
         self._entered = True
-        root, project_uuid = _project_identity_for_layout_lock(self.project)
+        root, project_uuid = _project_identity_for_layout_lock(
+            self.project,
+            self.registry,
+        )
         (
             self._parent_fd,
             self._lock_dir_fd,
@@ -840,6 +844,34 @@ def _canonical_registered_path(value, label):
     return resolved
 
 
+def _v2_registered_path(value, label):
+    """Parse one stored absolute spelling without coupling it to live drift."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ProjectRegistryError(f"{label} has no path")
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        raise ProjectRegistryError(f"{label} path is not absolute: {value}")
+    spelling = _absolute_project_path(candidate)
+    if candidate != spelling:
+        raise ProjectRegistryError(
+            f"{label} path is not lexically canonical: {value}"
+        )
+    try:
+        resolved = candidate.resolve()
+    except OSError as error:
+        return spelling, (
+            f"{ROW_RUNTIME_WARNING_PREFIX}{label} path cannot currently "
+            f"resolve: {error}"
+        )
+    if spelling != resolved:
+        return spelling, (
+            f"{ROW_RUNTIME_WARNING_PREFIX}{label} registered path drifted: "
+            f"{spelling} resolves to {resolved}"
+        )
+    return spelling, None
+
+
 def _entry_timestamp(entry, field, label, *, required=True):
     value = entry.get(field)
     if value is None and not required:
@@ -902,7 +934,11 @@ def _parse_v2_entries(document, path):
             if not isinstance(raw, dict):
                 raise ProjectRegistryError(f"{label} is not a mapping")
             project_uuid = _canonical_uuid(raw.get("uuid"), label)
-            root = _canonical_registered_path(raw.get("path"), label)
+            entry_label = f"{label} uuid={project_uuid}"
+            root, path_warning = _v2_registered_path(
+                raw.get("path"),
+                entry_label,
+            )
             name = raw.get("name")
             if (
                 not isinstance(name, str)
@@ -910,67 +946,65 @@ def _parse_v2_entries(document, path):
                 or "\n" in name
                 or "\r" in name
             ):
-                raise ProjectRegistryError(f"{label} has no valid name")
+                raise ProjectRegistryError(f"{entry_label} has no valid name")
             declared_group = raw.get("group")
             if not isinstance(declared_group, str) or not declared_group.strip():
-                raise ProjectRegistryError(f"{label} has no valid group")
+                raise ProjectRegistryError(f"{entry_label} has no valid group")
             layout = raw.get("layout")
             if layout not in PROJECT_LAYOUTS:
                 raise ProjectRegistryError(
-                    f"{label} has unsupported layout {layout!r}"
+                    f"{entry_label} has unsupported layout {layout!r}"
                 )
             status_value = raw.get("status")
             if status_value not in PROJECT_STATUSES:
                 raise ProjectRegistryError(
-                    f"{label} has unsupported status {status_value!r}"
+                    f"{entry_label} has unsupported status {status_value!r}"
                 )
-            registered_at = _entry_timestamp(raw, "registered_at", label)
+            registered_at = _entry_timestamp(
+                raw,
+                "registered_at",
+                entry_label,
+            )
             tombstoned_at = _entry_timestamp(
                 raw,
                 "tombstoned_at",
-                label,
+                entry_label,
                 required=status_value == "tombstoned",
             )
             if status_value == "active" and raw.get("tombstoned_at") is not None:
                 raise ProjectRegistryError(
-                    f"{label} active entry carries tombstoned_at"
+                    f"{entry_label} active entry carries tombstoned_at"
                 )
             if project_uuid in seen_uuids:
                 raise ProjectRegistryError(
-                    f"{label} duplicates project UUID {project_uuid}"
+                    f"{entry_label} duplicates project UUID {project_uuid}"
                 )
             seen_uuids.add(project_uuid)
             root_key = str(root)
             if status_value == "active" and root_key in seen_active_roots:
                 raise ProjectRegistryError(
-                    f"{label} duplicates active project path {root}"
+                    f"{entry_label} duplicates active project path {root}"
                 )
             if status_value == "active":
                 seen_active_roots.add(root_key)
-            available = is_project_root(root)
+            available = path_warning is None and is_project_root(root)
             if status_value == "active" and available:
                 try:
                     info = os.stat(root, follow_symlinks=False)
                 except OSError as error:
                     raise ProjectRegistryError(
-                        f"{label} cannot stat live project: {error}"
+                        f"{entry_label} cannot stat live project: {error}"
                     ) from error
                 inode_key = (info.st_dev, info.st_ino)
                 prior = seen_active_inodes.get(inode_key)
                 if prior is not None:
                     raise ProjectRegistryError(
-                        f"{label} aliases live project inode already claimed "
+                        f"{entry_label} aliases live project inode already claimed "
                         f"by {prior}"
                     )
-                seen_active_inodes[inode_key] = label
-            group = declared_group
-            group_authoritative = False
-            if status_value == "active" and available:
-                derived_group, group_authoritative = _derive_project_group(
-                    root, project_uuid
-                )
-                if group_authoritative:
-                    group = derived_group
+                seen_active_inodes[inode_key] = entry_label
+            if path_warning is not None:
+                warnings.append(path_warning)
             if status_value == "active" and not available:
                 warnings.append(_orphan_warning(label, root))
             entries.append(
@@ -981,9 +1015,9 @@ def _parse_v2_entries(document, path):
                     # the serialized v2 field is deliberately named ``path``.
                     "root": root,
                     "name": name,
-                    "group": group,
+                    "group": declared_group,
                     "declared_group": declared_group,
-                    "group_authoritative": group_authoritative,
+                    "group_authoritative": False,
                     "layout": layout,
                     "status": status_value,
                     "registered_at": registered_at,
@@ -1035,6 +1069,152 @@ def _strict_project_registry(path=None):
     return document, entries, warnings
 
 
+def _raw_uuid_denotes(value, project_uuid):
+    if not isinstance(value, str):
+        return False
+    try:
+        return str(uuid.UUID(value.strip())) == project_uuid
+    except (ValueError, AttributeError):
+        return False
+
+
+def _target_registry_entry_from_document(
+    document,
+    path,
+    project_uuid,
+    current_root=None,
+):
+    """Select one exact UUID row while isolating unrelated row failures."""
+
+    if document.get("schema") != PROJECTS_SCHEMA:
+        raise ProjectRegistryError(
+            f"{path} uses legacy schema {LEGACY_PROJECTS_SCHEMA}; "
+            f"run rt-projects --registry {path} upgrade"
+        )
+    raw_rows = document.get("projects") or []
+    raw_matches = [
+        index
+        for index, raw in enumerate(raw_rows)
+        if isinstance(raw, dict)
+        and _raw_uuid_denotes(raw.get("uuid"), project_uuid)
+    ]
+    if len(raw_matches) != 1:
+        raise ProjectRegistryError(
+            f"project identity {project_uuid} has "
+            f"{len(raw_matches)} registry claims"
+        )
+    target_index = raw_matches[0]
+    entries, warnings = _parse_v2_entries(document, path)
+    matches = [
+        entry for entry in entries if entry["uuid"] == project_uuid
+    ]
+    if len(matches) != 1:
+        label = f"{path}: projects[{target_index}]"
+        relevant = [
+            warning
+            for warning in warnings
+            if warning.startswith(label)
+            or f"{label} " in warning
+        ]
+        detail = "; ".join(relevant) if relevant else "row is not valid"
+        raise ProjectRegistryError(
+            f"project identity {project_uuid} registry row is invalid: "
+            f"{detail}"
+        )
+    target = matches[0]
+    target_runtime_prefix = (
+        f"{ROW_RUNTIME_WARNING_PREFIX}{path}: projects[{target_index}] "
+        f"uuid={project_uuid}"
+    )
+    target_runtime_drift = any(
+        warning.startswith(target_runtime_prefix)
+        for warning in warnings
+    )
+
+    # The tolerant parser may retain the first row and skip a later duplicate.
+    # Recheck only collisions that directly challenge the selected target.
+    if current_root is not None:
+        current_root = _absolute_project_path(current_root)
+        if (
+            target["root"] != current_root
+            and not _same_existing_inode(target["root"], current_root)
+            and (
+                target["available"]
+                or target_runtime_drift
+                or _registered_path_witness_matches(target)
+            )
+        ):
+            raise ProjectRegistryError(
+                _active_location_conflict(
+                    target,
+                    project_uuid,
+                    current_root,
+                )
+            )
+    protected_roots = [target["root"]]
+    if current_root is not None:
+        if current_root not in protected_roots:
+            protected_roots.append(current_root)
+    for index, raw in enumerate(raw_rows):
+        if index == target_index or not isinstance(raw, dict):
+            continue
+        if raw.get("status") == "tombstoned":
+            parsed_tombstones, _tombstone_warnings = _parse_v2_entries(
+                {"schema": PROJECTS_SCHEMA, "projects": [raw]},
+                path,
+            )
+            if (
+                len(parsed_tombstones) == 1
+                and parsed_tombstones[0]["status"] == "tombstoned"
+            ):
+                continue
+        raw_path = raw.get("path")
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        candidate = Path(raw_path).expanduser()
+        if not candidate.is_absolute():
+            continue
+        candidate = _absolute_project_path(candidate)
+        if any(
+            candidate == protected
+            or _same_existing_inode(candidate, protected)
+            for protected in protected_roots
+        ):
+            raise ProjectRegistryError(
+                f"projects[{index}] aliases live project inode claimed by "
+                f"project identity {project_uuid} at "
+                f"{current_root or target['root']}"
+            )
+    return target, entries, warnings
+
+
+def _target_project_registry(path, project_uuid, *, current_root=None):
+    try:
+        _validate_registry_source(path)
+        document = _read_projects_doc(path)
+    except (ProjectRegistryError, ValueError) as error:
+        raise ProjectRegistryError(str(error)) from error
+    target, entries, warnings = _target_registry_entry_from_document(
+        document,
+        path,
+        project_uuid,
+        current_root=current_root,
+    )
+    return document, target, entries, warnings
+
+
+def _entry_with_revalidated_group(entry, root):
+    effective = dict(entry)
+    derived_group, authoritative = _derive_project_group(
+        root,
+        entry["uuid"],
+    )
+    effective["group_authoritative"] = authoritative
+    if authoritative:
+        effective["group"] = derived_group
+    return effective
+
+
 def load_project_registry_strict(path=None):
     """Return a complete v2 snapshot or raise instead of partially parsing."""
 
@@ -1069,10 +1249,7 @@ def emit_registry_warnings(warnings, stream=None, tool="roundtable"):
 
 
 def registered_project_roots(path=None, *, warn=True, tool="roundtable"):
-    try:
-        entries, warnings = load_project_registry_strict(path)
-    except ProjectRegistryError as error:
-        raise SystemExit(f"{tool}: invalid project registry: {error}") from None
+    entries, warnings = load_project_registry(path)
     if warn:
         emit_registry_warnings(warnings, tool=tool)
     return [
@@ -1427,6 +1604,112 @@ def _read_project_identity(root, *, required=False):
             f"run rt-projects add {root}"
         )
     return _decode_project_identity(root, marker, raw_payload)
+
+
+def _registered_path_witness_matches(entry):
+    root = entry["root"]
+    root_fd = state_fd = None
+    try:
+        root_fd, state_fd = _open_project_guard(root)
+        observed = _read_project_identity_at(root, state_fd)
+        return observed == entry["uuid"]
+    except ProjectRegistryError:
+        return False
+    finally:
+        if root_fd is not None:
+            _close_project_guard(root_fd, state_fd)
+
+
+def _active_location_conflict(entry, project_uuid, root):
+    """Explain whether an occupied old path is a copy or an unverified squatter."""
+
+    old_root = entry["root"]
+    if _registered_path_witness_matches(entry):
+        return (
+            f"project identity {project_uuid} is already active at "
+            f"{old_root}; refusing copied identity at {root}"
+        )
+    return (
+        f"project identity {project_uuid} is indexed at {old_root}, but that "
+        "live path has no matching identity marker. Refusing to tombstone or "
+        f"move UUID {project_uuid} while an unverified old-path occupant is "
+        f"present. Remove or rename the occupant at {old_root}, then retry "
+        f"from the verified project at {root}"
+    )
+
+
+def _identity_index_context(root, path):
+    """Return exact and unresolved UUID rows for a markerless project."""
+
+    try:
+        _validate_registry_source(path)
+        document = _read_projects_doc(path)
+    except (ProjectRegistryError, ValueError) as error:
+        return None, [], [], str(error)
+    schema = document.get("schema")
+    if schema == LEGACY_PROJECTS_SCHEMA:
+        return schema, [], [], None
+    entries, _warnings = _parse_v2_entries(document, path)
+    exact = [
+        entry
+        for entry in entries
+        if entry["root"] == root
+        or _same_existing_inode(entry["root"], root)
+    ]
+    unresolved = [
+        entry
+        for entry in entries
+        if entry["status"] == "active"
+        and not _registered_path_witness_matches(entry)
+    ]
+    return schema, exact, unresolved, None
+
+
+def _missing_project_identity_error(root, path):
+    marker = project_identity_path(root)
+    schema, exact, unresolved, inspection_error = _identity_index_context(
+        root,
+        path,
+    )
+    if schema == LEGACY_PROJECTS_SCHEMA:
+        return ProjectRegistryError(
+            f"project identity marker is missing: {marker}; registry {path} "
+            f"uses legacy schema {LEGACY_PROJECTS_SCHEMA}. Run "
+            f"rt-projects --registry {path} upgrade before mailbox access"
+        )
+    if exact:
+        claims = ", ".join(
+            f"{entry['uuid']} ({entry['status']})"
+            for entry in exact
+        )
+        return ProjectRegistryError(
+            f"project identity marker is missing: {marker}; registry {path} "
+            f"records UUID {claims} at {root}. Refusing to mint or inherit "
+            "identity from the path. Restore the verified identity marker; "
+            "for an intentional replacement, make the registered path "
+            "unavailable and explicitly tombstone it before rt-projects add"
+        )
+    if unresolved:
+        claims = ", ".join(
+            f"{entry['uuid']} at {entry['root']}"
+            for entry in unresolved
+        )
+        return ProjectRegistryError(
+            f"project identity marker is missing: {marker}; active registry "
+            f"identity is not witness-confirmed ({claims}). This may be a "
+            "moved project, so refusing to mint a new UUID. Restore the "
+            "verified marker, or explicitly tombstone the old registration "
+            "before creating a distinct identity"
+        )
+    if inspection_error is not None:
+        return ProjectRegistryError(
+            f"project identity marker is missing: {marker}; cannot safely "
+            f"inspect registry {path}: {inspection_error}"
+        )
+    return ProjectRegistryError(
+        f"project is not registered (missing {marker}); "
+        f"run rt-projects add {root}"
+    )
 
 
 def _verify_open_directory_path(descriptor, path, label):
@@ -1894,7 +2177,6 @@ def upgrade_project_registry(path=None, *, upgraded_at=None):
     """Explicitly and atomically upgrade a root-only v1 registry in scratch/user flow."""
 
     path = _registry_path(path)
-    timestamp = upgraded_at or _utc_timestamp()
     project_guards = []
 
     def guard_all():
@@ -1916,6 +2198,17 @@ def upgrade_project_registry(path=None, *, upgraded_at=None):
             raise ProjectRegistryError(
                 f"legacy registry snapshot disappeared: {path}"
             )
+        unavailable = [
+            entry["root"]
+            for entry in legacy_entries
+            if not entry["available"]
+        ]
+        if unavailable:
+            raise ProjectRegistryError(
+                "legacy project is unavailable; restore every registered "
+                "project before upgrade: "
+                + ", ".join(str(root) for root in unavailable)
+            )
         used = set()
         upgraded = []
         marker_plan = []
@@ -1934,20 +2227,15 @@ def upgrade_project_registry(path=None, *, upgraded_at=None):
                     f"legacy registry contains duplicate project identity {project_uuid}"
                 )
             used.add(project_uuid)
-            if entry["available"]:
-                marker_plan.append(
-                    (root, project_uuid, root_fd, state_fd)
-                )
-                status_value = "active"
-            else:
-                status_value = "tombstoned"
+            marker_plan.append(
+                (root, project_uuid, root_fd, state_fd)
+            )
             upgraded.append(
                 _v2_entry(
                     root,
                     project_uuid,
                     registered_at=entry["registered_at"],
-                    status_value=status_value,
-                    tombstoned_at=timestamp,
+                    status_value="active",
                 )
             )
         _write_verified_legacy_backup(
@@ -2008,10 +2296,16 @@ def register_project(root, path=None, registered_at=None):
         entries, _warnings = _strict_entries_from_document(document, path)
         marker_uuid = _read_project_identity_at(root, state_fd)
         by_uuid = {entry["uuid"]: entry for entry in entries}
-        active_at_root = [
+        entries_at_root = [
             entry
             for entry in entries
-            if entry["status"] == "active" and entry["root"] == root
+            if entry["root"] == root
+            or _same_existing_inode(entry["root"], root)
+        ]
+        active_at_root = [
+            entry
+            for entry in entries_at_root
+            if entry["status"] == "active"
         ]
         if len(active_at_root) > 1:
             raise ProjectRegistryError(f"multiple active entries claim {root}")
@@ -2019,11 +2313,14 @@ def register_project(root, path=None, registered_at=None):
             existing = active_at_root[0]
             if marker_uuid is None:
                 raise ProjectRegistryError(
-                    f"active registry entry {existing['uuid']} claims {root}, "
-                    f"but {project_identity_path(root)} is missing; refusing "
-                    "path-based identity inheritance. Restore the verified "
-                    "identity marker, or tombstone this registration before "
-                    "adding the replacement project"
+                    f"identity marker {project_identity_path(root)} is "
+                    f"missing, but registry {path} records active UUID "
+                    f"{existing['uuid']} at {existing['root']}. Refusing to "
+                    "mint or inherit identity from the path. Restore the "
+                    f"verified marker for UUID {existing['uuid']}; for an "
+                    "intentional replacement, make the registered path "
+                    "unavailable and explicitly tombstone that exact "
+                    "registration before rt-projects add"
                 )
             if marker_uuid != existing["uuid"]:
                 raise ProjectRegistryError(
@@ -2031,6 +2328,26 @@ def register_project(root, path=None, registered_at=None):
                     f"{existing['uuid']} for {root}"
                 )
             return False
+        if marker_uuid is None:
+            unresolved = [
+                entry
+                for entry in entries
+                if entry["status"] == "active"
+                and not _registered_path_witness_matches(entry)
+            ]
+            if unresolved:
+                claims = ", ".join(
+                    f"{entry['uuid']} at {entry['root']}"
+                    for entry in unresolved
+                )
+                raise ProjectRegistryError(
+                    f"no identity marker exists at "
+                    f"{project_identity_path(root)}. Active registry identity "
+                    f"is not witness-confirmed ({claims}); this may be a moved "
+                    "project. Refusing to mint a new UUID. Restore the verified "
+                    "marker, or explicitly tombstone the old registration "
+                    "before creating a distinct identity"
+                )
 
         replace_uuid = None
         if marker_uuid is not None:
@@ -2043,8 +2360,11 @@ def register_project(root, path=None, registered_at=None):
                     and not _same_existing_inode(old_root, root)
                 ):
                     raise ProjectRegistryError(
-                        f"project UUID {marker_uuid} is already active at {old_root}; "
-                        f"refusing copied identity at {root}"
+                        _active_location_conflict(
+                            marker_entry,
+                            marker_uuid,
+                            root,
+                        )
                     )
                 for raw in document["projects"]:
                     if raw.get("uuid") == marker_uuid:
@@ -2121,6 +2441,44 @@ def unregister_project(root, path=None, tombstoned_at=None):
             )
         entries, _warnings = _strict_entries_from_document(document, path)
         if project_uuid is None:
+            if root_fd is not None:
+                live_claims = [
+                    entry
+                    for entry in entries
+                    if entry["status"] == "active"
+                    and (
+                        entry["root"] == root
+                        or _same_existing_inode(entry["root"], root)
+                    )
+                ]
+                if live_claims:
+                    claims = ", ".join(
+                        entry["uuid"] for entry in live_claims
+                    )
+                    raise ProjectRegistryError(
+                        f"live project path {root} has no verified identity "
+                        f"marker, but the registry records active UUID "
+                        f"{claims}. Refusing path-only tombstone. Make the "
+                        "registered path unavailable before explicitly "
+                        "tombstoning that registration"
+                    )
+                unresolved = [
+                    entry
+                    for entry in entries
+                    if entry["status"] == "active"
+                    and not _registered_path_witness_matches(entry)
+                ]
+                if unresolved:
+                    claims = ", ".join(
+                        f"{entry['uuid']} at {entry['root']}"
+                        for entry in unresolved
+                    )
+                    raise ProjectRegistryError(
+                        f"live project path {root} has no verified identity "
+                        "marker, and active registry identity is not "
+                        f"witness-confirmed ({claims}). Refusing to guess "
+                        "which UUID to tombstone"
+                    )
             matches = [
                 entry
                 for entry in entries
@@ -2261,8 +2619,11 @@ def _reindex_project_identity(root, project_uuid, path, *, guard=None):
             )
             if entry["available"] and not same_location:
                 raise ProjectRegistryError(
-                    f"project identity {project_uuid} is already active at "
-                    f"{entry['root']}; refusing copied identity at {root}"
+                    _active_location_conflict(
+                        entry,
+                        project_uuid,
+                        root,
+                    )
                 )
             conflicts = [
                 candidate
@@ -2326,24 +2687,20 @@ def resolve_project_mailbox_checked(project, registry_path=None):
         _verify_project_guard(root, root_fd, state_fd)
 
     try:
-        project_uuid = _read_project_identity_at(
-            root, state_fd, required=True
+        project_uuid = _read_project_identity_at(root, state_fd)
+        if project_uuid is None:
+            raise _missing_project_identity_error(root, path)
+        _document, entry, _entries, warnings = _target_project_registry(
+            path,
+            project_uuid,
+            current_root=root,
         )
-        _document, entries, warnings = _strict_project_registry(path)
-        structural = _structural_registry_warnings(warnings)
-        if structural:
-            raise ProjectRegistryError("; ".join(structural))
-        matches = [entry for entry in entries if entry["uuid"] == project_uuid]
-        if len(matches) != 1:
-            raise ProjectRegistryError(
-                f"project identity {project_uuid} has "
-                f"{len(matches)} registry entries"
-            )
-        entry = matches[0]
         if entry["status"] != "active":
             raise ProjectRegistryError(
                 f"project identity {project_uuid} is tombstoned"
             )
+        entry = _entry_with_revalidated_group(entry, root)
+        structural = _structural_registry_warnings(warnings)
         metadata_drift = (
             entry["root"] != root
             or entry["name"] != root.name
@@ -2353,34 +2710,43 @@ def resolve_project_mailbox_checked(project, registry_path=None):
             )
         )
         if metadata_drift:
-            _reindex_project_identity(
-                root,
-                project_uuid,
-                path,
-                guard=guard,
-            )
-            _document, entries, warnings = _strict_project_registry(path)
-            structural = _structural_registry_warnings(warnings)
             if structural:
-                raise ProjectRegistryError("; ".join(structural))
-            matches = [
-                entry for entry in entries if entry["uuid"] == project_uuid
-            ]
-            if (
-                len(matches) != 1
-                or matches[0]["root"] != root
-                or matches[0]["name"] != root.name
-                or (
-                    matches[0].get("group_authoritative")
-                    and matches[0].get("declared_group")
-                    != matches[0].get("group")
+                # Unrelated row damage must not take down this mailbox, and it
+                # also must not be overwritten by an opportunistic metadata
+                # repair. Use the current UUID-proven root in memory only.
+                entry = {
+                    **entry,
+                    "path": root,
+                    "root": root,
+                    "name": root.name,
+                }
+            else:
+                _reindex_project_identity(
+                    root,
+                    project_uuid,
+                    path,
+                    guard=guard,
                 )
-            ):
-                raise ProjectRegistryError(
-                    f"project identity {project_uuid} reconciliation "
-                    "did not commit"
+                _document, entry, _entries, warnings = (
+                    _target_project_registry(
+                        path,
+                        project_uuid,
+                        current_root=root,
+                    )
                 )
-            entry = matches[0]
+                entry = _entry_with_revalidated_group(entry, root)
+                if (
+                    entry["root"] != root
+                    or entry["name"] != root.name
+                    or (
+                        entry.get("group_authoritative")
+                        and entry.get("declared_group") != entry.get("group")
+                    )
+                ):
+                    raise ProjectRegistryError(
+                        f"project identity {project_uuid} reconciliation "
+                        "did not commit"
+                    )
         mailbox = mailbox_from_registry_entry(entry, path)
         guard()
         return mailbox

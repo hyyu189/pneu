@@ -21,7 +21,7 @@ from _rtlib import (
     active_project_entries,
     emit_registry_warnings,
     is_project_root,
-    load_project_registry_strict,
+    load_project_registry,
     resolve_project_mailbox_checked,
 )
 
@@ -357,12 +357,7 @@ def choose_project(
             file=stderr,
         )
 
-    try:
-        entries, warnings = load_project_registry_strict()
-    except ProjectRegistryError as error:
-        raise OnboardingError(
-            f"roundtable: invalid project registry: {error}"
-        ) from error
+    entries, warnings = load_project_registry()
     emit_registry_warnings(warnings, stream=stderr, tool="roundtable")
     registered_roots = [
         entry["root"]

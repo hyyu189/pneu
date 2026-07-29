@@ -15,12 +15,11 @@ import subprocess
 from pathlib import Path
 
 from _rtlib import (
-    ProjectRegistryError,
     active_project_entries,
     caller_cmux_context,
     emit_registry_warnings,
     is_project_root,
-    load_project_registry_strict,
+    load_project_registry,
 )
 
 
@@ -100,17 +99,14 @@ def main() -> int:
     try:
         if project_at_or_above(str(Path.cwd())) is not None:
             return 0
-        try:
-            entries, warnings = load_project_registry_strict()
-        except ProjectRegistryError:
-            # This helper runs from shell startup. A malformed registry must
-            # suppress the optional advisory, never break the caller's shell.
-            return 0
+        entries, warnings = load_project_registry()
         emit_registry_warnings(warnings, tool="rt-startup-advisory")
         registered_roots = {
             entry["root"]
             for entry in active_project_entries(entries, available_only=True)
         }
+        if not registered_roots:
+            return 0
         identify = command_json(["cmux", "identify", "--json", "--id-format", "both"])
         caller = caller_cmux_context(identify)
         workspace = caller.get("workspace_ref")

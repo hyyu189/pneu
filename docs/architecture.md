@@ -126,6 +126,15 @@ staleness records. Long-running watchers take short shared sections per scan
 and sleep unlocked; adapter prompts never retain a physical mailbox path as a
 capability.
 
+The lock threat model treats every process running as the Roundtable owning
+UID as one integrity domain. Private permissions, no-follow opens, and inode
+revalidation protect against other UIDs, unsafe configuration, and ordinary
+replacement races; they cannot make an unprivileged lock file tamper-proof
+against a malicious process with the same UID. Roundtable-managed code
+therefore never deletes or replaces a layout-lock file. Defending against a
+hostile same-UID process would require a privileged trust anchor and is not a
+claim of this daemon-free design.
+
 P0 uses a deterministic key derived from the canonical project path, while
 retaining that readable path in metadata:
 

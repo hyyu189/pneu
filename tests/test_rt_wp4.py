@@ -737,6 +737,32 @@ def test_bridge_discovers_watch_roots_from_registry_only(
     assert str(stale) in capsys.readouterr().err
 
 
+def test_bridge_discovery_isolates_unrelated_malformed_registry_row(
+    tmp_path, monkeypatch, capsys
+):
+    healthy = write_project(tmp_path / "healthy")
+    registry = tmp_path / "projects.yaml"
+    _rtlib.register_project(healthy, registry)
+    document = _rtlib.yaml.safe_load(registry.read_text())
+    document["projects"].append(
+        {
+            "uuid": "00000000-0000-4000-8000-000000000001",
+            "path": "relative/broken",
+            "name": "broken",
+            "group": "broken",
+            "layout": "local",
+            "status": "active",
+            "registered_at": "2026-07-29T00:00:00Z",
+            "tombstoned_at": None,
+        }
+    )
+    write_registry(registry, document["projects"])
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
+
+    assert wake.discover_projects([]) == [healthy]
+    assert "path is not absolute" in capsys.readouterr().err
+
+
 def test_doctor_reports_tripwire_and_codex_wrong_anchor(tmp_path, monkeypatch, capsys):
     project = write_project(tmp_path / "registered")
     wrong = write_project(tmp_path / "wrong")
@@ -841,11 +867,10 @@ def test_startup_advisory_silences_malformed_registry(
     monkeypatch.setenv("CMUX_SURFACE_ID", "surface:self")
     monkeypatch.setattr(advisory, "project_at_or_above", lambda _cwd: None)
 
-    def malformed_registry():
-        raise _rtlib.ProjectRegistryError("malformed fixture")
-
     monkeypatch.setattr(
-        advisory, "load_project_registry_strict", malformed_registry
+        advisory,
+        "load_project_registry",
+        lambda: ([], ["malformed fixture"]),
     )
     monkeypatch.setattr(
         advisory,

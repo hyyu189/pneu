@@ -16,7 +16,7 @@ from _rtlib import (
     emit_registry_warnings,
     is_project_root,
     load_agents_doc,
-    load_project_registry_strict,
+    load_project_registry,
     resolve_project_mailbox_checked,
 )
 from _rtruntime import (
@@ -437,12 +437,7 @@ def choose_launch_cwd(
             f"rt-{harness}: not in a Roundtable project and stdin is not a TTY"
         )
 
-    try:
-        entries, warnings = load_project_registry_strict()
-    except ProjectRegistryError as error:
-        raise SelectionError(
-            f"rt-{harness}: invalid project registry: {error}"
-        ) from error
+    entries, warnings = load_project_registry()
     emit_registry_warnings(warnings, stream=stderr, tool=f"rt-{harness}")
     roots = [
         entry["root"]

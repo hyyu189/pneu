@@ -29,7 +29,7 @@ from _rtlib import (
     active_project_entries,
     emit_registry_warnings,
     load_agents_doc,
-    load_project_registry_strict,
+    load_project_registry,
     locked_project_mailbox_checked,
     projects_registry_path,
 )
@@ -2172,12 +2172,7 @@ def discover_projects(explicit: list[str], *, warn: bool = True) -> list[Path]:
     if explicit:
         paths.extend(Path(value) for value in explicit)
     else:
-        try:
-            entries, warnings = load_project_registry_strict()
-        except ProjectRegistryError as error:
-            raise SystemExit(
-                f"rt-codex-wake: invalid project registry: {error}"
-            ) from None
+        entries, warnings = load_project_registry()
         if warn:
             emit_registry_warnings(warnings, tool="rt-codex-wake")
         paths.extend(

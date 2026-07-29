@@ -62,6 +62,15 @@ one narrow reconciliation exception: it may atomically repair the stored
 which single active row it owns and live-inode collision checks pass. It never
 mints an identity.
 
+Upgrade refuses the entire v1 snapshot if any legacy root is unavailable; it
+does so before publishing the backup, writing an identity witness, or replacing
+the registry. Absence alone never creates a tombstone. A missing witness is
+also never treated as permission to infer an identity from a path or mint a
+replacement UUID: if an active row at that path, or any unresolved active row,
+cannot prove its UUID from its recorded root, registration fails closed and
+names the UUID and path that need recovery. Intentional path reuse first makes
+the old root unavailable and explicitly tombstones that registration.
+
 ## 2. Storage: central, with the in-project symlink as a bookmark
 
 ```
@@ -279,6 +288,20 @@ read, write, rename, and fsync. Migration uses the same primitive with
 `LOCK_EX`. The order is layout lock(s), sorted by UUID when more than one is
 needed, then the registry lock, then mailbox send/ledger locks; an operation
 must never upgrade a held shared lock in place.
+
+All processes running as the owning UID are in the same integrity domain.
+Permissions, no-follow opens, and post-acquisition inode checks detect
+cross-UID substitution, unsafe setup, and ordinary replacement races; they do
+not claim to withstand a malicious same-UID process that unlinks and replaces
+the lock before a later opener arrives. Roundtable-managed code never deletes
+or replaces layout-lock files. Stronger isolation would require a privileged
+trust anchor and is outside this daemon-free design.
+
+The current ten-second layout-lock acquisition timeout is deliberately
+fail-closed: a timed-out command performs no mailbox I/O and tells the caller
+to retry. It is only an acquisition bound, not an end-to-end lock-order
+deadline. Measurement and hardening of inner registry/runtime lock waits, plus
+writer-starvation behavior under sustained shared traffic, remain M3 work.
 
 Long-running watchers release the shared lock before sleeping and re-resolve
 under a fresh short shared section on every scan. Hermes delegates its exact
