@@ -328,32 +328,52 @@ after the flip lives only in the central store, and restoring the pre-cutover
 backup alone would discard it. A rollback takes the same exclusive lock and
 copies the current central state back before flipping the pointer.
 
-## 8. Codex seat binding: preallocate the thread
+## 8. Codex seat binding: zero-turn preallocation is deferred
 
-**In scope for v1.** The launcher calls `thread/start` itself, takes the id
-from `ThreadStartResponse`, binds it to the lease immediately, and launches the
-TUI as `codex --remote unix:// resume <id>`. `thread/start` creates a thread
-without a model turn, so the human opens a normal empty session and the token
-cost is zero.
+**Deferred from v1 after a live falsification on 2026-07-29.** The proposed
+sequence was:
 
-The reason is not the convenience. It removes the SessionStart hook from the
-binding path, replacing an event we have to wait for with a call whose result
-we already hold. That hook has misled this project twice in one week: its
-turn-gating was misdiagnosed as non-dispatch, and a deadline measured from the
-wrong instant left three seats silently unbindable for days.
+1. the launcher calls `thread/start`;
+2. it binds the returned thread id to the current fenced lease;
+3. it launches `codex --remote unix:// resume <id>`.
 
-Requirements, from review:
+The first call does create the desired empty state on Codex `0.145.0`: an idle,
+root, non-ephemeral thread with an empty preview and zero turns. It does not,
+however, materialize the advertised rollout file before the first user
+message. Both `historyMode: legacy` and `historyMode: paginated` behaved the
+same way. A direct `thread/resume` and the exact proposed TUI command then
+failed with:
 
-- the already-bound path must be idempotent, since the queued `Startup` source
-  still drains on the first human turn;
-- ownership and configuration must transfer correctly to the resumed TUI;
-- a thread created but not bound must be cleaned up rather than leaked;
-- an end-to-end smoke test, because this is deeper app-server coupling than
-  the launch intent it replaces.
+```text
+no rollout found for thread id <id>
+```
 
-The launch intent is **not** deleted. It becomes the fallback for any seat that
-was not preallocated — a hand-started `codex` the user later wants bound, or a
-preallocation that failed.
+This is a lifecycle incompatibility rather than an argv error. The exact
+`thread/delete {threadId}` request removed each zero-turn probe; `thread/archive`
+is not a substitute because it also requires a materialized rollout.
+
+v1 therefore keeps the existing SessionStart launch-intent path. It is
+turn-gated, but the UUIDv7 creation-window fix associates a delayed first turn
+with the current live fenced lease, and the path is now instrumented and
+covered by focused tests. Manual `rt-codex-wake bind` remains a diagnostic
+fallback.
+
+We deliberately rejected two ways to disguise the incompatibility:
+
+- no fake prompt, hidden model turn, or synthetic history item is inserted
+  merely to force a rollout into existence;
+- no per-launch RPC proxy is placed between Codex and its app-server. Durable
+  mail remains useful when Roundtable's coordination processes are absent, so
+  Roundtable does not become a hosting dependency for the harness.
+
+Revisit preallocation only after a real compatibility probe proves
+`thread/start → cross-connection thread/resume` for every claimed Codex
+runtime. The original safety requirements still apply at that point:
+already-bound Startup replay must be idempotent, the resumed TUI must inherit
+the exact launch configuration and lease environment, every created-but-unbound
+thread must be deleted exactly, and a credentialed end-to-end wake test must
+pass. A concise upstream request is drafted in
+`handoff/upstream-codex-zero-turn-resume.md`.
 
 ## 9. Non-goals
 
@@ -423,18 +443,18 @@ Recorded so they are decisions rather than omissions.
    would touch exactly the binding code that took a full day to stabilise.
    Revisit when renaming becomes common or when that code is being changed for
    another reason.
-2. **Hand-started Codex fallback binding still requires a first turn.**
-   Managed v1 launches preallocate and bind the thread before the TUI starts,
-   as specified in §8. The retained SessionStart launch-intent fallback is
-   turn-gated only for a hand-started seat or a managed launch whose
-   preallocation could not complete.
+2. **Codex binding still requires a first turn.** Managed and hand-started
+   Codex seats use the retained SessionStart launch-intent path described in
+   §8. The UUIDv7 creation window keeps a delayed first turn bindable without
+   opening an owner-lifetime same-cwd claim window. This is an explicit v1
+   limitation until Codex can resume a zero-turn thread across connections.
 
 ## Still open
 
 1. Does deferring the host-runtime key migration leave a state where a renamed
    project has central mail under its UUID but a Codex binding under its old
    path hash, and is the required rebind detectable by `doctor`?
-2. Resolved — see §8. Preallocation is in scope for v1; the three options and
-   the constraint that prompt text is never a security fence are recorded
-   there, together with the fact that the fence variables provably do not
-   reach a remote thread's shell, which no preamble can fix.
+2. Resolved — see §8. Zero-turn preallocation is deferred from v1 because the
+   supported app-server lifecycle cannot resume the thread it just created.
+   The upstream capability request is recorded separately; prompt text remains
+   unsuitable as a security fence.
