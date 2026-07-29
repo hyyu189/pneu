@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import re
@@ -53,6 +54,26 @@ def tool_command(bin_dir: Path, name: str) -> list[str]:
     return [str(path)]
 
 
+def load_rtlib(bin_dir: Path):
+    """Load the resolver shipped beside the exact tools under smoke test."""
+
+    library_path = (bin_dir / "_rtlib.py").expanduser().absolute()
+    if not library_path.is_file():
+        raise SmokeFailure(f"missing mailbox library: {library_path}")
+    module_name = f"_roundtable_smoke_rtlib_{os.getpid()}"
+    spec = importlib.util.spec_from_file_location(module_name, library_path)
+    if spec is None or spec.loader is None:
+        raise SmokeFailure(f"cannot load mailbox library: {library_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(module_name, None)
+        raise
+    return module
+
+
 def run_tool(
     commands: dict[str, list[str]],
     name: str,
@@ -97,6 +118,7 @@ def write_project(root: Path) -> None:
 
 
 def smoke(bin_dir: Path) -> dict:
+    rtlib = load_rtlib(bin_dir)
     commands = {
         name: tool_command(bin_dir, name)
         for name in ("rt-say", "rt-inbox", "rt-ack", "rt-projects")
@@ -169,7 +191,8 @@ def smoke(bin_dir: Path) -> dict:
             environment=environment,
         )
         mailbox = json.loads(resolved.stdout)
-        inbox_dir = Path(mailbox["inbox_dir"])
+        if mailbox.get("layout") != "local":
+            raise SmokeFailure("new smoke project did not resolve local layout")
         sent = run_tool(
             commands,
             "rt-say",
@@ -215,17 +238,36 @@ def smoke(bin_dir: Path) -> dict:
             cwd=project,
             environment=ack_environment,
         )
-        ack_files = list(
-            (inbox_dir / "codex" / "new").glob("ack-*.md")
-        )
-        if len(ack_files) != 1 or f"refs={message_id}" not in ack_files[0].read_text():
-            raise SmokeFailure("sender mailbox does not contain the expected quiet ack")
+        registry = Path(environment["RT_PROJECTS_FILE"])
+        try:
+            with rtlib.locked_project_mailbox_checked(
+                project,
+                registry_path=registry,
+            ) as locked_mailbox:
+                inbox_dir = locked_mailbox.inbox_dir
+                ack_files = list(
+                    (inbox_dir / "codex" / "new").glob("ack-*.md")
+                )
+                if (
+                    len(ack_files) != 1
+                    or f"refs={message_id}"
+                    not in ack_files[0].read_text()
+                ):
+                    raise SmokeFailure(
+                        "sender mailbox does not contain the expected quiet ack"
+                    )
 
-        new_path = inbox_dir / "claude" / "new" / f"{message_id}.md"
-        current = new_path.parents[1] / "cur"
-        archived_path = current / new_path.name
-        if new_path.exists() or not archived_path.is_file():
-            raise SmokeFailure("rt-ack did not archive the exact inbound message")
+                new_path = (
+                    inbox_dir / "claude" / "new" / f"{message_id}.md"
+                )
+                current = new_path.parents[1] / "cur"
+                archived_path = current / new_path.name
+                if new_path.exists() or not archived_path.is_file():
+                    raise SmokeFailure(
+                        "rt-ack did not archive the exact inbound message"
+                    )
+        except rtlib.ProjectRegistryError as error:
+            raise SmokeFailure(f"mailbox inspection failed: {error}") from error
         drained = run_tool(
             commands,
             "rt-inbox",

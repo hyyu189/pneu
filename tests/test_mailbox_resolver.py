@@ -1462,3 +1462,89 @@ def test_production_mailbox_consumers_do_not_construct_layout_paths() -> None:
         for violation in _mailbox_path_violations(source_path)
     ]
     assert violations == []
+
+
+def _called_names(source_path: Path) -> set[str]:
+    tree = ast.parse(source_path.read_text(), filename=str(source_path))
+    names = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        function = node.func
+        if isinstance(function, ast.Name):
+            names.add(function.id)
+        elif isinstance(function, ast.Attribute):
+            names.add(function.attr)
+    return names
+
+
+def test_direct_mailbox_consumers_use_locked_resolver_only() -> None:
+    consumers = [
+        BIN / name
+        for name in (
+            "rt-say",
+            "rt-inbox",
+            "rt-ack",
+            "rt-wait-inbox",
+            "rt-stop-gate",
+            "rt-codex-wake",
+            "rt-doctor",
+            "rt-refresh",
+        )
+    ]
+    raw_resolvers = {
+        "resolve_project_mailbox",
+        "resolve_project_mailbox_checked",
+    }
+    violations = {
+        source.name: sorted(_called_names(source) & raw_resolvers)
+        for source in consumers
+        if _called_names(source) & raw_resolvers
+    }
+    assert violations == {}
+    assert all(
+        "locked_project_mailbox" in source.read_text()
+        for source in consumers
+    )
+
+
+def test_indirect_consumers_do_not_retain_waiter_mailbox_paths() -> None:
+    hermes = (
+        ROOT / "integrations" / "hermes" / "roundtable" / "__init__.py"
+    ).read_text()
+    smoke = (ROOT / "roundtable_packaging" / "smoke.py").read_text()
+
+    assert "--wait-last-wake-drained" in hermes
+    assert "_triggered_new_dir" not in hermes
+    assert "_generation_is_pending" not in hermes
+    assert "locked_project_mailbox_checked" in smoke
+
+
+def test_rt_refresh_finishes_external_assignment_before_layout_lock() -> None:
+    source = BIN / "rt-refresh"
+    tree = ast.parse(source.read_text(), filename=str(source))
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "assign_agents"
+    ]
+    layout_sections = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.With)
+        and any(
+            isinstance(item.context_expr, ast.Call)
+            and isinstance(item.context_expr.func, ast.Name)
+            and item.context_expr.func.id == "locked_project_mailbox"
+            for item in node.items
+        )
+    ]
+    assert len(assignments) == len(layout_sections) == 1
+    assert not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "assign_agents"
+        for node in ast.walk(layout_sections[0])
+    )

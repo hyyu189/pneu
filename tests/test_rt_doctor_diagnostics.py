@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
+import _rtlib  # noqa: E402
+
 
 def load_doctor():
     name = "rt_doctor_diagnostics"
@@ -30,6 +32,64 @@ def load_doctor():
 
 
 doctor = load_doctor()
+
+
+def _registered_project(path: Path, registry: Path) -> Path:
+    project = path.resolve()
+    state = project / ".roundtable"
+    state.mkdir(parents=True)
+    (state / "agents.yaml").write_text(
+        """schema: roundtable.agents.v1
+project: "."
+agents:
+  codex:
+    harness: codex
+    instances:
+      - id: codex
+"""
+    )
+    (state / ".gitignore").write_text(
+        "project.json\ninbox/\nmessages/\nlocks/\n"
+    )
+    (state / "inbox").mkdir()
+    (state / "messages").mkdir()
+    (state / "locks").mkdir()
+    _rtlib.register_project(project, path=registry)
+    return project
+
+
+def test_legacy_marker_scan_reports_busy_project_and_continues(
+    tmp_path,
+    capsys,
+):
+    registry = tmp_path / "registry" / "projects.yaml"
+    busy = _registered_project(tmp_path / "busy", registry)
+    visible = _registered_project(tmp_path / "visible", registry)
+    marker = (
+        visible
+        / ".roundtable"
+        / "inbox"
+        / "codex"
+        / ".armed-legacy"
+    )
+    marker.parent.mkdir(parents=True)
+    marker.write_text("")
+    report = doctor.Report()
+
+    with _rtlib.locked_project_mailbox_checked(
+        busy,
+        registry_path=registry,
+        exclusive=True,
+    ):
+        doctor.report_legacy_markers(
+            report,
+            {"busy": busy, "visible": visible},
+            registry,
+        )
+
+    output = capsys.readouterr().out
+    assert "WARN mailbox-layout-busy" in output
+    assert str(marker) in output
 
 
 def bind_request(runtime: Path, created_at: datetime) -> Path:

@@ -24,13 +24,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _rtlib import (
+    ProjectLayoutLockTimeout,
     ProjectRegistryError,
     active_project_entries,
     emit_registry_warnings,
     load_agents_doc,
     load_project_registry_strict,
+    locked_project_mailbox_checked,
     projects_registry_path,
-    resolve_project_mailbox_checked,
 )
 
 from _rtcodex import (
@@ -67,7 +68,8 @@ MAIL_RE = re.compile(
     r"(?P<kind>\S+)\s+id=(?P<id>[^\]]+)\]"
 )
 WAKE_TEXT = (
-    "drain inbox at {inbox}, 按 roundtable skill Delivery v2 协议处理"
+    "drain the Roundtable inbox for {agent} in this project, "
+    "按 roundtable skill Delivery v2 协议处理"
 )
 STATE_SCHEMA = "roundtable.codex-wake.v1"
 BIND_REQUEST_SCHEMA = "roundtable.codex-bind-request.v1"
@@ -574,7 +576,7 @@ def heartbeat_bound_seats(
 ) -> None:
     """Refresh per-seat wake health after successful bridge iterations."""
     for project, result in zip(projects, results):
-        if not result.ok:
+        if not (result.ok or result.heartbeat):
             continue
         binding = store.bindings.get(str(project))
         if not isinstance(binding, dict):
@@ -1162,53 +1164,59 @@ def pending_generation(
     if not isinstance(agent_id, str) or not agent_id:
         raise IdentityError("Codex binding lacks a valid agent identity")
     try:
-        mailbox = resolve_project_mailbox_checked(project)
+        guard = locked_project_mailbox_checked(project, timeout=1.0)
+        mailbox = guard.__enter__()
+    except ProjectLayoutLockTimeout:
+        raise
     except ProjectRegistryError as error:
         raise IdentityError(f"mailbox resolution failed: {error}") from error
-    inbox = mailbox.inbox_dir / agent_id / "new"
-    inbox.mkdir(parents=True, exist_ok=True)
-    ids = []
-    for path in sorted(inbox.iterdir()):
-        if path.name.startswith(".") or path.name.startswith("ack-"):
-            continue
-        try:
-            info = path.lstat()
-        except FileNotFoundError:
-            # The target Codex may drain new/ to cur/ while we scan.
-            continue
-        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-            raise IdentityError(f"invalid non-regular inbox entry: {path}")
-        if path.suffix != ".md":
-            raise IdentityError(f"invalid inbox filename: {path.name}")
-        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(path, flags)
-        except FileNotFoundError:
-            continue
-        except OSError as error:
-            if error.errno == errno.ELOOP:
-                raise IdentityError(f"invalid symlink inbox entry: {path}") from error
-            raise
-        with os.fdopen(descriptor, "rb") as handle:
-            opened = os.fstat(handle.fileno())
-            if not stat.S_ISREG(opened.st_mode):
+    try:
+        inbox = mailbox.inbox_dir / agent_id / "new"
+        inbox.mkdir(parents=True, exist_ok=True)
+        ids = []
+        for path in sorted(inbox.iterdir()):
+            if path.name.startswith(".") or path.name.startswith("ack-"):
+                continue
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                # The target Codex may drain new/ to cur/ while we scan.
+                continue
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
                 raise IdentityError(f"invalid non-regular inbox entry: {path}")
-            prefix = handle.read(16 * 1024 + 1)
-        end = prefix.find(b"]")
-        if end < 0:
-            raise IdentityError(f"oversized or incomplete Roundtable mail header: {path.name}")
-        raw_header = prefix[: end + 1]
-        try:
-            header = raw_header.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise IdentityError(f"invalid UTF-8 mail header: {path.name}") from error
-        match = MAIL_RE.match(header)
-        if not match:
-            raise IdentityError(f"invalid Roundtable mail header: {path.name}")
-        msg_id = match.group("id")
-        if match.group("to").lower() != agent_id.lower() or msg_id != path.stem:
-            raise IdentityError(f"mail identity mismatch: {path.name}")
-        ids.append(msg_id)
+            if path.suffix != ".md":
+                raise IdentityError(f"invalid inbox filename: {path.name}")
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                descriptor = os.open(path, flags)
+            except FileNotFoundError:
+                continue
+            except OSError as error:
+                if error.errno == errno.ELOOP:
+                    raise IdentityError(f"invalid symlink inbox entry: {path}") from error
+                raise
+            with os.fdopen(descriptor, "rb") as handle:
+                opened = os.fstat(handle.fileno())
+                if not stat.S_ISREG(opened.st_mode):
+                    raise IdentityError(f"invalid non-regular inbox entry: {path}")
+                prefix = handle.read(16 * 1024 + 1)
+            end = prefix.find(b"]")
+            if end < 0:
+                raise IdentityError(f"oversized or incomplete Roundtable mail header: {path.name}")
+            raw_header = prefix[: end + 1]
+            try:
+                header = raw_header.decode("utf-8")
+            except UnicodeDecodeError as error:
+                raise IdentityError(f"invalid UTF-8 mail header: {path.name}") from error
+            match = MAIL_RE.match(header)
+            if not match:
+                raise IdentityError(f"invalid Roundtable mail header: {path.name}")
+            msg_id = match.group("id")
+            if match.group("to").lower() != agent_id.lower() or msg_id != path.stem:
+                raise IdentityError(f"mail identity mismatch: {path.name}")
+            ids.append(msg_id)
+    finally:
+        guard.__exit__(None, None, None)
     if not ids:
         return None, []
     digest = hashlib.sha256("\n".join(ids).encode()).hexdigest()
@@ -1240,6 +1248,7 @@ def safe_counter(value) -> int:
 class ProjectResult:
     ok: bool
     detail: str
+    heartbeat: bool = False
 
 
 class WakeBridge:
@@ -1772,11 +1781,6 @@ class WakeBridge:
         trust_reason = self._hook_trust_gate(project)
         if trust_reason:
             raise HumanGate("hook_trust", trust_reason)
-        try:
-            mailbox = resolve_project_mailbox_checked(project)
-        except ProjectRegistryError as error:
-            raise IdentityError(f"mailbox resolution failed: {error}") from error
-        inbox = mailbox.inbox_dir / agent_id / "new"
         with self.store.transaction():
             current_binding = self.store.bindings.get(str(project)) or {}
             if (
@@ -1803,7 +1807,10 @@ class WakeBridge:
                     "threadId": thread_id,
                     "clientUserMessageId": f"roundtable-wake:{generation}",
                     "input": [
-                        {"type": "text", "text": WAKE_TEXT.format(inbox=inbox)}
+                        {
+                            "type": "text",
+                            "text": WAKE_TEXT.format(agent=agent_id),
+                        }
                     ],
                 },
             )
@@ -1905,6 +1912,12 @@ class WakeBridge:
         bound_agent = binding.get("agent", "codex")
         try:
             generation, ids = pending_generation(project, bound_agent)
+        except ProjectLayoutLockTimeout as error:
+            return ProjectResult(
+                False,
+                f"mailbox layout busy: {error}",
+                heartbeat=True,
+            )
         except (IdentityError, OSError) as error:
             return self._record_project_error(project, 0, error)
         project_state = self.store.project_state(project)

@@ -16,7 +16,7 @@ from _rtlib import (
     caller_workspace_ref,
     find_project_root,
     load_agents_doc,
-    resolve_project_mailbox,
+    locked_project_mailbox,
     workspace_by_id,
 )
 
@@ -24,11 +24,8 @@ TOOL_DIR = Path(__file__).resolve().parent
 
 
 ROOT = find_project_root("rt-refresh", allow_cmux_workspace=True)
-MAILBOX = resolve_project_mailbox(ROOT)
 STATE_DIR = ROOT / ".roundtable"
 RUNTIME = STATE_DIR / "runtime.json"
-LOCK_DIR = MAILBOX.locks_dir
-LEDGER_LOCK = LOCK_DIR / "ledger.lock"
 
 
 def parse_args():
@@ -529,7 +526,73 @@ def atomic_write_json(path, data):
     shutil.move(tmp_name, path)
 
 
-def main():
+def _commit_runtime(
+    *,
+    existing,
+    surfaces,
+    workspace,
+    workspace_id,
+    window,
+    caller,
+    workspace_binding,
+    agents,
+):
+    """Publish runtime state after all potentially slow cmux queries finish."""
+
+    with locked_project_mailbox(ROOT, tool="rt-refresh") as mailbox:
+        lock_dir = mailbox.locks_dir
+        ledger_lock = lock_dir / "ledger.lock"
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        lock_dir.mkdir(parents=True, exist_ok=True)
+
+        acquire_lock(ledger_lock)
+        try:
+            existing_agents = existing.get("agents") or {}
+            live_surfaces = {
+                surface["surface_ref"] for surface in surfaces
+            }
+            # A live surface reassigned to a different agent must not carry
+            # its old name forward as a ghost route.
+            for name, surface in list(agents.items()):
+                agents[name] = merge_status(
+                    name, surface, existing_agents
+                )
+            for name, old in existing_agents.items():
+                if name in agents:
+                    continue
+                old_surface = old.get("surface_ref")
+                if old_surface and old_surface not in live_surfaces:
+                    stale = dict(old)
+                    stale["status"] = "blocked_or_stale"
+                    stale["status_source"] = "rt-refresh"
+                    stale["status_updated_at"] = utc_now()
+                    agents[name] = stale
+
+            runtime = {
+                "schema": "roundtable.runtime.v1",
+                "project": str(ROOT),
+                "updated_at": utc_now(),
+                "workspace_ref": workspace.get("ref"),
+                "workspace_id": workspace_id,
+                "workspace_title": workspace.get("title"),
+                "window_ref": (
+                    (window or {}).get("ref")
+                    or caller.get("window_ref")
+                ),
+                "caller": caller,
+                "agents": agents,
+                "surfaces": surfaces,
+            }
+            if workspace_binding:
+                runtime["workspace_binding"] = workspace_binding
+            atomic_write_json(RUNTIME, runtime)
+        finally:
+            release_lock(ledger_lock)
+
+    print(f"wrote {RUNTIME}")
+
+
+def _main():
     args = parse_args()
     if shutil.which("cmux") is None:
         raise SystemExit(
@@ -585,66 +648,32 @@ def main():
             "run from a real caller in the bound workspace"
         )
 
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    LOCK_DIR.mkdir(parents=True, exist_ok=True)
-
     instances_cfg, detect_cfg = load_agent_config()
     agents_doc = load_agents_doc(ROOT, "rt-refresh") if ROOT else {}
     kind_map = build_kind_map(agents_doc)
-    agents = assign_agents(surfaces, meta_by_ref, instances_cfg, detect_cfg, workspace.get("ref"), kind_map)
+    agents = assign_agents(
+        surfaces,
+        meta_by_ref,
+        instances_cfg,
+        detect_cfg,
+        workspace.get("ref"),
+        kind_map,
+    )
 
-    acquire_lock(LEDGER_LOCK)
-    try:
-        existing_agents = existing.get("agents") or {}
-        live_surfaces = {surface["surface_ref"] for surface in surfaces}
-        # Build a surface→name map from the fresh assignment to detect
-        # stale mappings in the old runtime (e.g. surface:1 was "claude"
-        # in old runtime but is now correctly "hermes" — the old "claude"
-        # entry must NOT be carried forward as stale).
-        fresh_surface_to_name = {}
-        for name, surface in agents.items():
-            sr = surface.get("surface_ref")
-            if sr:
-                fresh_surface_to_name[sr] = name
+    return _commit_runtime(
+        existing=existing,
+        surfaces=surfaces,
+        workspace=workspace,
+        workspace_id=workspace_id,
+        window=window,
+        caller=caller,
+        workspace_binding=workspace_binding,
+        agents=agents,
+    )
 
-        for name, surface in list(agents.items()):
-            agents[name] = merge_status(name, surface, existing_agents)
-        for name, old in existing_agents.items():
-            if name in agents:
-                continue
-            old_surface = old.get("surface_ref")
-            if old_surface and old_surface not in live_surfaces:
-                stale = dict(old)
-                stale["status"] = "blocked_or_stale"
-                stale["status_source"] = "rt-refresh"
-                stale["status_updated_at"] = utc_now()
-                agents[name] = stale
-            elif old_surface and old_surface in live_surfaces:
-                # Surface is live but assigned to a different agent now.
-                # The old entry is a stale mapping (surface reused by
-                # another agent after restart). Drop it — don't carry
-                # forward a ghost that would confuse rt-say/rt-resolve.
-                pass
 
-        runtime = {
-            "schema": "roundtable.runtime.v1",
-            "project": str(ROOT),
-            "updated_at": utc_now(),
-            "workspace_ref": workspace.get("ref"),
-            "workspace_id": workspace_id,
-            "workspace_title": workspace.get("title"),
-            "window_ref": (window or {}).get("ref") or caller.get("window_ref"),
-            "caller": caller,
-            "agents": agents,
-            "surfaces": surfaces,
-        }
-        if workspace_binding:
-            runtime["workspace_binding"] = workspace_binding
-        atomic_write_json(RUNTIME, runtime)
-    finally:
-        release_lock(LEDGER_LOCK)
-
-    print(f"wrote {RUNTIME}")
+def main():
+    return _main()
 
 
 if __name__ == "__main__":

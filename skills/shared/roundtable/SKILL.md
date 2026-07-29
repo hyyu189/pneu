@@ -109,11 +109,14 @@ supported path.
 
 ## Delivery: maildir + native wake (v2, sole path since 2026-07-17)
 
-`rt-say` atomically writes each message to
-`<project>/.roundtable/inbox/<to>/new/<msgid>.md`. That write IS the delivery
-— it needs no topology map, no live target, no refresh. `sync-ack` files are
-named `new/ack-<msgid>.md`: quiet confirmations that never wake anyone and
-never block a stop; drain them whenever you are awake for another reason.
+`rt-say` resolves the registry-selected mailbox under the project's shared
+UUID layout lock, then atomically writes each message to
+`inbox/<to>/new/<msgid>.md` in that authoritative layout. That write IS the
+delivery — it needs no topology map, no live target, no refresh. A physical
+mailbox path printed by a diagnostic is not a durable capability across a
+layout migration. `sync-ack` files are named `new/ack-<msgid>.md`: quiet
+confirmations that never wake anyone and never block a stop; drain them
+whenever you are awake for another reason.
 
 **Receiving (drain protocol)** — when woken by a tripwire/bridge or told the
 inbox has mail: run `rt-inbox -f json`, act on every non-ack message, then

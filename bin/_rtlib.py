@@ -5,6 +5,7 @@ Portable version — no hardcoded paths or agent names.
 import fcntl
 import hashlib
 import json
+import math
 import os
 import stat
 import subprocess
@@ -28,6 +29,8 @@ PROJECT_ID_SCHEMA = "roundtable.project.v1"
 PROJECT_LAYOUTS = frozenset({"local", "central"})
 PROJECT_STATUSES = frozenset({"active", "tombstoned"})
 ORPHAN_WARNING_PREFIX = "orphan: "
+LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
+LAYOUT_LOCK_POLL_SECONDS = 0.05
 GIT_ROUTING_ENVIRONMENT = frozenset(
     {
         "GIT_DIR",
@@ -67,6 +70,397 @@ class ProjectMailbox:
 
 class ProjectRegistryError(ValueError):
     """A registry or project identity cannot be used safely."""
+
+
+class ProjectLayoutLockTimeout(ProjectRegistryError):
+    """A healthy layout transition did not quiesce before the caller's bound."""
+
+
+def _project_identity_for_layout_lock(project):
+    """Read the stable UUID before consulting its mutable layout pointer."""
+
+    raw_root = Path(project).expanduser()
+    if raw_root.is_symlink():
+        raise ProjectRegistryError(
+            f"project root is a symbolic link: {raw_root}"
+        )
+    root = raw_root.resolve()
+    if root in {Path.home().resolve(), Path(root.anchor)}:
+        raise ProjectRegistryError(
+            f"not a project (missing {project_config_path(root)}): {root}"
+        )
+    root_fd, state_fd = _open_project_guard(root)
+    try:
+        project_uuid = _read_project_identity_at(
+            root, state_fd, required=True
+        )
+        _verify_project_guard(root, root_fd, state_fd)
+        return root, project_uuid
+    finally:
+        _close_project_guard(root_fd, state_fd)
+
+
+def _verify_layout_lock_entry(lock_dir_fd, lock_path, descriptor):
+    """Prove the held lock file is still the persistent directory entry."""
+
+    held = os.fstat(descriptor)
+    try:
+        visible = os.stat(
+            lock_path.name,
+            dir_fd=lock_dir_fd,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise ProjectRegistryError(
+            f"layout lock changed during acquisition: {lock_path}: {error}"
+        ) from error
+    if (
+        held.st_nlink == 0
+        or visible.st_dev != held.st_dev
+        or visible.st_ino != held.st_ino
+    ):
+        raise ProjectRegistryError(
+            f"layout lock changed during acquisition: {lock_path}"
+        )
+    if (
+        not stat.S_ISREG(held.st_mode)
+        or held.st_uid != os.getuid()
+        or stat.S_IMODE(held.st_mode) != 0o600
+        or held.st_nlink != 1
+        or not stat.S_ISREG(visible.st_mode)
+        or visible.st_uid != held.st_uid
+    ):
+        raise ProjectRegistryError(
+            f"invalid layout lock ownership/type/mode: {lock_path}"
+        )
+
+
+def _verify_layout_lock_directory(parent_fd, lock_dir_fd, lock_dir):
+    """Revalidate the complete lock namespace after any contended wait."""
+
+    _validate_owned_directory_fd(
+        lock_dir_fd, lock_dir, "layout lock directory"
+    )
+    held = os.fstat(lock_dir_fd)
+    if stat.S_IMODE(held.st_mode) != 0o700:
+        raise ProjectRegistryError(
+            f"layout lock directory mode must be 0700: {lock_dir}; "
+            f"run chmod 700 {lock_dir}"
+        )
+    try:
+        visible = os.stat(
+            lock_dir.name,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+    except OSError as error:
+        raise ProjectRegistryError(
+            f"layout lock directory changed during acquisition: "
+            f"{lock_dir}: {error}"
+        ) from error
+    if (
+        not stat.S_ISDIR(visible.st_mode)
+        or visible.st_uid != held.st_uid
+        or visible.st_dev != held.st_dev
+        or visible.st_ino != held.st_ino
+    ):
+        raise ProjectRegistryError(
+            f"layout lock directory changed during acquisition: {lock_dir}"
+        )
+
+
+def _open_layout_lock(registry, project_uuid):
+    """Open one persistent UUID lock through held, validated directories."""
+
+    parent_fd = _open_registry_parent(registry)
+    lock_dir_fd = None
+    descriptor = None
+    lock_dir = registry.parent / "layout-locks"
+    lock_path = lock_dir / f"{project_uuid}.lock"
+    directory_created = False
+    try:
+        try:
+            os.mkdir(lock_dir.name, 0o700, dir_fd=parent_fd)
+            directory_created = True
+        except FileExistsError:
+            pass
+        except OSError as error:
+            raise ProjectRegistryError(
+                f"cannot create layout lock directory {lock_dir}: {error}"
+            ) from error
+        directory_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            lock_dir_fd = os.open(
+                lock_dir.name,
+                directory_flags,
+                dir_fd=parent_fd,
+            )
+        except OSError as error:
+            raise ProjectRegistryError(
+                f"cannot open layout lock directory {lock_dir}: {error}"
+            ) from error
+        if directory_created:
+            os.fchmod(lock_dir_fd, 0o700)
+        _verify_layout_lock_directory(
+            parent_fd, lock_dir_fd, lock_dir
+        )
+        _verify_open_directory_path(
+            parent_fd, registry.parent, "registry parent"
+        )
+        if directory_created:
+            os.fsync(parent_fd)
+
+        flags = (
+            os.O_RDWR
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        file_created = False
+        try:
+            descriptor = os.open(
+                lock_path.name,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=lock_dir_fd,
+            )
+            file_created = True
+            os.fchmod(descriptor, 0o600)
+        except FileExistsError:
+            try:
+                descriptor = os.open(
+                    lock_path.name,
+                    flags,
+                    dir_fd=lock_dir_fd,
+                )
+            except OSError as error:
+                raise ProjectRegistryError(
+                    f"cannot open layout lock {lock_path}: {error}"
+                ) from error
+        except OSError as error:
+            raise ProjectRegistryError(
+                f"cannot create layout lock {lock_path}: {error}"
+            ) from error
+        _verify_layout_lock_entry(lock_dir_fd, lock_path, descriptor)
+        if file_created:
+            os.fsync(lock_dir_fd)
+        return parent_fd, lock_dir_fd, descriptor, lock_path
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        if lock_dir_fd is not None:
+            os.close(lock_dir_fd)
+        os.close(parent_fd)
+        raise
+
+
+class _ProjectMailboxLock:
+    """Context manager for one UUID-pinned shared or exclusive layout lease."""
+
+    def __init__(
+        self,
+        project,
+        *,
+        registry_path=None,
+        exclusive=False,
+        timeout=LAYOUT_LOCK_TIMEOUT_SECONDS,
+    ):
+        if not isinstance(exclusive, bool):
+            raise ProjectRegistryError(
+                "layout lock exclusive flag must be a boolean"
+            )
+        if timeout is not None:
+            if isinstance(timeout, bool) or not isinstance(
+                timeout, (int, float)
+            ):
+                raise ProjectRegistryError(
+                    "layout lock timeout must be a finite non-negative "
+                    "number or None"
+                )
+            try:
+                timeout = float(timeout)
+            except OverflowError:
+                raise ProjectRegistryError(
+                    "layout lock timeout must be a finite non-negative "
+                    "number or None"
+                ) from None
+            if not math.isfinite(timeout) or timeout < 0:
+                raise ProjectRegistryError(
+                    "layout lock timeout must be a finite non-negative "
+                    "number or None"
+                )
+        self.project = project
+        self.registry = _registry_path(registry_path)
+        self.exclusive = exclusive
+        self.timeout = timeout
+        self._parent_fd = None
+        self._lock_dir_fd = None
+        self._descriptor = None
+        self._lock_path = None
+        self._entered = False
+
+    def _close(self):
+        descriptor = self._descriptor
+        self._descriptor = None
+        if descriptor is not None:
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            except OSError:
+                # Closing the descriptor is the authoritative release. Do not
+                # strand the held directory descriptors if an explicit unlock
+                # is interrupted or rejected.
+                pass
+            finally:
+                os.close(descriptor)
+        if self._lock_dir_fd is not None:
+            os.close(self._lock_dir_fd)
+            self._lock_dir_fd = None
+        if self._parent_fd is not None:
+            os.close(self._parent_fd)
+            self._parent_fd = None
+
+    def __enter__(self):
+        if self._entered:
+            raise ProjectRegistryError("layout lock context cannot be reused")
+        self._entered = True
+        root, project_uuid = _project_identity_for_layout_lock(self.project)
+        (
+            self._parent_fd,
+            self._lock_dir_fd,
+            self._descriptor,
+            self._lock_path,
+        ) = _open_layout_lock(self.registry, project_uuid)
+        operation = (
+            fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH
+        ) | fcntl.LOCK_NB
+        deadline = (
+            None
+            if self.timeout is None
+            else time.monotonic() + float(self.timeout)
+        )
+        try:
+            while True:
+                try:
+                    fcntl.flock(self._descriptor, operation)
+                    break
+                except BlockingIOError:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        mode = "exclusive" if self.exclusive else "shared"
+                        raise ProjectLayoutLockTimeout(
+                            f"timed out waiting for {mode} layout lock "
+                            f"{self._lock_path}"
+                        ) from None
+                    remaining = (
+                        LAYOUT_LOCK_POLL_SECONDS
+                        if deadline is None
+                        else max(0.0, deadline - time.monotonic())
+                    )
+                    time.sleep(min(LAYOUT_LOCK_POLL_SECONDS, remaining))
+                except InterruptedError:
+                    continue
+            _verify_layout_lock_entry(
+                self._lock_dir_fd,
+                self._lock_path,
+                self._descriptor,
+            )
+            _verify_layout_lock_directory(
+                self._parent_fd,
+                self._lock_dir_fd,
+                self._lock_path.parent,
+            )
+            _validate_owned_directory_fd(
+                self._parent_fd,
+                self.registry.parent,
+                "registry parent",
+            )
+            _verify_open_directory_path(
+                self._parent_fd,
+                self.registry.parent,
+                "registry parent",
+            )
+            mailbox = resolve_project_mailbox_checked(
+                root, registry_path=self.registry
+            )
+            if mailbox.project_uuid != project_uuid:
+                raise ProjectRegistryError(
+                    f"project identity changed while acquiring layout lock: "
+                    f"{project_uuid} became {mailbox.project_uuid}"
+                )
+            if mailbox.layout_lock != self._lock_path:
+                raise ProjectRegistryError(
+                    f"mailbox resolver returned unexpected layout lock: "
+                    f"{mailbox.layout_lock} != {self._lock_path}"
+                )
+            return mailbox
+        except Exception:
+            self._close()
+            raise
+
+    def __exit__(self, _exc_type, _exc_value, _traceback):
+        self._close()
+        return False
+
+
+class _CliProjectMailboxLock:
+    """Translate only lock-entry failures to the normal CLI diagnostic."""
+
+    def __init__(self, guard, tool):
+        self.guard = guard
+        self.tool = tool
+
+    def __enter__(self):
+        try:
+            return self.guard.__enter__()
+        except ProjectRegistryError as error:
+            raise SystemExit(
+                f"{self.tool}: mailbox access failed: {error}"
+            ) from None
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        return self.guard.__exit__(exc_type, exc_value, traceback)
+
+
+def locked_project_mailbox_checked(
+    project,
+    registry_path=None,
+    *,
+    exclusive=False,
+    timeout=LAYOUT_LOCK_TIMEOUT_SECONDS,
+):
+    """Return a typed UUID layout-lock context for library callers."""
+
+    return _ProjectMailboxLock(
+        project,
+        registry_path=registry_path,
+        exclusive=exclusive,
+        timeout=timeout,
+    )
+
+
+def locked_project_mailbox(
+    project,
+    registry_path=None,
+    *,
+    exclusive=False,
+    timeout=LAYOUT_LOCK_TIMEOUT_SECONDS,
+    tool="roundtable",
+):
+    """Return a CLI-facing UUID layout-lock context."""
+
+    return _CliProjectMailboxLock(
+        locked_project_mailbox_checked(
+            project,
+            registry_path=registry_path,
+            exclusive=exclusive,
+            timeout=timeout,
+        ),
+        tool,
+    )
 
 
 def _orphan_warning(label, root):

@@ -7,7 +7,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from _rtlib import find_project_root, require_fenced_seat, resolve_project_mailbox
+from _rtlib import find_project_root, locked_project_mailbox, require_fenced_seat
 
 TOOL_DIR = Path(__file__).resolve().parent
 # Agent names may be multi-instance ids (claude#1, codex-build), so the from/to
@@ -17,7 +17,7 @@ MSG_ID_RE = re.compile(r"^\d{8}T\d{6}Z-([a-z0-9#_-]+)-to-([a-z0-9#_-]+)-[^-]+$")
 
 
 ROOT = find_project_root("rt-ack")
-MAILBOX = resolve_project_mailbox(ROOT)
+MAILBOX = None
 
 
 def usage():
@@ -108,7 +108,7 @@ def archive_inbound(ref, recipient):
     fsync_directory(new_dir)
 
 
-def main():
+def _main_locked():
     args = list(sys.argv[1:])
     fenced = bool(args and args[0] == "--fenced")
     if fenced:
@@ -203,7 +203,17 @@ def main():
             ) from None
         outputs.append(output)
 
-    print("\n".join(output for output in outputs if output))
+    return "\n".join(output for output in outputs if output)
+
+
+def main():
+    global MAILBOX
+
+    with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
+        MAILBOX = mailbox
+        output = _main_locked()
+    if output:
+        print(output)
 
 
 if __name__ == "__main__":

@@ -210,6 +210,25 @@ def test_successful_bridge_iteration_refreshes_only_current_seat(
     )
     assert paths.lease.read_bytes() == before
 
+    updates = []
+    monkeypatch.setattr(
+        wake,
+        "update_wake",
+        lambda *args, **kwargs: updates.append((args, kwargs)),
+    )
+    wake.heartbeat_bound_seats(
+        store,
+        [project],
+        [wake.ProjectResult(False, "mailbox layout busy", heartbeat=True)],
+    )
+    assert len(updates) == 1
+    assert updates[0][0][:4] == (
+        project,
+        "codex",
+        token.session_id,
+        token.revision,
+    )
+
 
 def test_bind_command_records_current_lease_and_native_thread(
     tmp_path, monkeypatch, capsys
@@ -455,7 +474,9 @@ def test_custom_codex_instance_scans_and_wakes_its_own_mailbox(
     starts = [params for method, params in client.calls if method == "turn/start"]
     assert result.ok and result.detail == "wake started"
     assert len(starts) == 1
-    assert str(inbox) in starts[0]["input"][0]["text"]
+    wake_text = starts[0]["input"][0]["text"]
+    assert "drain the Roundtable inbox for codex-review in this project" in wake_text
+    assert str(inbox) not in wake_text
 
 
 def test_binding_agent_change_after_scan_requires_rescan_without_wake(

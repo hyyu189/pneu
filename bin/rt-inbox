@@ -13,15 +13,14 @@ from _rtlib import (
     current_records,
     find_project_root,
     load_agents_doc,
+    locked_project_mailbox,
     read_records,
     require_fenced_seat,
-    resolve_project_mailbox,
 )
 
 ROOT = find_project_root("rt-inbox")
-MAILBOX = resolve_project_mailbox(ROOT)
-MSG_DIR = MAILBOX.messages_dir
-INBOX_DIR = MAILBOX.inbox_dir
+MSG_DIR = None
+INBOX_DIR = None
 AGENT_COMPONENT_RE = re.compile(r"^[a-z0-9#_-]+$")
 MAIL_HEADER_RE = re.compile(
     r"^\[(?P<from>[a-z0-9#_-]+)→(?P<to>[a-z0-9#_-]+) "
@@ -489,20 +488,20 @@ def malformed_remedy(record, resolved):
     return "rt-ack"
 
 
-def print_text(records):
-    for record in records:
-        sources = "+".join(record.get("delivery_sources") or ["ledger"])
-        print(
-            f"{record.get('msg_id', '')}  "
-            f"{record.get('from', '')}  "
-            f"{record.get('kind', '')}  "
-            f"{record.get('lifecycle', '')}  "
-            f"[{sources}]  "
-            f"{truncate(record.get('body', ''))}"
-        )
+def render_text(records):
+    return "\n".join(
+        f"{record.get('msg_id', '')}  "
+        f"{record.get('from', '')}  "
+        f"{record.get('kind', '')}  "
+        f"{record.get('lifecycle', '')}  "
+        f"[{'+'.join(record.get('delivery_sources') or ['ledger'])}]  "
+        f"{truncate(record.get('body', ''))}"
+        for record in records
+    )
 
 
-def main():
+def _main_locked():
+    notices = []
     args = parse_args()
     if args.archive_quiet_acks and not args.fenced:
         raise SystemExit("rt-inbox: --archive-quiet-acks requires --fenced")
@@ -515,9 +514,8 @@ def main():
     if args.archive_quiet_acks:
         archived = archive_quiet_acks(agent)
         if archived:
-            print(
+            notices.append(
                 f"rt-inbox: archived {archived} quiet acknowledgement(s)",
-                file=sys.stderr,
             )
     records = visible_records(agent, args.all)
     malformed = [
@@ -527,10 +525,6 @@ def main():
         resolved = resolvable_instances()
         for record in malformed:
             record["remedy"] = malformed_remedy(record, resolved)
-    if args.format == "json":
-        print(json.dumps(records, ensure_ascii=False, indent=2))
-    else:
-        print_text(records)
     if malformed:
         ackable = [
             record["msg_id"]
@@ -558,7 +552,26 @@ def main():
                 "file out of new/ (for example into cur/) manually: "
                 + ", ".join(manual)
             )
-        print("; ".join(parts), file=sys.stderr)
+        notices.append("; ".join(parts))
+    return records, args.format, notices
+
+
+def main():
+    global MSG_DIR, INBOX_DIR
+
+    with locked_project_mailbox(ROOT, tool="rt-inbox") as mailbox:
+        MSG_DIR = mailbox.messages_dir
+        INBOX_DIR = mailbox.inbox_dir
+        records, output_format, notices = _main_locked()
+    output = (
+        json.dumps(records, ensure_ascii=False, indent=2)
+        if output_format == "json"
+        else render_text(records)
+    )
+    if output:
+        print(output)
+    for notice in notices:
+        print(notice, file=sys.stderr)
 
 
 if __name__ == "__main__":

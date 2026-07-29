@@ -23,7 +23,11 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtcodex
-from _rtlib import register_project, resolve_project_mailbox
+from _rtlib import (
+    locked_project_mailbox_checked,
+    register_project,
+    resolve_project_mailbox,
+)
 
 
 def load_wake_module():
@@ -253,9 +257,31 @@ def test_idle_three_messages_produce_one_wake(tmp_path):
     starts = [call for call in client.calls if call[0] == "turn/start"]
     assert first[0].ok and second[0].ok
     assert len(starts) == 1
-    assert "drain inbox at" in starts[0][1]["input"][0]["text"]
+    wake_text = starts[0][1]["input"][0]["text"]
+    assert "drain the Roundtable inbox for codex in this project" in wake_text
+    assert str(project / ".roundtable") not in wake_text
     inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
     assert len(list(inbox.iterdir())) == 3
+
+
+def test_layout_contention_is_transient_not_identity_error(tmp_path):
+    project = write_project(tmp_path / "project")
+    client = FakeClient(thread(project))
+    store = wake.StateStore(tmp_path / "state.json")
+    bridge = wake.WakeBridge(client, [project], store, auto_discover=True)
+
+    with locked_project_mailbox_checked(
+        project,
+        exclusive=True,
+        timeout=2,
+    ):
+        result = bridge.step()
+
+    assert len(result) == 1
+    assert not result[0].ok
+    assert result[0].heartbeat
+    assert "mailbox layout busy" in result[0].detail
+    assert store.project_state(project).get("phase") != "IDENTITY_ERROR"
 
 
 def test_busy_waits_for_matching_turn_completed(tmp_path):

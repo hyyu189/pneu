@@ -8,6 +8,7 @@ claimed host-local seat in ``RT_RUNTIME_DIR``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import signal
@@ -16,7 +17,12 @@ import time
 from pathlib import Path
 from typing import Any
 
-from _rtlib import is_project_root, resolve_project_mailbox
+from _rtlib import (
+    ProjectLayoutLockTimeout,
+    ProjectRegistryError,
+    is_project_root,
+    locked_project_mailbox_checked,
+)
 from _rtruntime import (
     FenceRejected,
     RuntimeStateError,
@@ -31,6 +37,8 @@ DEFAULT_MINUTES = 45
 FLOOR_MINUTES = 240
 BACKOFF_AFTER = 6
 POLL_SECONDS = 5
+LAYOUT_SCAN_TIMEOUT_SECONDS = 1.0
+GENERATION_POLL_SECONDS = 0.25
 
 
 class StopRequested(Exception):
@@ -168,6 +176,101 @@ def _ack_count(new_dir: Path) -> int:
         return 0
 
 
+def _mailbox_snapshot(
+    project: Path,
+    agent: str,
+    *,
+    create: bool = False,
+) -> tuple[list[str], int]:
+    """Take one authoritative snapshot without retaining the lock over sleep."""
+
+    with locked_project_mailbox_checked(
+        project,
+        timeout=LAYOUT_SCAN_TIMEOUT_SECONDS,
+    ) as mailbox:
+        inbox = mailbox.inbox_dir / agent
+        new_dir = inbox / "new"
+        if create:
+            for path in (new_dir, inbox / "cur", inbox / "tmp"):
+                path.mkdir(parents=True, exist_ok=True)
+        return _wake_mail(new_dir), _ack_count(new_dir)
+
+
+def _validated_generation(value: object) -> tuple[str, ...]:
+    if not isinstance(value, (list, tuple)) or not value:
+        raise RuntimeStateError("last wake generation is empty or invalid")
+    names = []
+    for item in value:
+        if (
+            not isinstance(item, str)
+            or not item
+            or len(item.encode("utf-8")) > 255
+            or Path(item).name != item
+            or item.startswith((".", "ack-"))
+            or "/" in item
+            or "\x00" in item
+        ):
+            raise RuntimeStateError(
+                f"last wake generation contains an unsafe filename: {item!r}"
+            )
+        names.append(item)
+    if len(set(names)) != len(names):
+        raise RuntimeStateError("last wake generation contains duplicates")
+    return tuple(names)
+
+
+def _generation_pending(
+    project: Path,
+    agent: str,
+    generation: tuple[str, ...],
+) -> bool:
+    with locked_project_mailbox_checked(
+        project,
+        timeout=LAYOUT_SCAN_TIMEOUT_SECONDS,
+    ) as mailbox:
+        new_dir = mailbox.inbox_dir / agent / "new"
+        for name in generation:
+            try:
+                (new_dir / name).lstat()
+            except FileNotFoundError:
+                continue
+            return True
+        return False
+
+
+def wait_last_wake_drained(agent: str) -> int:
+    """Follow one exact generation across layout flips for a host adapter."""
+
+    project = _project_root()
+    session_id, revision = _lease_environment(agent)
+    lease = load_validated_lease(project, agent, session_id, revision)
+    generation = _validated_generation(lease.last_wake_messages)
+    expected_generation = os.environ.get(
+        "RT_EXPECTED_WAKE_GENERATION", ""
+    ).strip()
+    actual_generation = hashlib.sha256(
+        "\n".join(generation).encode("utf-8")
+    ).hexdigest()
+    if expected_generation and expected_generation != actual_generation:
+        raise RuntimeStateError(
+            "last wake generation changed before follower startup"
+        )
+    while True:
+        # Revalidate the fence before every mailbox observation. A follower
+        # never owns or updates the watcher heartbeat slot.
+        load_validated_lease(project, agent, session_id, revision)
+        try:
+            pending = _generation_pending(project, agent, generation)
+            load_validated_lease(project, agent, session_id, revision)
+            if not pending:
+                return 0
+        except ProjectLayoutLockTimeout:
+            # An exclusive migration is a transient pause, not a broken
+            # Hermes installation or an invalid seat identity.
+            pass
+        time.sleep(GENERATION_POLL_SECONDS)
+
+
 def _parse_minutes(raw: str | None) -> int | None:
     if raw is None:
         return None
@@ -184,6 +287,30 @@ def _pick_max(explicit: int | None, empty_beats: int) -> int:
     if explicit is not None:
         return explicit
     return FLOOR_MINUTES if empty_beats >= BACKOFF_AFTER else DEFAULT_MINUTES
+
+
+def _stop_hook_retry_exhausted(
+    pending_at_stop: list[str],
+    lease,
+    *,
+    enabled: bool,
+) -> bool:
+    return (
+        enabled
+        and tuple(pending_at_stop) == lease.last_wake_messages
+        and lease.wake_attempts >= 2
+    )
+
+
+def _report_stop_hook_retry_exhausted() -> None:
+    print(
+        "rt-wait-inbox: the same Roundtable mail generation is still "
+        "pending after one Stop-hook retry; automatic re-wake is paused "
+        "to prevent a loop. "
+        "The mail remains durable in new/. Resolve any /permissions or "
+        "command error, then interact with this Claude session to retry.",
+        file=sys.stderr,
+    )
 
 
 def run(
@@ -204,25 +331,36 @@ def run(
     if claude_hook and watcher_is_live(lease):
         return 0
 
-    inbox = resolve_project_mailbox(project).inbox_dir / agent
-    new_dir = inbox / "new"
-    for path in (new_dir, inbox / "cur", inbox / "tmp"):
-        path.mkdir(parents=True, exist_ok=True)
-    pending_at_stop = _wake_mail(new_dir)
-    if (
-        claude_stop_hook
-        and stop_hook_active
-        and tuple(pending_at_stop) == lease.last_wake_messages
-        and lease.wake_attempts >= 2
+    while True:
+        try:
+            pending_at_stop, _initial_acks = _mailbox_snapshot(
+                project,
+                agent,
+                create=True,
+            )
+            break
+        except ProjectLayoutLockTimeout:
+            # Migration holds EX only for its bounded cutover. Keep the fence
+            # live, but do not classify normal quiescence as a broken watcher.
+            load_validated_lease(
+                project, agent, session_id, revision
+            )
+            time.sleep(GENERATION_POLL_SECONDS)
+    # A migration may have queued more than one hook before any could scan.
+    # Refresh the generation/attempt state, and let a winner that registered
+    # while we waited suppress this duplicate before evaluating the breaker.
+    lease = load_validated_lease(
+        project, agent, session_id, revision
+    )
+    if claude_hook and watcher_is_live(lease):
+        return 0
+    stop_breaker_enabled = claude_stop_hook and stop_hook_active
+    if _stop_hook_retry_exhausted(
+        pending_at_stop,
+        lease,
+        enabled=stop_breaker_enabled,
     ):
-        print(
-            "rt-wait-inbox: the same Roundtable mail generation is still "
-            "pending after one Stop-hook retry; automatic re-wake is paused "
-            "to prevent a loop. "
-            "The mail remains durable in new/. Resolve any /permissions or "
-            "command error, then interact with this Claude session to retry.",
-            file=sys.stderr,
-        )
+        _report_stop_hook_retry_exhausted()
         return 0
 
     watcher_pid = os.getpid()
@@ -241,11 +379,23 @@ def run(
             ):
                 return 0
             raise
+        # The watcher claim is the linearization point between queued hooks.
+        # A predecessor can advance wakeAttempts and release its slot after
+        # our pre-claim refresh, so re-evaluate the breaker against the exact
+        # token returned by the successful claim before recording another
+        # attempt.
+        if _stop_hook_retry_exhausted(
+            pending_at_stop,
+            token,
+            enabled=stop_breaker_enabled,
+        ):
+            _report_stop_hook_retry_exhausted()
+            return 0
         empty_beats = _integer_field(token, "empty_beats")
         activity = _activity_stamp(token)
         max_minutes = _pick_max(explicit_minutes, empty_beats)
         ticks = 0
-        mail = _wake_mail(new_dir)
+        mail = pending_at_stop
         superseded = False
 
         while not mail and ticks < max_minutes * (60 // POLL_SECONDS):
@@ -262,7 +412,8 @@ def run(
                 superseded = True
                 break
             current_activity = _activity_stamp(token)
-            if current_activity != activity:
+            activity_changed = current_activity != activity
+            if activity_changed:
                 activity = current_activity
                 ticks = 0
                 empty_beats = 0
@@ -275,9 +426,16 @@ def run(
                     empty_beats=0,
                     expected_watcher_pid=watcher_pid,
                 )
-            else:
+            try:
+                candidate_mail, _candidate_acks = (
+                    _mailbox_snapshot(project, agent, create=True)
+                )
+            except ProjectLayoutLockTimeout:
+                # Do not count an exclusive migration as an empty heartbeat.
+                continue
+            mail = candidate_mail
+            if not activity_changed:
                 ticks += 1
-            mail = _wake_mail(new_dir)
 
         if superseded:
             print("rt-wait-inbox: seat lease or watcher was superseded")
@@ -299,7 +457,6 @@ def run(
                 wake_attempts=attempts,
                 expected_watcher_pid=watcher_pid,
             )
-            print(f"rt-wait-inbox: new-dir {json.dumps(str(new_dir))}")
             print(f"rt-wait-inbox: mail after {ticks * POLL_SECONDS}s:")
             print("\n".join(mail))
             if claude_hook:
@@ -326,7 +483,14 @@ def run(
                     "watcher yourself.",
                     file=sys.stderr,
                 )
-        acks = _ack_count(new_dir)
+        try:
+            _remaining_mail, acks = _mailbox_snapshot(
+                project,
+                agent,
+                create=True,
+            )
+        except ProjectLayoutLockTimeout:
+            acks = 0
         if acks:
             print(
                 f"rt-wait-inbox: {acks} quiet ack file(s) pending in new/ "
@@ -375,6 +539,17 @@ def _claude_hook_is_managed() -> bool:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    follow_generation = bool(
+        argv and argv[0] == "--wait-last-wake-drained"
+    )
+    if follow_generation:
+        argv.pop(0)
+        if len(argv) != 1:
+            print(
+                "usage: rt-wait-inbox --wait-last-wake-drained <agent>",
+                file=sys.stderr,
+            )
+            return 2
     claude_stop_hook = bool(argv and argv[0] == "--claude-stop-hook")
     claude_hook = bool(
         argv and argv[0] in ("--claude-hook", "--claude-stop-hook")
@@ -409,6 +584,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     try:
+        if follow_generation:
+            return wait_last_wake_drained(argv[0])
         explicit = _parse_minutes(argv[1] if len(argv) == 2 else None)
         return run(
             argv[0],
@@ -417,7 +594,10 @@ def main(argv: list[str] | None = None) -> int:
             claude_stop_hook=claude_stop_hook,
             stop_hook_active=stop_hook_active,
         )
-    except (FenceRejected, RuntimeStateError, OSError) as error:
+    except FenceRejected:
+        print("rt-wait-inbox: seat lease or watcher was superseded")
+        return 0 if follow_generation else 2
+    except (ProjectRegistryError, RuntimeStateError, OSError) as error:
         print(f"rt-wait-inbox: {error}", file=sys.stderr)
         return 2
 

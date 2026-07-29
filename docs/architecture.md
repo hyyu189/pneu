@@ -118,6 +118,14 @@ Maildir `tmp/` is the deliberate exception to the simple durable/ephemeral
 split: it is staging state, but it must remain on the same filesystem as
 `new/` so publication can use an atomic rename.
 
+Every mailbox reader or writer acquires the UUID-keyed shared layout lock
+before resolving the registry pointer and holds it through its last mailbox
+I/O. Migration takes the matching exclusive lock. Lock files are persistent
+private coordination in `~/.roundtable/layout-locks/`, not removable PID or
+staleness records. Long-running watchers take short shared sections per scan
+and sleep unlocked; adapter prompts never retain a physical mailbox path as a
+capability.
+
 P0 uses a deterministic key derived from the canonical project path, while
 retaining that readable path in metadata:
 

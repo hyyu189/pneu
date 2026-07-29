@@ -146,7 +146,6 @@ def _wait_until(predicate, timeout=2.0):
 
 def _mail_output(new_dir: Path, *names: str, seconds: int = 5) -> str:
     return (
-        f"rt-wait-inbox: new-dir {json.dumps(str(new_dir))}\n"
         f"rt-wait-inbox: mail after {seconds}s:\n"
         + "\n".join(names)
         + "\n"
@@ -256,12 +255,23 @@ def test_tui_reset_starts_and_restarts_without_watcher_overlap(
     assert second.terminated
 
 
-def _start_tui_mail(plugin, tmp_path, monkeypatch, context, *, session_id):
+def _start_tui_mail(
+    plugin,
+    tmp_path,
+    monkeypatch,
+    context,
+    *,
+    session_id,
+    follower=False,
+):
     project, _waiter = _set_activation(monkeypatch, tmp_path)
     new_dir = project / ".roundtable" / "inbox" / "hermes" / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "message-1").write_text("pending", encoding="utf-8")
-    popen = FakePopen([(_mail_output(new_dir, "message-1"), 0)])
+    plans = [(_mail_output(new_dir, "message-1"), 0)]
+    if follower:
+        plans.append(FakeProcess())
+    popen = FakePopen(plans)
     monkeypatch.setattr(plugin.subprocess, "Popen", popen)
 
     plugin.register(context)
@@ -293,6 +303,7 @@ def test_tui_mail_handshake_uses_exact_session_key_and_call_order(
         monkeypatch,
         context,
         session_id="tui-session-key",
+        follower=True,
     )
     _wait_until(lambda: len(context.dispatch_calls) == 2)
 
@@ -467,10 +478,12 @@ def test_mail_is_injected_once_until_non_ack_mail_is_drained(
     mail = new_dir / "message-1"
     mail.write_text("body is never read by the adapter", encoding="utf-8")
     (new_dir / "ack-quiet").write_text("", encoding="utf-8")
+    follower = FakeProcess()
     blocking = FakeProcess()
     popen = FakePopen(
         [
             (_mail_output(new_dir, "message-1"), 0),
+            follower,
             blocking,
         ]
     )
@@ -483,10 +496,19 @@ def test_mail_is_injected_once_until_non_ack_mail_is_drained(
     time.sleep(0.05)
 
     assert len(context.injected) == 1
-    assert len(popen.calls) == 1
+    assert len(popen.calls) == 2
+    assert popen.calls[1][0] == [
+        str(_waiter),
+        "--wait-last-wake-drained",
+        "hermes",
+    ]
+    assert popen.calls[1][1]["env"][
+        "RT_EXPECTED_WAKE_GENERATION"
+    ] == plugin.hashlib.sha256(b"message-1").hexdigest()
 
     mail.unlink()
-    _wait_until(lambda: len(popen.calls) == 2)
+    follower.release.set()
+    _wait_until(lambda: len(popen.calls) == 3)
     assert len(context.injected) == 1
 
     context.hooks["on_session_finalize"]()
@@ -503,11 +525,15 @@ def test_mail_arriving_during_drain_gets_its_own_wake_generation(
     new_dir.mkdir(parents=True)
     first = new_dir / "message-1"
     first.write_text("first", encoding="utf-8")
+    first_follower = FakeProcess()
+    second_follower = FakeProcess()
     blocking = FakeProcess()
     popen = FakePopen(
         [
             (_mail_output(new_dir, "message-1"), 0),
+            first_follower,
             (_mail_output(new_dir, "message-2", seconds=0), 0),
+            second_follower,
             blocking,
         ]
     )
@@ -522,14 +548,16 @@ def test_mail_arriving_during_drain_gets_its_own_wake_generation(
     second.write_text("arrived during first turn", encoding="utf-8")
     time.sleep(0.05)
     assert len(context.injected) == 1
-    assert len(popen.calls) == 1
-
-    first.unlink()
-    _wait_until(lambda: len(context.injected) == 2)
     assert len(popen.calls) == 2
 
+    first.unlink()
+    first_follower.release.set()
+    _wait_until(lambda: len(context.injected) == 2)
+    assert len(popen.calls) == 4
+
     second.unlink()
-    _wait_until(lambda: len(popen.calls) == 3)
+    second_follower.release.set()
+    _wait_until(lambda: len(popen.calls) == 5)
     context.hooks["on_session_finalize"]()
     assert blocking.terminated
 
@@ -537,13 +565,9 @@ def test_mail_arriving_during_drain_gets_its_own_wake_generation(
 @pytest.mark.parametrize(
     "output",
     [
-        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\n",
-        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\n../outside\n",
-        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\nack-quiet\n",
-        'rt-wait-inbox: new-dir "/tmp/new"\n'
         "rt-wait-inbox: mail after 5s:\n padded-name\n",
     ],
 )
@@ -692,10 +716,12 @@ def test_pending_generation_renotifies_once_then_pauses_and_rearms_after_ack(
     new_dir.mkdir(parents=True)
     mail = new_dir / "message-1"
     mail.write_text("body is never read by the adapter", encoding="utf-8")
+    follower = FakeProcess()
     blocking = FakeProcess()
     popen = FakePopen(
         [
             (_mail_output(new_dir, "message-1"), 0),
+            follower,
             blocking,
         ]
     )
@@ -708,18 +734,20 @@ def test_pending_generation_renotifies_once_then_pauses_and_rearms_after_ack(
     time.sleep(0.05)
 
     # One re-notice, then one pause diagnostic, then silence; still only the
-    # original waiter because the generation never left new/.
+    # original waiter plus one long-lived generation follower; no polling
+    # subprocess churn while the generation remains pending.
     assert [content for content, _role in context.injected] == [
         plugin._MAIL_MESSAGE,
         plugin._MAIL_MESSAGE,
         plugin._PENDING_MESSAGE,
     ]
-    assert len(popen.calls) == 1
+    assert len(popen.calls) == 2
 
     # A late rt-ack (modeled by the archival leaving new/) must still re-arm
     # a fresh waiter automatically after the pause notice.
     mail.unlink()
-    _wait_until(lambda: len(popen.calls) == 2, timeout=5.0)
+    follower.release.set()
+    _wait_until(lambda: len(popen.calls) == 3, timeout=5.0)
     assert len(context.injected) == 3
 
     context.hooks["on_session_finalize"]()

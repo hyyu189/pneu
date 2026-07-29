@@ -8,7 +8,12 @@ import os
 import sys
 from pathlib import Path
 
-from _rtlib import is_project_root, load_agents_doc, resolve_project_mailbox
+from _rtlib import (
+    ProjectRegistryError,
+    is_project_root,
+    load_agents_doc,
+    locked_project_mailbox_checked,
+)
 from _rtruntime import (
     FenceRejected,
     RuntimeStateError,
@@ -125,16 +130,19 @@ def run(agent: str, hook_input: str) -> int:
     load_validated_lease(project, agent, session_id, revision)
     update_activity(project, agent, session_id, revision)
 
-    inbox = resolve_project_mailbox(project).inbox_dir / agent
-    new_dir = inbox / "new"
-    try:
-        undrained = sorted(
-            path.name
-            for path in new_dir.iterdir()
-            if not path.name.startswith(("ack-", "."))
-        )
-    except FileNotFoundError:
-        undrained = []
+    with locked_project_mailbox_checked(
+        project, timeout=1.0
+    ) as mailbox:
+        inbox = mailbox.inbox_dir / agent
+        new_dir = inbox / "new"
+        try:
+            undrained = sorted(
+                path.name
+                for path in new_dir.iterdir()
+                if not path.name.startswith(("ack-", "."))
+            )
+        except FileNotFoundError:
+            undrained = []
     if undrained:
         rendered = " ".join(undrained)
         print(
@@ -182,7 +190,12 @@ def main(argv: list[str] | None = None) -> int:
     hook_input = sys.stdin.read()
     try:
         return run(agent, hook_input)
-    except (FenceRejected, RuntimeStateError, OSError) as error:
+    except (
+        FenceRejected,
+        ProjectRegistryError,
+        RuntimeStateError,
+        OSError,
+    ) as error:
         print(f"rt-stop-gate: {error}", file=sys.stderr)
         return 2
 

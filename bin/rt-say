@@ -14,21 +14,20 @@ from pathlib import Path
 from _rtlib import (
     find_project_root,
     load_agents_doc,
+    locked_project_mailbox,
     require_fenced_seat,
-    resolve_project_mailbox,
 )
 
 TOOL_DIR = Path(__file__).resolve().parent
 
 
 ROOT = find_project_root("rt-say")
-MAILBOX = resolve_project_mailbox(ROOT)
 STATE_DIR = ROOT / ".roundtable"
 RUNTIME = STATE_DIR / "runtime.json"
-LOCK_DIR = MAILBOX.locks_dir
-MSG_DIR = MAILBOX.messages_dir
-INBOX_DIR = MAILBOX.inbox_dir
-LEDGER_LOCK = LOCK_DIR / "ledger.lock"
+LOCK_DIR = None
+MSG_DIR = None
+INBOX_DIR = None
+LEDGER_LOCK = None
 LIFECYCLE_ORDINAL = {"pending": 0, "injected": 1, "submitted": 2, "accepted": 3, "acked": 4}
 AGENT_COMPONENT_RE = re.compile(r"^[a-z0-9#_-]+$")
 MAIL_KIND_RE = re.compile(r"^[^\s\]\x00]+$")
@@ -515,7 +514,7 @@ def steer_prefix(target, status, submit_cfg):
     return (submit_cfg.get(target) or {}).get("busy") == "steer" and status != "idle"
 
 
-def main():
+def _main_locked():
     global LEGACY_OPERATION_ACTIVE
 
     args = sys.argv[1:]
@@ -645,10 +644,11 @@ def main():
         )
         append_ledger_after_delivery(sender, pending)
         if verbose:
-            print(f"sent id={msg_id} from={sender} to={target} delivery=maildir submit=none")
-        else:
-            print(f"sent maildir-only {msg_id}")
-        return
+            return (
+                f"sent id={msg_id} from={sender} to={target} "
+                "delivery=maildir submit=none"
+            )
+        return f"sent maildir-only {msg_id}"
 
     # Everything below is the explicit, keyboard-only legacy path. It never
     # publishes maildir state; failures are therefore independent of delivery.
@@ -749,9 +749,25 @@ def main():
         release_lock(send_lock)
 
     if verbose:
-        print(f"sent id={msg_id} from={sender} to={target} workspace={route['workspace']} surface={route['surface']} submit={submit}")
-    else:
-        print(f"sent {msg_id}")
+        return (
+            f"sent id={msg_id} from={sender} to={target} "
+            f"workspace={route['workspace']} surface={route['surface']} "
+            f"submit={submit}"
+        )
+    return f"sent {msg_id}"
+
+
+def main():
+    global LOCK_DIR, MSG_DIR, INBOX_DIR, LEDGER_LOCK
+
+    with locked_project_mailbox(ROOT, tool="rt-say") as mailbox:
+        LOCK_DIR = mailbox.locks_dir
+        MSG_DIR = mailbox.messages_dir
+        INBOX_DIR = mailbox.inbox_dir
+        LEDGER_LOCK = LOCK_DIR / "ledger.lock"
+        output = _main_locked()
+    if output:
+        print(output)
 
 
 if __name__ == "__main__":

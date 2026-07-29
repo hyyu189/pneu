@@ -4,8 +4,12 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
+from importlib.machinery import SourceFileLoader
+from importlib.util import module_from_spec, spec_from_loader
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -139,6 +143,37 @@ def test_wait_requires_fenced_session_and_never_creates_project_markers(tmp_path
     assert not runtime.exists()
 
 
+def test_stale_fence_fails_normal_wait_but_stops_follower_cleanly(
+    tmp_path,
+    monkeypatch,
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    environment["RT_LEASE_REVISION"] = "stale-revision"
+
+    normal = run_tool(
+        "rt-wait-inbox",
+        "claude",
+        "0",
+        cwd=project,
+        env=environment,
+    )
+    follower = run_tool(
+        "rt-wait-inbox",
+        "--wait-last-wake-drained",
+        "claude",
+        cwd=project,
+        env=environment,
+    )
+
+    marker = "seat lease or watcher was superseded"
+    assert normal.returncode == 2
+    assert marker in normal.stdout
+    assert follower.returncode == 0
+    assert marker in follower.stdout
+
+
 def test_global_claude_hook_is_noop_outside_managed_sessions(tmp_path):
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -214,6 +249,186 @@ def test_wait_keeps_maildir_project_local_and_wake_state_host_local(
     assert (new_dir.parent / "tmp").is_dir()
     assert_no_project_liveness(project, agent)
     assert any(path.is_file() for path in runtime.rglob("*"))
+
+
+def test_generation_follower_tracks_authoritative_layout_across_cutover(
+    tmp_path,
+    monkeypatch,
+    isolated_project_registry,
+):
+    agent = "hermes"
+    project = write_project(tmp_path / "project", agent)
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(
+        monkeypatch, runtime, project, agent
+    )
+    local_new = project_inbox(project, agent) / "new"
+    local_new.mkdir(parents=True)
+    original_name = "message-before-cutover.md"
+    original = local_new / original_name
+    original.write_text(
+        "[CODEX→HERMES question id=message-before-cutover] test\n"
+    )
+
+    initial = run_tool(
+        "rt-wait-inbox",
+        agent,
+        "0",
+        cwd=project,
+        env=environment,
+    )
+    assert initial.returncode == 0, initial.stderr
+    assert original_name in initial.stdout
+
+    follower = subprocess.Popen(
+        [
+            sys.executable,
+            str(BIN / "rt-wait-inbox"),
+            "--wait-last-wake-drained",
+            agent,
+        ],
+        cwd=project,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        time.sleep(0.1)
+        assert follower.poll() is None
+        started = time.monotonic()
+        with _rtlib.locked_project_mailbox_checked(
+            project,
+            registry_path=isolated_project_registry,
+            exclusive=True,
+            timeout=2,
+        ) as local_mailbox:
+            assert local_mailbox.layout == "local"
+            central_root = (
+                isolated_project_registry.parent
+                / "mail"
+                / local_mailbox.project_uuid
+            )
+            for directory in (
+                central_root,
+                central_root / "inbox",
+                central_root / "messages",
+                central_root / "locks",
+            ):
+                directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+                directory.chmod(0o700)
+            central_new = central_root / "inbox" / agent / "new"
+            central_cur = central_root / "inbox" / agent / "cur"
+            central_tmp = central_root / "inbox" / agent / "tmp"
+            for directory in (central_new, central_cur, central_tmp):
+                directory.mkdir(parents=True, exist_ok=True)
+            (central_new / original_name).write_text(
+                original.read_text()
+            )
+            later_name = "message-after-cutover.md"
+            (central_new / later_name).write_text(
+                "[CODEX→HERMES question id=message-after-cutover] later\n"
+            )
+
+            def flip(document, _source_payload, _parent_fd):
+                for entry in document["projects"]:
+                    if entry.get("uuid") == local_mailbox.project_uuid:
+                        entry["layout"] = "central"
+                        return True
+                raise AssertionError("registered project disappeared")
+
+            assert _rtlib._update_project_registry(
+                flip, isolated_project_registry
+            )
+        assert time.monotonic() - started < 2
+
+        # The stale local file deliberately remains. The follower must consult
+        # central after the pointer flip and stay pending for the original.
+        time.sleep(0.4)
+        assert follower.poll() is None
+        assert original.is_file()
+        (central_new / original_name).rename(
+            central_cur / original_name
+        )
+        stdout, stderr = follower.communicate(timeout=5)
+        assert follower.returncode == 0, stderr
+        assert stdout == ""
+        assert (central_new / later_name).is_file()
+    finally:
+        if follower.poll() is None:
+            follower.terminate()
+            follower.communicate(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "generation",
+    [
+        ["../outside"],
+        ["duplicate", "duplicate"],
+        ["x" * 256],
+        ["ack-quiet"],
+    ],
+)
+def test_generation_follower_rejects_unsafe_runtime_names(
+    tmp_path,
+    monkeypatch,
+    generation,
+):
+    agent = "hermes"
+    project = write_project(tmp_path / "project", agent)
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(
+        monkeypatch, runtime, project, agent
+    )
+    _rtruntime.update_wake(
+        project,
+        agent,
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        last_wake_messages=generation,
+    )
+
+    result = run_tool(
+        "rt-wait-inbox",
+        "--wait-last-wake-drained",
+        agent,
+        cwd=project,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "last wake generation" in result.stderr
+
+
+def test_generation_follower_rejects_generation_replacement(
+    tmp_path,
+    monkeypatch,
+):
+    agent = "hermes"
+    project = write_project(tmp_path / "project", agent)
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(
+        monkeypatch, runtime, project, agent
+    )
+    _rtruntime.update_wake(
+        project,
+        agent,
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        last_wake_messages=["message-current.md"],
+    )
+    environment["RT_EXPECTED_WAKE_GENERATION"] = "0" * 64
+
+    result = run_tool(
+        "rt-wait-inbox",
+        "--wait-last-wake-drained",
+        agent,
+        cwd=project,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "changed before follower startup" in result.stderr
 
 
 def test_claude_hook_uses_async_rewake_exit_for_mail(tmp_path, monkeypatch):
@@ -379,6 +594,158 @@ def test_claude_stop_hook_breaks_an_undrained_mail_retry_loop(
     assert breaker.returncode == 0
     assert "automatic re-wake is paused" in breaker.stderr
     assert "message-still-pending.md" not in breaker.stdout
+
+
+def test_queued_stop_hook_refreshes_breaker_state_after_layout_wait(
+    tmp_path,
+    monkeypatch,
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    new_dir = project_inbox(project, "claude") / "new"
+    new_dir.mkdir(parents=True)
+    name = "message-queued.md"
+    (new_dir / name).write_text(
+        "[CODEX→CLAUDE question id=message-queued] test\n"
+    )
+    _rtruntime.update_wake(
+        project,
+        "claude",
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        last_wake_messages=[name],
+        wake_attempts=1,
+    )
+
+    with _rtlib.locked_project_mailbox_checked(
+        project,
+        exclusive=True,
+        timeout=2,
+    ):
+        queued = subprocess.Popen(
+            [
+                sys.executable,
+                str(BIN / "rt-wait-inbox"),
+                "--claude-stop-hook",
+                "claude",
+                "0",
+            ],
+            cwd=project,
+            env=environment,
+            text=True,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert queued.stdin is not None
+        queued.stdin.write('{"stop_hook_active": true}')
+        queued.stdin.close()
+        time.sleep(0.15)
+        assert queued.poll() is None
+        _rtruntime.update_wake(
+            project,
+            "claude",
+            environment["RT_SESSION_ID"],
+            environment["RT_LEASE_REVISION"],
+            last_wake_messages=[name],
+            wake_attempts=2,
+        )
+
+    assert queued.stdout is not None
+    assert queued.stderr is not None
+    stdout = queued.stdout.read()
+    stderr = queued.stderr.read()
+    queued.wait(timeout=5)
+    assert queued.returncode == 0
+    assert stdout == ""
+    assert "automatic re-wake is paused" in stderr
+
+
+def test_two_queued_stop_hooks_recheck_breaker_after_watcher_claim(
+    monkeypatch,
+):
+    loader = SourceFileLoader(
+        "rt_wait_breaker_race",
+        str(BIN / "rt-wait-inbox"),
+    )
+    spec = spec_from_loader(loader.name, loader)
+    assert spec is not None
+    wait = module_from_spec(spec)
+    loader.exec_module(wait)
+
+    refresh_barrier = threading.Barrier(2)
+    thread_state = threading.local()
+    state_lock = threading.Lock()
+    winner_cleared = threading.Event()
+    state = {"attempts": 1}
+    results: dict[str, int] = {}
+
+    def lease():
+        with state_lock:
+            attempts = state["attempts"]
+        return SimpleNamespace(
+            last_wake_messages=("message.md",),
+            wake_attempts=attempts,
+            empty_beats=0,
+            activity_revision=0,
+        )
+
+    def load(*_args, **_kwargs):
+        thread_state.loads = getattr(thread_state, "loads", 0) + 1
+        if thread_state.loads == 2:
+            refresh_barrier.wait(timeout=2)
+        return lease()
+
+    def update(*_args, **kwargs):
+        name = threading.current_thread().name
+        if "watcher_pid" in kwargs:
+            if name == "queued-2":
+                assert winner_cleared.wait(timeout=2)
+            return lease()
+        if "wake_attempts" in kwargs:
+            with state_lock:
+                state["attempts"] = kwargs["wake_attempts"]
+        return lease()
+
+    def clear(*_args, **_kwargs):
+        if threading.current_thread().name == "queued-1":
+            winner_cleared.set()
+        return lease()
+
+    monkeypatch.setattr(wait, "_project_root", lambda: Path("/tmp/project"))
+    monkeypatch.setattr(wait, "_lease_environment", lambda _agent: ("s", "r"))
+    monkeypatch.setattr(wait, "load_validated_lease", load)
+    monkeypatch.setattr(
+        wait,
+        "_mailbox_snapshot",
+        lambda *_args, **_kwargs: (["message.md"], 0),
+    )
+    monkeypatch.setattr(wait, "watcher_is_live", lambda _token: False)
+    monkeypatch.setattr(wait, "update_wake", update)
+    monkeypatch.setattr(wait, "clear_wake", clear)
+
+    def worker() -> None:
+        results[threading.current_thread().name] = wait.run(
+            "claude",
+            0,
+            claude_hook=True,
+            claude_stop_hook=True,
+            stop_hook_active=True,
+        )
+
+    threads = [
+        threading.Thread(target=worker, name=f"queued-{index}")
+        for index in (1, 2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+
+    assert state["attempts"] == 2
+    assert results == {"queued-1": 2, "queued-2": 0}
 
 
 def test_claude_stop_hook_wakes_a_fresh_late_message_generation(

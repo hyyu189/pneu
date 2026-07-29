@@ -270,6 +270,22 @@ authoritative layout at all times and never a merge of two.
    from the pointer and never reads both.
 7. Only then does it install the human bookmark symlink.
 
+The layout lock is a persistent, host-private regular file at
+`~/.roundtable/layout-locks/<project-uuid>.lock`; it is never deleted or
+replaced as "stale". A consumer reads the worktree UUID witness first,
+acquires `LOCK_SH`, then resolves and revalidates the registry-selected layout
+while holding that lock. The lock remains held through the final mailbox
+read, write, rename, and fsync. Migration uses the same primitive with
+`LOCK_EX`. The order is layout lock(s), sorted by UUID when more than one is
+needed, then the registry lock, then mailbox send/ledger locks; an operation
+must never upgrade a held shared lock in place.
+
+Long-running watchers release the shared lock before sleeping and re-resolve
+under a fresh short shared section on every scan. Hermes delegates its exact
+generation wait to `rt-wait-inbox --wait-last-wake-drained`, so it never
+retains a physical `new/` path across the pointer flip. Diagnostic resolver
+output and wake text likewise are not durable path capabilities.
+
 **Rollback after the cutover is not "restore the backup".** Mail that arrived
 after the flip lives only in the central store, and restoring the pre-cutover
 backup alone would discard it. A rollback takes the same exclusive lock and

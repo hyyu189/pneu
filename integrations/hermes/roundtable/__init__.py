@@ -29,7 +29,6 @@ _REQUIRED_ENV = (
     "RT_LEASE_REVISION",
 )
 _MAIL_MARKER = "rt-wait-inbox: mail after "
-_NEW_DIR_MARKER = "rt-wait-inbox: new-dir "
 _HEARTBEAT_MARKER = "rt-wait-inbox: heartbeat timeout after "
 _SUPERSEDED_MARKER = "rt-wait-inbox: seat lease or watcher was superseded"
 _MAIL_DRAIN_POLL_SECONDS = 0.25
@@ -131,40 +130,6 @@ def _triggered_non_ack_mail(output: str) -> tuple[str, ...] | None:
             return None
         names.append(name)
     return tuple(dict.fromkeys(names)) or None
-
-
-def _triggered_new_dir(output: str) -> Path | None:
-    """Return the resolver-owned maildir path emitted for this wake."""
-
-    values = [
-        line.removeprefix(_NEW_DIR_MARKER)
-        for line in output.splitlines()
-        if line.startswith(_NEW_DIR_MARKER)
-    ]
-    if len(values) != 1:
-        return None
-    try:
-        raw = json.loads(values[0])
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(raw, str) or not raw or "\x00" in raw:
-        return None
-    path = Path(raw)
-    if not path.is_absolute() or path.name != "new":
-        return None
-    return path
-
-
-def _generation_is_pending(
-    new_dir: Path,
-    generation: tuple[str, ...],
-) -> bool:
-    try:
-        return any((new_dir / name).exists() for name in generation)
-    except OSError:
-        # Fail closed: do not start another watcher while the durable inbox
-        # cannot be inspected.
-        return True
 
 
 class _RoundtableBridge:
@@ -317,8 +282,7 @@ class _RoundtableBridge:
             output = output or ""
             if process.returncode == 0 and _MAIL_MARKER in output:
                 generation = _triggered_non_ack_mail(output)
-                new_dir = _triggered_new_dir(output)
-                if generation is None or new_dir is None:
+                if generation is None:
                     self._fail(_CONFIG_MESSAGE)
                     return
                 if not self._deliver(
@@ -333,35 +297,16 @@ class _RoundtableBridge:
                 # Claude Stop-hook retries in rt-wait-inbox: one re-notice,
                 # then one pause diagnostic, then keep polling silently so a
                 # late `rt-ack` still re-arms a fresh waiter automatically.
-                pending_since = time.monotonic()
-                renotified = paused = False
-                while (
-                    not self._stop.is_set()
-                    and _generation_is_pending(
-                        new_dir,
-                        generation,
-                    )
-                ):
-                    waited = time.monotonic() - pending_since
-                    if not renotified and waited >= _PENDING_RENOTIFY_SECONDS:
-                        renotified = True
-                        if not self._deliver(
-                            _MAIL_MESSAGE,
-                            session_id=session_id,
-                            platform=platform,
-                        ):
-                            self._fail(_CONFIG_MESSAGE)
-                            return
-                    elif not paused and waited >= _PENDING_PAUSE_SECONDS:
-                        paused = True
-                        if not self._deliver(
-                            _PENDING_MESSAGE,
-                            session_id=session_id,
-                            platform=platform,
-                        ):
-                            self._fail(_CONFIG_MESSAGE)
-                            return
-                    self._stop.wait(_MAIL_DRAIN_POLL_SECONDS)
+                outcome = self._follow_generation(
+                    environment,
+                    waiter,
+                    agent,
+                    generation,
+                    session_id=session_id,
+                    platform=platform,
+                )
+                if outcome != "drained":
+                    return
                 continue
 
             if process.returncode == 0 and _HEARTBEAT_MARKER in output:
@@ -375,6 +320,108 @@ class _RoundtableBridge:
 
             self._fail(_CONFIG_MESSAGE)
             return
+
+    def _follow_generation(
+        self,
+        environment: dict[str, str],
+        waiter: str,
+        agent: str,
+        generation: tuple[str, ...],
+        *,
+        session_id: str,
+        platform: str,
+    ) -> str:
+        """Delegate exact-generation polling to the lock-aware waiter."""
+
+        follower_environment = environment.copy()
+        follower_environment["RT_EXPECTED_WAKE_GENERATION"] = hashlib.sha256(
+            "\n".join(generation).encode("utf-8")
+        ).hexdigest()
+        try:
+            process = subprocess.Popen(
+                [waiter, "--wait-last-wake-drained", agent],
+                cwd=environment["RT_PROJECT_ROOT"],
+                env=follower_environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                start_new_session=True,
+            )
+        except (OSError, ValueError):
+            self._fail(_CONFIG_MESSAGE)
+            return "failed"
+
+        with self._lock:
+            if self._stop.is_set():
+                self._terminate(process)
+                return "stopped"
+            self._process = process
+
+        completed = threading.Event()
+        result: dict[str, Any] = {}
+
+        def communicate() -> None:
+            try:
+                output, _unused_stderr = process.communicate()
+                result["output"] = output or ""
+                result["returncode"] = process.returncode
+            except (OSError, ValueError) as error:
+                result["error"] = error
+            finally:
+                completed.set()
+
+        reaper = threading.Thread(
+            target=communicate,
+            name="roundtable-hermes-generation-follower",
+            daemon=True,
+        )
+        reaper.start()
+        pending_since = time.monotonic()
+        renotified = paused = False
+        while not completed.wait(_MAIL_DRAIN_POLL_SECONDS):
+            if self._stop.is_set():
+                self._terminate(process)
+                completed.wait(_STOP_JOIN_SECONDS)
+                return "stopped"
+            waited = time.monotonic() - pending_since
+            if not renotified and waited >= _PENDING_RENOTIFY_SECONDS:
+                renotified = True
+                if not self._deliver(
+                    _MAIL_MESSAGE,
+                    session_id=session_id,
+                    platform=platform,
+                ):
+                    self._terminate(process)
+                    self._fail(_CONFIG_MESSAGE)
+                    return "failed"
+            elif not paused and waited >= _PENDING_PAUSE_SECONDS:
+                paused = True
+                if not self._deliver(
+                    _PENDING_MESSAGE,
+                    session_id=session_id,
+                    platform=platform,
+                ):
+                    self._terminate(process)
+                    self._fail(_CONFIG_MESSAGE)
+                    return "failed"
+
+        with self._lock:
+            if self._process is process:
+                self._process = None
+        if self._stop.is_set():
+            return "stopped"
+        if "error" in result:
+            self._fail(_CONFIG_MESSAGE)
+            return "failed"
+        output = str(result.get("output") or "")
+        if _SUPERSEDED_MARKER in output:
+            self._fail(_FENCE_MESSAGE, terminal=True)
+            return "failed"
+        if result.get("returncode") != 0:
+            self._fail(_CONFIG_MESSAGE)
+            return "failed"
+        return "drained"
 
     def _deliver(
         self,

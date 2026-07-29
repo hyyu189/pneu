@@ -34,11 +34,13 @@ from _rtcodex import (
     wake_bridge_build_fingerprint,
 )
 from _rtlib import (
+    ProjectLayoutLockTimeout,
+    ProjectRegistryError,
     active_project_entries,
     load_agents_doc,
     load_project_registry,
+    locked_project_mailbox_checked,
     projects_registry_path,
-    resolve_project_mailbox,
 )
 from _rtruntime import RuntimeStateError, harness_lease_records, inspect_seat
 
@@ -965,10 +967,23 @@ def report_legacy_markers(
 ) -> None:
     for project in registered.values():
         try:
-            inbox = resolve_project_mailbox(
-                project, registry_path=registry_path
-            ).inbox_dir
-        except SystemExit as error:
+            with locked_project_mailbox_checked(
+                project,
+                registry_path=registry_path,
+                timeout=0.1,
+            ) as mailbox:
+                markers = sorted(
+                    mailbox.inbox_dir.glob("*/.armed-*")
+                )
+        except ProjectLayoutLockTimeout as error:
+            report.item(
+                "WARN",
+                "mailbox-layout-busy",
+                str(error),
+                f"retry rt-doctor after the layout transition for {project}",
+            )
+            continue
+        except ProjectRegistryError as error:
             report.item(
                 "WARN",
                 "mailbox-resolver",
@@ -976,7 +991,7 @@ def report_legacy_markers(
                 f"repair project registration for {project}",
             )
             continue
-        for marker in sorted(inbox.glob("*/.armed-*")):
+        for marker in markers:
             report.item(
                 "WARN",
                 "legacy-tripwire-marker",
