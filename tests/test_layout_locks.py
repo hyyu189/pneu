@@ -3,6 +3,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 import stat
 import sys
@@ -88,6 +89,13 @@ def test_shared_and_exclusive_layout_locks_use_one_persistent_private_inode(
         assert info.st_nlink == 1
         assert stat.S_IMODE(first.layout_lock.parent.stat().st_mode) == 0o700
         first_inode = (info.st_dev, info.st_ino)
+        gate_path = first.layout_lock.with_name(
+            f"{first.project_uuid}.writer.lock"
+        )
+        gate_info = gate_path.stat()
+        assert stat.S_ISREG(gate_info.st_mode)
+        assert stat.S_IMODE(gate_info.st_mode) == 0o600
+        assert gate_info.st_nlink == 1
         with _rtlib.locked_project_mailbox_checked(
             project, registry_path=registry
         ) as second:
@@ -133,6 +141,140 @@ def test_layout_lock_modes_exclude_conflicting_access(
             ):
                 raise AssertionError("conflicting lock unexpectedly acquired")
         assert time.monotonic() - started < 1
+
+
+def test_waiting_writer_turnstile_blocks_later_readers(
+    tmp_path: Path,
+) -> None:
+    project, registry = write_registered_project(tmp_path)
+    writer_acquired = threading.Event()
+    release_writer = threading.Event()
+    errors: list[BaseException] = []
+
+    def writer() -> None:
+        try:
+            with _rtlib.locked_project_mailbox_checked(
+                project,
+                registry_path=registry,
+                exclusive=True,
+                timeout=2,
+            ):
+                writer_acquired.set()
+                assert release_writer.wait(2)
+        except BaseException as error:  # pragma: no cover - diagnostic path
+            errors.append(error)
+
+    with _rtlib.locked_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    ) as mailbox:
+        worker = threading.Thread(target=writer)
+        worker.start()
+        gate_path = mailbox.layout_lock.with_name(
+            f"{mailbox.project_uuid}.writer.lock"
+        )
+        deadline = time.monotonic() + 1
+        while True:
+            gate = os.open(gate_path, os.O_RDWR | os.O_CLOEXEC)
+            try:
+                try:
+                    fcntl.flock(
+                        gate,
+                        fcntl.LOCK_SH | fcntl.LOCK_NB,
+                    )
+                except BlockingIOError:
+                    break
+            finally:
+                os.close(gate)
+            if time.monotonic() >= deadline:
+                pytest.fail("exclusive waiter never closed the writer gate")
+            time.sleep(0.01)
+
+        with pytest.raises(_rtlib.ProjectLayoutLockTimeout):
+            with _rtlib.locked_project_mailbox_checked(
+                project,
+                registry_path=registry,
+                timeout=0.05,
+            ):
+                raise AssertionError("later reader overtook waiting writer")
+        assert not writer_acquired.is_set()
+
+    assert writer_acquired.wait(1)
+    release_writer.set()
+    worker.join(timeout=2)
+    assert not worker.is_alive()
+    assert errors == []
+
+
+def test_gate_and_resource_share_one_acquisition_deadline(
+    tmp_path: Path,
+) -> None:
+    project, registry = write_registered_project(tmp_path)
+    with _rtlib.locked_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    ) as mailbox:
+        resource_path = mailbox.layout_lock
+        gate_path = resource_path.with_name(
+            f"{mailbox.project_uuid}.writer.lock"
+        )
+
+    gate = os.open(gate_path, os.O_RDWR | os.O_CLOEXEC)
+    resource = os.open(resource_path, os.O_RDWR | os.O_CLOEXEC)
+    fcntl.flock(gate, fcntl.LOCK_EX)
+    fcntl.flock(resource, fcntl.LOCK_EX)
+    errors: list[BaseException] = []
+
+    def waiter() -> None:
+        try:
+            with _rtlib.locked_project_mailbox_checked(
+                project,
+                registry_path=registry,
+                timeout=0.25,
+            ):
+                raise AssertionError("split deadline unexpectedly reset")
+        except BaseException as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=waiter)
+    started = time.monotonic()
+    worker.start()
+    time.sleep(0.15)
+    fcntl.flock(gate, fcntl.LOCK_UN)
+    time.sleep(0.15)
+    fcntl.flock(resource, fcntl.LOCK_UN)
+    os.close(gate)
+    os.close(resource)
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], _rtlib.ProjectLayoutLockTimeout)
+    assert 0.20 <= time.monotonic() - started < 1
+
+
+def test_layout_holder_resolves_move_without_registry_reindex(
+    tmp_path: Path,
+) -> None:
+    project, registry = write_registered_project(tmp_path)
+    moved = project.with_name("moved")
+    project.rename(moved)
+    moved = moved.resolve()
+    before = registry.read_bytes()
+
+    with _rtlib.locked_project_mailbox_checked(
+        moved,
+        registry_path=registry,
+    ) as mailbox:
+        assert mailbox.project_root == moved
+        assert registry.read_bytes() == before
+
+    direct = _rtlib.resolve_project_mailbox_checked(
+        moved,
+        registry_path=registry,
+    )
+    assert direct.project_root == moved
+    assert registry.read_bytes() != before
 
 
 def test_waiting_reader_resolves_layout_only_after_exclusive_flip(
@@ -225,7 +367,16 @@ def test_layout_lock_rejects_substituted_nonregular_entries(
     assert time.monotonic() - started < 1
 
 
-@pytest.mark.parametrize("bad_target", ["directory-mode", "file-mode", "hard-link"])
+@pytest.mark.parametrize(
+    "bad_target",
+    [
+        "directory-mode",
+        "file-mode",
+        "hard-link",
+        "gate-file-mode",
+        "gate-hard-link",
+    ],
+)
 def test_layout_lock_rejects_nonprivate_or_linked_namespace(
     tmp_path: Path,
     bad_target: str,
@@ -235,12 +386,19 @@ def test_layout_lock_rejects_nonprivate_or_linked_namespace(
         project, registry_path=registry
     ) as mailbox:
         lock_path = mailbox.layout_lock
+        gate_path = lock_path.with_name(
+            f"{mailbox.project_uuid}.writer.lock"
+        )
     if bad_target == "directory-mode":
         lock_path.parent.chmod(0o755)
     elif bad_target == "file-mode":
         lock_path.chmod(0o644)
-    else:
+    elif bad_target == "hard-link":
         os.link(lock_path, lock_path.with_suffix(".alias"))
+    elif bad_target == "gate-file-mode":
+        gate_path.chmod(0o644)
+    else:
+        os.link(gate_path, gate_path.with_suffix(".alias"))
 
     with pytest.raises(_rtlib.ProjectRegistryError):
         with _rtlib.locked_project_mailbox_checked(
@@ -259,6 +417,56 @@ def test_layout_lock_descriptor_is_close_on_exec(
     with guard:
         flags = fcntl.fcntl(guard._descriptor, fcntl.F_GETFD)
         assert flags & fcntl.FD_CLOEXEC
+        gate_flags = fcntl.fcntl(
+            guard._gate_descriptor,
+            fcntl.F_GETFD,
+        )
+        assert gate_flags & fcntl.FD_CLOEXEC
+
+
+def test_registry_lock_wait_is_bounded_inside_exclusive_layout_section(
+    tmp_path: Path,
+) -> None:
+    project, registry = write_registered_project(tmp_path)
+    lock_path = registry.with_name(f"{registry.name}.lock")
+    held = os.open(
+        lock_path,
+        os.O_RDWR | os.O_CREAT | os.O_CLOEXEC,
+        0o600,
+    )
+    fcntl.flock(held, fcntl.LOCK_EX)
+
+    def no_change(_document, _payload, _parent_fd):
+        return False
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(
+            _rtlib.ProjectRegistryLockTimeout,
+            match="timed out waiting for project registry lock",
+        ):
+            with _rtlib.locked_project_mailbox_checked(
+                project,
+                registry_path=registry,
+                exclusive=True,
+                timeout=1,
+            ):
+                _rtlib._update_project_registry(
+                    no_change,
+                    registry,
+                    lock_timeout=0.05,
+                )
+        assert time.monotonic() - started < 1
+    finally:
+        fcntl.flock(held, fcntl.LOCK_UN)
+        os.close(held)
+
+    with _rtlib.locked_project_mailbox_checked(
+        project,
+        registry_path=registry,
+        timeout=0.5,
+    ):
+        pass
 
 
 @pytest.mark.parametrize(
@@ -564,7 +772,7 @@ def test_rt_say_waits_for_cutover_and_writes_only_new_layout(
     assert not (project / ".roundtable" / "inbox" / "claude").exists()
 
 
-def test_rt_ack_holds_layout_lock_between_delivery_and_archive(
+def test_rt_ack_allows_queued_cutover_between_delivery_and_archive(
     tmp_path: Path,
 ) -> None:
     project, registry = write_registered_project(tmp_path)
@@ -607,19 +815,113 @@ def test_rt_ack_holds_layout_lock_between_delivery_and_archive(
         stdout, stderr = process.communicate(timeout=5)
         pytest.fail(f"rt-ack did not publish before timeout: {stdout} {stderr}")
 
-    assert incoming.is_file()
-    with pytest.raises(_rtlib.ProjectLayoutLockTimeout):
-        with _rtlib.locked_project_mailbox_checked(
-            project,
-            registry_path=registry,
-            exclusive=True,
-            timeout=0.1,
-        ):
-            raise AssertionError("exclusive lock split acknowledgement")
+    writer_acquired = threading.Event()
+    release_writer = threading.Event()
+    writer_errors: list[BaseException] = []
+    central_root: list[Path] = []
 
+    def migrate_between_ack_phases() -> None:
+        try:
+            with _rtlib.locked_project_mailbox_checked(
+                project,
+                registry_path=registry,
+                exclusive=True,
+                timeout=3,
+            ) as local:
+                central = registry.parent / "mail" / local.project_uuid
+                central.mkdir(parents=True, mode=0o700)
+                for name in ("inbox", "messages"):
+                    shutil.copytree(
+                        local.mail_root / name,
+                        central / name,
+                    )
+                (central / "locks").mkdir(mode=0o700)
+
+                def mutate(document, _source_payload, _parent_fd):
+                    for entry in document["projects"]:
+                        if entry.get("uuid") == local.project_uuid:
+                            entry["layout"] = "central"
+                            return True
+                    raise AssertionError("registered UUID disappeared")
+
+                assert _rtlib._update_project_registry(mutate, registry)
+                for name in ("inbox", "messages", "locks"):
+                    shutil.rmtree(local.mail_root / name)
+                central_root.append(central)
+                writer_acquired.set()
+                assert release_writer.wait(3)
+        except BaseException as error:  # pragma: no cover - diagnostic path
+            writer_errors.append(error)
+
+    writer = threading.Thread(target=migrate_between_ack_phases)
+    writer.start()
+    gate_path = (
+        registry.parent
+        / "layout-locks"
+        / (
+            json.loads(
+                _rtlib.project_identity_path(project).read_text()
+            )["uuid"]
+            + ".writer.lock"
+        )
+    )
+    deadline = time.monotonic() + 2
+    while True:
+        gate = os.open(gate_path, os.O_RDWR | os.O_CLOEXEC)
+        try:
+            try:
+                fcntl.flock(gate, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                break
+        finally:
+            os.close(gate)
+        if time.monotonic() >= deadline:
+            pytest.fail("migration never queued behind acknowledgement send")
+        time.sleep(0.01)
+
+    # Let the rt-say child finish its ledger append. The queued writer owns
+    # admission, so it cuts over before rt-ack's fresh archive section.
     ledger_lock.rmdir()
+    assert writer_acquired.wait(3)
+    assert process.poll() is None
+    assert incoming.is_file() is False
+    assert len(central_root) == 1
+    central = central_root[0]
+    copied_incoming = (
+        central
+        / "inbox"
+        / "claude"
+        / "new"
+        / incoming.name
+    )
+    assert copied_incoming.is_file()
+    copied_acks = list(
+        (central / "inbox" / "codex" / "new").glob("ack-*.md")
+    )
+    assert len(copied_acks) == 1
+
+    release_writer.set()
+    writer.join(timeout=3)
+    assert not writer.is_alive()
+    assert writer_errors == []
     stdout, stderr = process.communicate(timeout=5)
     assert process.returncode == 0, stderr
     assert "sent maildir-only" in stdout
-    assert not incoming.exists()
-    assert (incoming_new.parent / "cur" / incoming.name).is_file()
+    assert not copied_incoming.exists()
+    assert (
+        central
+        / "inbox"
+        / "claude"
+        / "cur"
+        / incoming.name
+    ).is_file()
+
+    # Restoring the old parent-wide shared section would deadlock behind the
+    # writer turnstile and make this interleaving impossible.
+    with _rtlib.locked_project_mailbox_checked(
+        project,
+        registry_path=registry,
+        exclusive=True,
+        timeout=0.5,
+    ):
+        pass

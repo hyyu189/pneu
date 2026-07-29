@@ -108,14 +108,19 @@ def archive_inbound(ref, recipient):
     fsync_directory(new_dir)
 
 
-def _main_locked():
+def parse_args():
     args = list(sys.argv[1:])
     fenced = bool(args and args[0] == "--fenced")
     if fenced:
         args.pop(0)
     if "--fenced" in args or not args:
         usage()
-    fenced_agent = require_fenced_seat(ROOT, "rt-ack") if fenced else ""
+    return args, fenced
+
+
+def _main(args, fenced_agent):
+    global MAILBOX
+
     refs = [ref.strip() for ref in args[0].split(",") if ref.strip()]
     if not refs:
         usage()
@@ -189,8 +194,14 @@ def _main_locked():
             print(proc.stderr.strip(), file=sys.stderr)
         output = proc.stdout.strip()
         try:
-            for ref in group_refs:
-                archive_inbound(ref, inferred_sender)
+            # rt-say owns its shared layout section. Re-resolve under a fresh
+            # section for the archive so an exclusive migration may cut over
+            # between delivery and archival without either operation retaining
+            # a stale physical mailbox path.
+            with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
+                MAILBOX = mailbox
+                for ref in group_refs:
+                    archive_inbound(ref, inferred_sender)
         except OSError as error:
             for committed_output in outputs:
                 if committed_output:
@@ -207,11 +218,11 @@ def _main_locked():
 
 
 def main():
-    global MAILBOX
-
-    with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
-        MAILBOX = mailbox
-        output = _main_locked()
+    args, fenced = parse_args()
+    # Runtime lease locks are deliberately acquired before any layout lock.
+    # This keeps the global lock order acyclic during central-mail migration.
+    fenced_agent = require_fenced_seat(ROOT, "rt-ack") if fenced else ""
+    output = _main(args, fenced_agent)
     if output:
         print(output)
 

@@ -514,7 +514,43 @@ def steer_prefix(target, status, submit_cfg):
     return (submit_cfg.get(target) or {}).get("busy") == "steer" and status != "idle"
 
 
-def _main_locked():
+def _prepare_legacy_context(args):
+    """Resolve every child operation that may refresh runtime before locking."""
+
+    global LEGACY_OPERATION_ACTIVE
+
+    if "--legacy-nudge-only" not in args:
+        return None
+    reject_unsupported_message_options(args)
+    if args.count("--fenced") > 1:
+        print("rt-say: --fenced may be supplied only once", file=sys.stderr)
+        raise SystemExit(2)
+    if "--no-nudge" in args:
+        print(
+            "rt-say: --no-nudge and --legacy-nudge-only are mutually exclusive",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    positional = [
+        arg
+        for arg in args
+        if arg not in {"--verbose", "--fenced", "--legacy-nudge-only"}
+    ]
+    if len(positional) < 2:
+        usage()
+
+    # From this point the caller explicitly requested an operational legacy
+    # action, so preserve its uniform exit-3 failure contract.
+    LEGACY_OPERATION_ACTIVE = True
+    target = positional[0].lower()
+    runtime = read_runtime()
+    route = parse_resolve(target)
+    runtime = read_runtime()
+    guard_route_in_runtime(runtime, route)
+    return {"runtime": runtime, "route": route}
+
+
+def _main_locked(fenced_agent, legacy_context):
     global LEGACY_OPERATION_ACTIVE
 
     args = sys.argv[1:]
@@ -551,7 +587,6 @@ def _main_locked():
     kind = args[1]
     body_arg = " ".join(args[2:])
     validate_mail_kind(kind)
-    fenced_agent = require_fenced_seat(ROOT, "rt-say") if fenced else ""
     ack_mode = os.environ.get("RT_ACK_MODE") == "1"
     if kind == "sync-ack" and not ack_mode:
         raise SystemExit("rt-say: sync-ack is reserved for rt-ack; use rt-ack <msg_id>[,<msg_id>...] [body]")
@@ -581,7 +616,7 @@ def _main_locked():
         # identical to the normal maildir path.
         sender = fenced_agent or explicit_sender or infer_sender_from_harness_env(ROOT)
     else:
-        runtime = read_runtime()
+        runtime = legacy_context["runtime"]
         # Preserve WP1 caller authority: a live cmux caller wins over all
         # inherited environment. The app-server fallback is consulted only
         # when neither the caller nor explicit RT_FROM identifies a sender.
@@ -652,12 +687,8 @@ def _main_locked():
 
     # Everything below is the explicit, keyboard-only legacy path. It never
     # publishes maildir state; failures are therefore independent of delivery.
-    runtime = read_runtime()
-    route = parse_resolve(target)
-    # Re-read runtime AFTER resolve — rt-resolve may have refreshed the map.
-    # All guards must run against this single post-resolve snapshot.
-    runtime = read_runtime()
-    guard_route_in_runtime(runtime, route)
+    runtime = legacy_context["runtime"]
+    route = legacy_context["route"]
     resolved_target_agent = route.get("agent", target)
     if resolved_target_agent != target_agent:
         raise SystemExit(
@@ -760,12 +791,28 @@ def _main_locked():
 def main():
     global LOCK_DIR, MSG_DIR, INBOX_DIR, LEDGER_LOCK
 
+    args = sys.argv[1:]
+    if "-h" in args or "--help" in args:
+        print_help()
+        return
+    fenced_count = args.count("--fenced")
+    if fenced_count > 1:
+        print("rt-say: --fenced may be supplied only once", file=sys.stderr)
+        raise SystemExit(2)
+    fenced = fenced_count == 1
+    if fenced and "--no-nudge" not in args:
+        print("rt-say: --fenced requires --no-nudge", file=sys.stderr)
+        raise SystemExit(2)
+    # Fence validation uses host-runtime locks. Complete it before taking the
+    # mailbox layout lock so migration never waits on the inverse order.
+    fenced_agent = require_fenced_seat(ROOT, "rt-say") if fenced else ""
+    legacy_context = _prepare_legacy_context(args)
     with locked_project_mailbox(ROOT, tool="rt-say") as mailbox:
         LOCK_DIR = mailbox.locks_dir
         MSG_DIR = mailbox.messages_dir
         INBOX_DIR = mailbox.inbox_dir
         LEDGER_LOCK = LOCK_DIR / "ledger.lock"
-        output = _main_locked()
+        output = _main_locked(fenced_agent, legacy_context)
     if output:
         print(output)
 

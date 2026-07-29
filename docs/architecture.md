@@ -122,9 +122,21 @@ Every mailbox reader or writer acquires the UUID-keyed shared layout lock
 before resolving the registry pointer and holds it through its last mailbox
 I/O. Migration takes the matching exclusive lock. Lock files are persistent
 private coordination in `~/.roundtable/layout-locks/`, not removable PID or
-staleness records. Long-running watchers take short shared sections per scan
-and sleep unlocked; adapter prompts never retain a physical mailbox path as a
-capability.
+staleness records. Each UUID also has a persistent private
+`<uuid>.writer.lock` admission gate: every entrant briefly takes it
+exclusively before the resource lock, readers release it after acquiring
+`LOCK_SH`, and a writer retains it while waiting for and holding `LOCK_EX`.
+That turnstile prevents later readers from overtaking a queued migration.
+Both acquisitions share one monotonic timeout. Long-running watchers take
+short shared sections per scan and sleep unlocked; adapter prompts never
+retain a physical mailbox path as a capability.
+
+Fenced host-runtime validation completes before a mailbox layout section.
+Within a layout section the order is layout admission, layout resource,
+bounded registry mutation when required, then mailbox send/ledger locks.
+`rt-ack` uses separate shared sections for delivery and archive, re-resolving
+between them, so an exclusive cutover can safely occur at that boundary
+without a nested `rt-say` lock.
 
 The lock threat model treats every process running as the Roundtable owning
 UID as one integrity domain. Private permissions, no-follow opens, and inode

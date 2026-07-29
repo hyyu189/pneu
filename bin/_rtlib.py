@@ -32,6 +32,7 @@ ORPHAN_WARNING_PREFIX = "orphan: "
 ROW_RUNTIME_WARNING_PREFIX = "row-runtime: "
 LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 LAYOUT_LOCK_POLL_SECONDS = 0.05
+REGISTRY_LOCK_TIMEOUT_SECONDS = 10.0
 GIT_ROUTING_ENVIRONMENT = frozenset(
     {
         "GIT_DIR",
@@ -75,6 +76,57 @@ class ProjectRegistryError(ValueError):
 
 class ProjectLayoutLockTimeout(ProjectRegistryError):
     """A healthy layout transition did not quiesce before the caller's bound."""
+
+
+class ProjectRegistryLockTimeout(ProjectRegistryError):
+    """A registry writer did not quiesce before the caller's bound."""
+
+
+def _validated_lock_timeout(value, label):
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProjectRegistryError(
+            f"{label} must be a finite non-negative number or None"
+        )
+    try:
+        timeout = float(value)
+    except OverflowError:
+        raise ProjectRegistryError(
+            f"{label} must be a finite non-negative number or None"
+        ) from None
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ProjectRegistryError(
+            f"{label} must be a finite non-negative number or None"
+        )
+    return timeout
+
+
+def _acquire_flock_before(
+    descriptor,
+    operation,
+    *,
+    deadline,
+    timeout_error,
+    timeout_message,
+):
+    """Acquire one advisory lock without exceeding an absolute deadline."""
+
+    while True:
+        try:
+            fcntl.flock(descriptor, operation | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise timeout_error(timeout_message) from None
+            remaining = (
+                LAYOUT_LOCK_POLL_SECONDS
+                if deadline is None
+                else max(0.0, deadline - time.monotonic())
+            )
+            time.sleep(min(LAYOUT_LOCK_POLL_SECONDS, remaining))
+        except InterruptedError:
+            continue
 
 
 def _project_identity_for_layout_lock(project, registry):
@@ -170,14 +222,58 @@ def _verify_layout_lock_directory(parent_fd, lock_dir_fd, lock_dir):
         )
 
 
+def _open_private_lock_file(lock_dir_fd, lock_path):
+    """Open one persistent private lock entry without following substitutions."""
+
+    flags = (
+        os.O_RDWR
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    created = False
+    try:
+        descriptor = os.open(
+            lock_path.name,
+            flags | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=lock_dir_fd,
+        )
+        created = True
+        os.fchmod(descriptor, 0o600)
+    except FileExistsError:
+        try:
+            descriptor = os.open(
+                lock_path.name,
+                flags,
+                dir_fd=lock_dir_fd,
+            )
+        except OSError as error:
+            raise ProjectRegistryError(
+                f"cannot open layout lock {lock_path}: {error}"
+            ) from error
+    except OSError as error:
+        raise ProjectRegistryError(
+            f"cannot create layout lock {lock_path}: {error}"
+        ) from error
+    try:
+        _verify_layout_lock_entry(lock_dir_fd, lock_path, descriptor)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor, created
+
+
 def _open_layout_lock(registry, project_uuid):
-    """Open one persistent UUID lock through held, validated directories."""
+    """Open one UUID lock plus its writer turnstile through held directories."""
 
     parent_fd = _open_registry_parent(registry)
     lock_dir_fd = None
+    gate_descriptor = None
     descriptor = None
     lock_dir = registry.parent / "layout-locks"
     lock_path = lock_dir / f"{project_uuid}.lock"
+    gate_path = lock_dir / f"{project_uuid}.writer.lock"
     directory_created = False
     try:
         try:
@@ -216,44 +312,29 @@ def _open_layout_lock(registry, project_uuid):
         if directory_created:
             os.fsync(parent_fd)
 
-        flags = (
-            os.O_RDWR
-            | getattr(os, "O_CLOEXEC", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-            | getattr(os, "O_NONBLOCK", 0)
+        gate_descriptor, gate_created = _open_private_lock_file(
+            lock_dir_fd,
+            gate_path,
         )
-        file_created = False
-        try:
-            descriptor = os.open(
-                lock_path.name,
-                flags | os.O_CREAT | os.O_EXCL,
-                0o600,
-                dir_fd=lock_dir_fd,
-            )
-            file_created = True
-            os.fchmod(descriptor, 0o600)
-        except FileExistsError:
-            try:
-                descriptor = os.open(
-                    lock_path.name,
-                    flags,
-                    dir_fd=lock_dir_fd,
-                )
-            except OSError as error:
-                raise ProjectRegistryError(
-                    f"cannot open layout lock {lock_path}: {error}"
-                ) from error
-        except OSError as error:
-            raise ProjectRegistryError(
-                f"cannot create layout lock {lock_path}: {error}"
-            ) from error
-        _verify_layout_lock_entry(lock_dir_fd, lock_path, descriptor)
-        if file_created:
+        descriptor, file_created = _open_private_lock_file(
+            lock_dir_fd,
+            lock_path,
+        )
+        if gate_created or file_created:
             os.fsync(lock_dir_fd)
-        return parent_fd, lock_dir_fd, descriptor, lock_path
+        return (
+            parent_fd,
+            lock_dir_fd,
+            gate_descriptor,
+            descriptor,
+            gate_path,
+            lock_path,
+        )
     except Exception:
         if descriptor is not None:
             os.close(descriptor)
+        if gate_descriptor is not None:
+            os.close(gate_descriptor)
         if lock_dir_fd is not None:
             os.close(lock_dir_fd)
         os.close(parent_fd)
@@ -275,49 +356,50 @@ class _ProjectMailboxLock:
             raise ProjectRegistryError(
                 "layout lock exclusive flag must be a boolean"
             )
-        if timeout is not None:
-            if isinstance(timeout, bool) or not isinstance(
-                timeout, (int, float)
-            ):
-                raise ProjectRegistryError(
-                    "layout lock timeout must be a finite non-negative "
-                    "number or None"
-                )
-            try:
-                timeout = float(timeout)
-            except OverflowError:
-                raise ProjectRegistryError(
-                    "layout lock timeout must be a finite non-negative "
-                    "number or None"
-                ) from None
-            if not math.isfinite(timeout) or timeout < 0:
-                raise ProjectRegistryError(
-                    "layout lock timeout must be a finite non-negative "
-                    "number or None"
-                )
+        timeout = _validated_lock_timeout(timeout, "layout lock timeout")
         self.project = project
         self.registry = _registry_path(registry_path)
         self.exclusive = exclusive
         self.timeout = timeout
         self._parent_fd = None
         self._lock_dir_fd = None
+        self._gate_descriptor = None
         self._descriptor = None
+        self._gate_path = None
         self._lock_path = None
+        self._gate_held = False
         self._entered = False
+
+    @staticmethod
+    def _unlock_descriptor(descriptor):
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except OSError:
+            # Closing the descriptor is the authoritative release.
+            pass
+
+    def _release_gate(self):
+        if self._gate_descriptor is not None and self._gate_held:
+            self._unlock_descriptor(self._gate_descriptor)
+            self._gate_held = False
 
     def _close(self):
         descriptor = self._descriptor
         self._descriptor = None
         if descriptor is not None:
             try:
-                fcntl.flock(descriptor, fcntl.LOCK_UN)
-            except OSError:
-                # Closing the descriptor is the authoritative release. Do not
-                # strand the held directory descriptors if an explicit unlock
-                # is interrupted or rejected.
-                pass
+                self._unlock_descriptor(descriptor)
             finally:
                 os.close(descriptor)
+        gate_descriptor = self._gate_descriptor
+        if gate_descriptor is not None:
+            try:
+                if self._gate_held:
+                    self._unlock_descriptor(gate_descriptor)
+                    self._gate_held = False
+            finally:
+                os.close(gate_descriptor)
+        self._gate_descriptor = None
         if self._lock_dir_fd is not None:
             os.close(self._lock_dir_fd)
             self._lock_dir_fd = None
@@ -336,41 +418,52 @@ class _ProjectMailboxLock:
         (
             self._parent_fd,
             self._lock_dir_fd,
+            self._gate_descriptor,
             self._descriptor,
+            self._gate_path,
             self._lock_path,
         ) = _open_layout_lock(self.registry, project_uuid)
-        operation = (
-            fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH
-        ) | fcntl.LOCK_NB
         deadline = (
             None
             if self.timeout is None
             else time.monotonic() + float(self.timeout)
         )
+
         try:
-            while True:
-                try:
-                    fcntl.flock(self._descriptor, operation)
-                    break
-                except BlockingIOError:
-                    if deadline is not None and time.monotonic() >= deadline:
-                        mode = "exclusive" if self.exclusive else "shared"
-                        raise ProjectLayoutLockTimeout(
-                            f"timed out waiting for {mode} layout lock "
-                            f"{self._lock_path}"
-                        ) from None
-                    remaining = (
-                        LAYOUT_LOCK_POLL_SECONDS
-                        if deadline is None
-                        else max(0.0, deadline - time.monotonic())
-                    )
-                    time.sleep(min(LAYOUT_LOCK_POLL_SECONDS, remaining))
-                except InterruptedError:
-                    continue
+            # Every entrant serializes briefly through the writer turnstile.
+            # An exclusive waiter keeps it while waiting for the resource lock,
+            # so later readers cannot repeatedly overtake that writer.
+            mode = "exclusive" if self.exclusive else "shared"
+            _acquire_flock_before(
+                self._gate_descriptor,
+                fcntl.LOCK_EX,
+                deadline=deadline,
+                timeout_error=ProjectLayoutLockTimeout,
+                timeout_message=(
+                    f"timed out waiting for {mode} layout lock "
+                    f"{self._lock_path}"
+                ),
+            )
+            self._gate_held = True
+            _acquire_flock_before(
+                self._descriptor,
+                fcntl.LOCK_EX if self.exclusive else fcntl.LOCK_SH,
+                deadline=deadline,
+                timeout_error=ProjectLayoutLockTimeout,
+                timeout_message=(
+                    f"timed out waiting for {mode} layout lock "
+                    f"{self._lock_path}"
+                ),
+            )
             _verify_layout_lock_entry(
                 self._lock_dir_fd,
                 self._lock_path,
                 self._descriptor,
+            )
+            _verify_layout_lock_entry(
+                self._lock_dir_fd,
+                self._gate_path,
+                self._gate_descriptor,
             )
             _verify_layout_lock_directory(
                 self._parent_fd,
@@ -387,8 +480,12 @@ class _ProjectMailboxLock:
                 self.registry.parent,
                 "registry parent",
             )
+            if not self.exclusive:
+                self._release_gate()
             mailbox = resolve_project_mailbox_checked(
-                root, registry_path=self.registry
+                root,
+                registry_path=self.registry,
+                reconcile=False,
             )
             if mailbox.project_uuid != project_uuid:
                 raise ProjectRegistryError(
@@ -1360,8 +1457,23 @@ def _write_projects_doc(
             pass
 
 
-def _update_project_registry(mutator, path=None, *, guard=None):
+def _update_project_registry(
+    mutator,
+    path=None,
+    *,
+    guard=None,
+    lock_timeout=REGISTRY_LOCK_TIMEOUT_SECONDS,
+):
     path = _registry_path(path)
+    lock_timeout = _validated_lock_timeout(
+        lock_timeout,
+        "registry lock timeout",
+    )
+    deadline = (
+        None
+        if lock_timeout is None
+        else time.monotonic() + lock_timeout
+    )
     parent_fd = _open_registry_parent(path)
     lock_path = path.with_name(f"{path.name}.lock")
     flags = (
@@ -1393,12 +1505,15 @@ def _update_project_registry(mutator, path=None, *, guard=None):
                 raise ProjectRegistryError(
                     f"invalid registry lock ownership/type/mode: {lock_path}"
                 )
-            try:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            except OSError as error:
-                raise ProjectRegistryError(
-                    f"cannot lock project registry {path}: {error}"
-                ) from error
+            _acquire_flock_before(
+                lock.fileno(),
+                fcntl.LOCK_EX,
+                deadline=deadline,
+                timeout_error=ProjectRegistryLockTimeout,
+                timeout_message=(
+                    f"timed out waiting for project registry lock {path}"
+                ),
+            )
             try:
                 document, source_payload = _read_projects_snapshot(
                     path, parent_fd=parent_fd
@@ -2667,7 +2782,12 @@ def _reindex_project_identity(root, project_uuid, path, *, guard=None):
     return _update_project_registry(reindex, path, guard=guard)
 
 
-def resolve_project_mailbox_checked(project, registry_path=None):
+def resolve_project_mailbox_checked(
+    project,
+    registry_path=None,
+    *,
+    reconcile=True,
+):
     """Resolve one exact registered project, preserving typed failures."""
 
     path = _registry_path(registry_path)
@@ -2720,7 +2840,7 @@ def resolve_project_mailbox_checked(project, registry_path=None):
                     "root": root,
                     "name": root.name,
                 }
-            else:
+            elif reconcile:
                 _reindex_project_identity(
                     root,
                     project_uuid,
@@ -2747,6 +2867,13 @@ def resolve_project_mailbox_checked(project, registry_path=None):
                         f"project identity {project_uuid} reconciliation "
                         "did not commit"
                     )
+            else:
+                entry = {
+                    **entry,
+                    "path": root,
+                    "root": root,
+                    "name": root.name,
+                }
         mailbox = mailbox_from_registry_entry(entry, path)
         guard()
         return mailbox

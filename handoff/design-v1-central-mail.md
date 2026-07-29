@@ -279,15 +279,26 @@ authoritative layout at all times and never a merge of two.
    from the pointer and never reads both.
 7. Only then does it install the human bookmark symlink.
 
-The layout lock is a persistent, host-private regular file at
+The layout resource lock is a persistent, host-private regular file at
 `~/.roundtable/layout-locks/<project-uuid>.lock`; it is never deleted or
-replaced as "stale". A consumer reads the worktree UUID witness first,
-acquires `LOCK_SH`, then resolves and revalidates the registry-selected layout
-while holding that lock. The lock remains held through the final mailbox
-read, write, rename, and fsync. Migration uses the same primitive with
-`LOCK_EX`. The order is layout lock(s), sorted by UUID when more than one is
-needed, then the registry lock, then mailbox send/ledger locks; an operation
-must never upgrade a held shared lock in place.
+replaced as "stale". A second persistent private
+`<project-uuid>.writer.lock` is its admission turnstile. Every entrant takes
+the turnstile exclusively before the resource. A consumer then acquires
+`LOCK_SH` and releases the turnstile immediately; migration keeps the
+turnstile while waiting for and holding resource `LOCK_EX`. Later readers
+therefore cannot repeatedly overtake a queued writer, and the two
+acquisitions consume one monotonic timeout.
+
+A consumer reads the worktree UUID witness first, acquires the layout pair,
+then resolves and revalidates the registry-selected layout while holding the
+resource lock. The resource lock remains held through the final mailbox read,
+write, rename, and fsync. Fenced runtime validation completes before layout
+admission and is never nested inside it. The order within a layout section is
+layout admission, layout resource, bounded registry mutation when required,
+then mailbox send/ledger locks; an operation must never upgrade a held shared
+lock in place. `rt-ack` deliberately completes its child delivery section,
+then re-resolves under a fresh shared section for archive, allowing a cutover
+between the two committed operations without retaining a stale path.
 
 All processes running as the owning UID are in the same integrity domain.
 Permissions, no-follow opens, and post-acquisition inode checks detect
@@ -299,9 +310,12 @@ trust anchor and is outside this daemon-free design.
 
 The current ten-second layout-lock acquisition timeout is deliberately
 fail-closed: a timed-out command performs no mailbox I/O and tells the caller
-to retry. It is only an acquisition bound, not an end-to-end lock-order
-deadline. Measurement and hardening of inner registry/runtime lock waits, plus
-writer-starvation behavior under sustained shared traffic, remain M3 work.
+to retry. It is an acquisition bound, not an end-to-end critical-section
+deadline. Registry writers also use a monotonic bounded acquisition instead
+of blocking indefinitely; runtime lease locks are acquired and released
+before layout admission. Filesystem calls and fsync are not asynchronously
+interrupted. Migration reports its measured exclusive hold duration rather
+than claiming a machine-independent critical-section bound.
 
 Long-running watchers release the shared lock before sleeping and re-resolve
 under a fresh short shared section on every scan. Hermes delegates its exact

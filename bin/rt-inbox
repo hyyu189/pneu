@@ -500,12 +500,8 @@ def render_text(records):
     )
 
 
-def _main_locked():
+def _main_locked(args, fenced_agent):
     notices = []
-    args = parse_args()
-    if args.archive_quiet_acks and not args.fenced:
-        raise SystemExit("rt-inbox: --archive-quiet-acks requires --fenced")
-    fenced_agent = require_fenced_seat(ROOT, "rt-inbox") if args.fenced else ""
     agent = (args.agent or fenced_agent or infer_agent()).lower()
     if fenced_agent and agent != fenced_agent:
         raise SystemExit(
@@ -559,10 +555,16 @@ def _main_locked():
 def main():
     global MSG_DIR, INBOX_DIR
 
+    args = parse_args()
+    if args.archive_quiet_acks and not args.fenced:
+        raise SystemExit("rt-inbox: --archive-quiet-acks requires --fenced")
+    # Fence validation uses the host-runtime state lock and must precede the
+    # mailbox layout lock in the global acquisition order.
+    fenced_agent = require_fenced_seat(ROOT, "rt-inbox") if args.fenced else ""
     with locked_project_mailbox(ROOT, tool="rt-inbox") as mailbox:
         MSG_DIR = mailbox.messages_dir
         INBOX_DIR = mailbox.inbox_dir
-        records, output_format, notices = _main_locked()
+        records, output_format, notices = _main_locked(args, fenced_agent)
     output = (
         json.dumps(records, ensure_ascii=False, indent=2)
         if output_format == "json"
