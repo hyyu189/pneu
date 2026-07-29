@@ -1,20 +1,16 @@
 # Roundtable Messaging v2
 
-Roundtable is a local coordination layer for coding agents. Messaging v2 uses
-durable per-project mailboxes as the delivery fact source and wakes supported
-harnesses through native mechanisms instead of injecting keystrokes.
+Roundtable coordinates the coding agents already running on your machine —
+Claude Code, Codex, Hermes — without a daemon, an account, or a network.
 
-> Build status: the source installer and deterministic offline release archive
-> pass automated clean-home install, setup, core smoke, and uninstall
-> tests. The result is a release candidate, not yet a public support claim: the
-> npm Codex cold start and the corrected launchd-to-socket-peer identity check
-> have passed on the development machine. The installed RC5 also passed the
-> SessionStart thread/lease identity and automatic-binding spike. An installed
-> RC7 Hermes TUI passed two sequential real wake/drain/reply generations on the
-> development host. The installed RC8 artifact then passed two sequential
-> zero-touch Claude wake/drain/reply generations, including Stop re-arm and
-> quiet-ack cleanup. Clean-account tests, the remaining credentialed harness
-> wake paths, and the mainstream terminal matrix remain promotion gates.
+A message is a file in the recipient's project mailbox. Writing that file *is*
+delivery, so sending works when nothing else is running, and an agent that is
+offline finds its mail when it comes back. Wake-up uses each harness's own
+lifecycle hooks rather than injected keystrokes, so it does not depend on which
+terminal you use.
+
+Validation status and the promotion gates that remain open are tracked in
+[Runtime compatibility and validation](docs/compatibility.md).
 
 ## Why it exists
 
@@ -32,47 +28,6 @@ and other normal terminal hosts use the same delivery and harness-adapter path.
 cmux adds optional workspace/topology features rather than a different class of
 transport.
 
-## Build Week scope
-
-The submitted Messaging v2 architecture and deliverable were built during the
-2026 OpenAI Build Week submission period, replacing an earlier keyboard-based
-prototype. The repository keeps the earlier baseline only where it is required
-to make the rewrite reviewable.
-
-The public, MIT-licensed cmux-centric v1 snapshot remains unchanged at
-[`hyyu189/h2o`](https://github.com/hyyu189/h2o), commit
-`50683056c896bdb1ae2f74f6ac0740106b43bd36`. It is predecessor evidence, not
-Build Week output and not the repository being released here.
-
-- [Development and attribution boundary](PROVENANCE.md)
-- [Contributor roles](CREDITS.md)
-- [Source commit ledger](docs/provenance/source-commits.tsv)
-- [Architecture and adapter boundaries](docs/architecture.md)
-- [Runtime compatibility and validation](docs/compatibility.md)
-- [Release artifact process](docs/release.md)
-
-Ocean directed the product. GPT-5.6 through Codex was the primary implementation
-environment. Fable 5 contributed specified early code, documentation,
-configuration, design, and review; those contributions are recorded
-commit-by-commit rather than described as GPT-5.6-only work.
-
-All productization work begun in this public repository is GPT-5.6/Codex-led.
-
-### How Codex accelerated the build
-
-Ocean set the product boundaries: durable maildir is the delivery fact source,
-native harness lifecycle hooks provide wake-up, cmux is optional, onboarding is
-project-first, and tmux, cross-host transport, and multi-auth switching stay
-outside the Build Week P0. GPT-5.6 in Codex turned those decisions into the
-Messaging v2 implementation and then drove the release loop: provenance-safe
-history replay, terminal-independent delivery, Codex daemon and wake identity
-checks, unified setup and launch UX, offline packaging, public-safety checks,
-and focused regressions for every live-cutover finding. This let the human lead
-make small architecture and UX decisions against running software while Codex
-implemented, tested, reviewed, and rebuilt the candidate in the same session.
-Historical Fable 5 and Hermes contributions remain attributed separately in
-[`PROVENANCE.md`](PROVENANCE.md) and [`CREDITS.md`](CREDITS.md).
-
 ## Current compatibility status
 
 | Surface | Status |
@@ -86,20 +41,20 @@ Historical Fable 5 and Hermes contributions remain attributed separately in
 | cmux | The same baseline plus optional project/workspace topology, diagnostics, and notifications |
 | tmux and cross-host SSH | Not yet supported |
 
-## Release target
+## What "done" means
 
-The Build Week P0 release is complete only when it provides:
+A release is complete only when it provides:
 
 - an idempotent user-level installer and precise uninstaller;
-- a five-minute judge path from a packaged release;
+- a five-minute path from a packaged release to a working install;
 - verified support for the current npm Codex and an honestly tested standalone
   path;
 - a terminal-emulator-independent end-to-end path across the mainstream
   terminal UX matrix;
 - accurate diagnostics, recovery, tests, and public-safety checks.
 
-Same-host tmux support is P1. Cross-host transport, Linux service management,
-and multi-auth switching are roadmap items.
+Same-host tmux support is next. Cross-host transport, Linux service
+management, and multi-auth switching are roadmap items.
 
 ## Install the release candidate
 
@@ -239,6 +194,41 @@ project-local mailbox unless an explicit runtime purge is requested.
 
 See [Installation and ownership](docs/install.md) for isolated preview paths,
 offline release mode, upgrade gates, and precise removal behavior.
+
+## History
+
+Roundtable has had three phases. Each replaced the previous one's central
+mechanism rather than extending it.
+
+**Phase one — cmux-era prototype.** The original system drove agents by
+injecting keystrokes into terminal panes, and depended on pane focus, keyboard
+timing, and a particular multiplexer. It remains public and unchanged as the
+MIT-licensed [`hyyu189/h2o`](https://github.com/hyyu189/h2o) at commit
+`50683056c896bdb1ae2f74f6ac0740106b43bd36`.
+
+**Phase two — Messaging v2.** Built during the 2026 OpenAI Build Week
+submission period, this replaced keyboard injection entirely: a durable
+per-project maildir became the delivery fact source, and wake-up moved to each
+harness's own lifecycle hooks. The delivery core stopped depending on any
+terminal emulator. That work was submitted as `v0.1.8` and is preserved
+unchanged.
+
+**Phase three — productization.** The current phase, in this repository: making
+the system dependable for people who did not build it. Central identity,
+cross-worktree addressing, and installation that does not require reading the
+source.
+
+Ocean directed the product throughout. GPT-5.6 through Codex was the primary
+implementation environment for phase two and continues to lead productization.
+Fable 5 contributed specified early code, documentation, configuration, design,
+and review. Those contributions are recorded commit by commit rather than
+described as any single model's work.
+
+- [Development and attribution boundary](PROVENANCE.md)
+- [Contributor roles](CREDITS.md)
+- [Source commit ledger](docs/provenance/source-commits.tsv)
+- [Architecture and adapter boundaries](docs/architecture.md)
+- [Release artifact process](docs/release.md)
 
 ## License
 
