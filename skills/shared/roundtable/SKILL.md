@@ -123,18 +123,24 @@ whenever you are awake for another reason.
 The qualified `agent@project` form resolves exactly one active project name
 inside the sender's revalidated derived group, then validates the agent against
 that target project's own `agents.yaml`. Duplicate names and stale group or
-identity claims fail closed. The envelope carries the origin project UUID;
-`rt-ack` uses that exact UUID rather than a mutable path or project name when
-returning its quiet confirmation.
+identity claims fail closed. Every newly emitted envelope carries the origin
+project UUID, including bare local sends and quiet acknowledgements; `rt-ack`
+uses that exact UUID rather than a mutable path or project name when returning
+its quiet confirmation.
 
 **Receiving (drain protocol)** — when woken by a tripwire/bridge or told the
 inbox has mail: run `rt-inbox -f json`, act on every non-ack message, then
 `rt-ack` the ids (comma-batch). A successful `rt-ack` sends the quiet
-confirmation and atomically archives those exact inbound files from `new/` to
-`cur/`; a failed acknowledgement leaves them in `new/`. Move any quiet
-`ack-*` files to `cur/` without acknowledging them; Claude's hook-provided
-fenced inbox command performs that quiet-ack drain itself. Hermes and Codex
-re-arm automatically after the triggered non-ack generation is archived.
+confirmation and archives those exact inbound files from `new/` to `cur/`.
+Comma-batches commit per origin group: a later group's failure leaves that
+group in `new/`, while earlier successful groups are already in `cur/` and an
+exact retry does not send their quiet receipts again. Receipt delivery and
+archival are separate commits; if archival fails after delivery, the command
+reports the committed acknowledgement and retrying that group can resend its
+receipt. Move any quiet `ack-*` files to `cur/` without acknowledging them;
+Claude's hook-provided fenced inbox command performs that quiet-ack drain
+itself. Hermes and Codex re-arm automatically after the triggered non-ack
+generation is archived.
 Claude's Stop hook normally re-arms automatically; never launch a second
 watcher from the model turn. One unchanged pending generation receives its
 initial wake and at most one Stop-hook retry, then pauses instead of looping.
@@ -150,6 +156,13 @@ raw id with `rt-ack` to archive it; `manual-move` means `rt-ack` cannot
 archive that file from this seat (wrong-mailbox recipient, unregistered or
 self sender, or not an ackable regular `.md` file), so have the human move
 the file out of `new/` — for example into `cur/` — instead.
+
+A valid UUID-aware message may also carry `problem` plus
+`remedy: "manual-move"` when its recorded origin is no longer registered,
+active/available, or its `agents.yaml` no longer resolves the recorded sender,
+or when distinct `new/` and `cur/` copies conflict. Act on any readable request
+first, then move the named file out of `new/`; retrying `rt-ack` cannot repair
+these classes.
 
 **Arming (Claude)** — the setup-owned SessionStart hook launches the first
 fenced inbox watcher for a Roundtable-launched session, and its Stop hook

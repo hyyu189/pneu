@@ -227,6 +227,11 @@ def validate_agent_component(value, label):
 def parse_target_address(value):
     """Return ``(agent, optional exact project name)``."""
 
+    if value.count("@") > 1:
+        raise SystemExit(
+            "rt-say: invalid project address: expected "
+            "<agent-or-instance>@<project-name>"
+        )
     agent, separator, project_name = value.partition("@")
     agent = agent.lower()
     if separator and (not agent or not project_name):
@@ -1239,6 +1244,8 @@ def main():
                 LOCK_DIR = origin_mailbox.locks_dir
                 MSG_DIR = origin_mailbox.messages_dir
                 INBOX_DIR = origin_mailbox.inbox_dir
+                LOCK_DIR.mkdir(exist_ok=True)
+                MSG_DIR.mkdir(exist_ok=True)
                 LEDGER_LOCK = LOCK_DIR / "ledger.lock"
                 append_ledger_after_delivery(sender, pending)
         except (Exception, SystemExit) as error:

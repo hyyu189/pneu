@@ -104,8 +104,10 @@ commit; an existing user-managed skills directory is preserved instead.
 `rt-say agent@project` uses one registry snapshot to pin the sender UUID and
 exactly one active target UUID. It rederives both live Git groups, checks the
 target's current basename, and only then reads the target worktree's own
-`agents.yaml`. The durable header records `origin=<sender-uuid>`; return
-receipts route by that UUID rather than repeating the mutable project name.
+`agents.yaml`. Every newly emitted durable header records
+`origin=<sender-uuid>`, including bare local sends and quiet
+acknowledgements; return receipts route by that UUID rather than repeating the
+mutable project name.
 
 ## P0 state placement and session ownership
 
@@ -143,11 +145,16 @@ bounded registry mutation when required, then mailbox send/ledger locks.
 For a sibling send, `rt-say` commits the target mail file under the target
 UUID's shared section, releases it, then records the best-effort outbound
 ledger event under the origin UUID in a fresh section. `rt-ack` first reads
-the exact inbound envelope under the receiver UUID, releases that section,
-delivers the quiet acknowledgement to the recorded origin UUID, and finally
-re-resolves the receiver UUID to archive. No operation nests two project
-layout locks, so opposite-direction sends cannot form a lock cycle and an
-exclusive cutover can safely occur at either boundary.
+the exact inbound envelope under the receiver UUID and releases that section.
+For each origin group in a comma-batch it delivers the quiet acknowledgement,
+then re-resolves the receiver UUID and archives that group before attempting
+the next one. A later group's failure therefore leaves that group in `new/`;
+the earlier groups' `cur/` files suppress duplicate receipts on an exact
+retry. Receipt delivery and archival are separate commits, so an archival
+failure after delivery is reported as committed and a retry can resend the
+current group's receipt. No operation nests two project layout locks, so
+opposite-direction sends cannot form a lock cycle and an exclusive cutover
+can safely occur at either boundary.
 
 Forward migration is a one-way copy transaction:
 local source → verified archival backup → durable registry-adjacent recovery
@@ -297,7 +304,7 @@ A terminal host is first-class when a clean installation can:
 1. launch each configured harness in its project with the correct identity;
 2. send and inspect durable mail while the recipient is offline;
 3. wake an online recipient through the harness adapter, not injected keys;
-4. acknowledge and atomically archive the message with `rt-ack`;
+4. acknowledge and durably archive the message with `rt-ack`;
 5. diagnose and recover the harness adapter without installing cmux.
 
 `roundtable-smoke` automates the core portion in an isolated environment with

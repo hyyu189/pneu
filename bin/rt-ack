@@ -122,8 +122,8 @@ def discover_inbound_recipient(mailbox, refs):
     return next(iter(recipients))
 
 
-def inbound_origin_uuid(mailbox, ref, original_from, original_to):
-    """Read one exact inbound envelope before choosing the ack destination."""
+def inbound_origin_route(mailbox, ref, original_from, original_to):
+    """Return the origin UUID and whether this ref still needs a receipt."""
 
     inbox = mailbox.inbox_dir / original_to
     new_dir = inbox / "new"
@@ -137,11 +137,12 @@ def inbound_origin_uuid(mailbox, ref, original_from, original_to):
                 f"rt-ack: maildir path is not a real directory: {directory}"
             )
 
-    paths = [
-        directory / f"{ref}.md"
+    paths_by_lifecycle = {
+        directory.name: directory / f"{ref}.md"
         for directory in (new_dir, cur_dir)
         if lstat_or_none(directory / f"{ref}.md") is not None
-    ]
+    }
+    paths = list(paths_by_lifecycle.values())
     if not paths:
         raise SystemExit(
             f"rt-ack: cannot determine origin for missing inbound ref: {ref}"
@@ -181,8 +182,9 @@ def inbound_origin_uuid(mailbox, ref, original_from, original_to):
     # exact filename's from/to tuple. Keep that local-only compatibility. Once
     # an origin UUID is present, every envelope identity must agree before it
     # can authorize a cross-project return route.
+    needs_receipt = "cur" not in paths_by_lifecycle
     if envelope is None or envelope.get("origin_uuid") is None:
-        return mailbox.project_uuid
+        return mailbox.project_uuid, needs_receipt
     if (
         envelope["msg_id"] != ref
         or envelope["from"] != original_from
@@ -191,7 +193,7 @@ def inbound_origin_uuid(mailbox, ref, original_from, original_to):
         raise SystemExit(
             f"rt-ack: UUID-aware envelope does not match inbound ref: {ref}"
         )
-    return envelope["origin_uuid"]
+    return envelope["origin_uuid"], needs_receipt
 
 
 def archive_inbound(ref, recipient):
@@ -252,6 +254,22 @@ def archive_inbound(ref, recipient):
 
     source.unlink()
     fsync_directory(new_dir)
+
+
+def archive_refs(refs, recipient, receiver_uuid):
+    """Archive one already-acknowledged group under a fresh receiver witness."""
+
+    global MAILBOX
+
+    with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
+        if mailbox.project_uuid != receiver_uuid:
+            raise OSError(
+                "receiver project identity changed before archival: "
+                f"expected {receiver_uuid}, resolved {mailbox.project_uuid}"
+            )
+        MAILBOX = mailbox
+        for ref in refs:
+            archive_inbound(ref, recipient)
 
 
 def parse_args():
@@ -345,7 +363,7 @@ def _main(args, fenced_agent):
                 (
                     ref,
                     original_from,
-                    inbound_origin_uuid(
+                    *inbound_origin_route(
                         inbound_mailbox,
                         ref,
                         original_from,
@@ -358,8 +376,22 @@ def _main(args, fenced_agent):
         raise SystemExit(f"rt-ack: failed to inspect inbound mail: {error}") from None
 
     groups = defaultdict(list)
-    for ref, original_from, origin_uuid in routed_refs:
-        groups[(origin_uuid, original_from)].append(ref)
+    already_acknowledged = []
+    for ref, original_from, origin_uuid, needs_receipt in routed_refs:
+        if needs_receipt:
+            groups[(origin_uuid, original_from)].append(ref)
+        else:
+            already_acknowledged.append(ref)
+
+    if already_acknowledged:
+        csv = ",".join(already_acknowledged)
+        try:
+            archive_refs(already_acknowledged, inferred_sender, receiver_uuid)
+        except (OSError, SystemExit) as error:
+            raise SystemExit(
+                "rt-ack: failed to finalize already acknowledged inbound mail "
+                f"for refs={csv}: {error}"
+            ) from None
 
     outputs = []
     delivered_groups = []
@@ -403,8 +435,8 @@ def _main(args, fenced_agent):
                     for ref in committed_group
                 )
                 print(
-                    "rt-ack: partial quiet acknowledgements delivered for "
-                    f"refs={delivered}; inbound mail remains in new/",
+                    "rt-ack: partial quiet acknowledgements delivered and "
+                    f"archived for refs={delivered}; retry will not redeliver them",
                     file=sys.stderr,
                 )
             raise SystemExit(f"rt-ack: failed to run rt-say: {error}") from None
@@ -417,8 +449,8 @@ def _main(args, fenced_agent):
                     for ref in committed_group
                 )
                 print(
-                    "rt-ack: partial quiet acknowledgements delivered for "
-                    f"refs={delivered}; inbound mail remains in new/",
+                    "rt-ack: partial quiet acknowledgements delivered and "
+                    f"archived for refs={delivered}; retry will not redeliver them",
                     file=sys.stderr,
                 )
             print(detail, file=sys.stderr)
@@ -427,32 +459,21 @@ def _main(args, fenced_agent):
             print(proc.stderr.strip(), file=sys.stderr)
         output = proc.stdout.strip()
         outputs.append(output)
+        csv = ",".join(group_refs)
+        try:
+            # Commit each origin group independently. A later group's failure
+            # leaves only that group in new/, so retrying the original batch
+            # cannot mint duplicate receipts for earlier successful groups.
+            archive_refs(group_refs, inferred_sender, receiver_uuid)
+        except (OSError, SystemExit) as error:
+            for committed_output in outputs:
+                if committed_output:
+                    print(committed_output)
+            raise SystemExit(
+                "rt-ack: acknowledgement delivered for "
+                f"refs={csv}, but failed to archive inbound mail: {error}"
+            ) from None
         delivered_groups.append(group_refs)
-
-    all_refs = [ref for group_refs in groups.values() for ref in group_refs]
-    all_refs_csv = ",".join(all_refs)
-    try:
-        # Every quiet acknowledgement must succeed before any inbound file
-        # leaves new/. Re-resolve under one fresh receiver layout section so a
-        # migration may cut over between delivery and archival without keeping
-        # a stale physical path.
-        with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
-            if mailbox.project_uuid != receiver_uuid:
-                raise OSError(
-                    "receiver project identity changed before archival: "
-                    f"expected {receiver_uuid}, resolved {mailbox.project_uuid}"
-                )
-            MAILBOX = mailbox
-            for ref in all_refs:
-                archive_inbound(ref, inferred_sender)
-    except (OSError, SystemExit) as error:
-        for committed_output in outputs:
-            if committed_output:
-                print(committed_output)
-        raise SystemExit(
-            "rt-ack: acknowledgement delivered for "
-            f"refs={all_refs_csv}, but failed to archive inbound mail: {error}"
-        ) from None
 
     return "\n".join(output for output in outputs if output)
 

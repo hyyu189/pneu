@@ -3,6 +3,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -189,6 +190,55 @@ def git_sibling_projects(tmp_path, first_name="backend", second_name="frontend")
             "-q",
             "-b",
             f"test-{second_name}-{time.time_ns()}",
+            str(second),
+        ],
+        cwd=first,
+        check=True,
+    )
+    second_state = write_project(second, registry=registry)
+    env = {
+        "RT_FROM": "codex",
+        "RT_PROJECTS_FILE": str(registry),
+    }
+    return first, first_state, second, second_state, registry, env
+
+
+def git_same_basename_sibling_projects(tmp_path):
+    registry = tmp_path / "projects.yaml"
+    first = tmp_path / "first-parent" / "shared"
+    first.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main"],
+        cwd=first,
+        check=True,
+    )
+    (first / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "add", "README.md"], cwd=first, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Roundtable Tests",
+            "-c",
+            "user.email=roundtable@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=first,
+        check=True,
+    )
+    first_state = write_project(first, registry=registry)
+    second = tmp_path / "second-parent" / "shared"
+    second.parent.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            f"same-basename-{time.time_ns()}",
             str(second),
         ],
         cwd=first,
@@ -1258,6 +1308,81 @@ def test_rt_say_cross_worktree_uses_target_config_and_origin_ledger(tmp_path):
     assert payload[0]["target_project_uuid"] == target_uuid
 
 
+def test_rt_say_cross_worktree_creates_fresh_origin_ledger_directories(
+    tmp_path,
+):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    (origin_state / "messages").rmdir()
+    (origin_state / "locks").rmdir()
+
+    sent = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "fresh origin ledger",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+    assert (
+        target_state / "inbox" / "claude" / "new" / f"{msg_id}.md"
+    ).is_file()
+    assert (origin_state / "locks").is_dir()
+    records = read_ledger(origin_state)
+    assert len(records) == 1
+    assert records[0]["msg_id"] == msg_id
+    assert "ledger update failed" not in sent.stderr
+
+
+@pytest.mark.parametrize(
+    "content",
+    (
+        "schema: roundtable.agents.v1\nagents:\n  claude: [\n",
+        "- schema\n- roundtable.agents.v1\n",
+    ),
+)
+def test_rt_say_cross_worktree_invalid_target_agents_doc_fails_cleanly(
+    tmp_path,
+    content,
+):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    config_path = target_state / "agents.yaml"
+    config_path.write_text(content)
+
+    sent = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "invalid target config",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode != 0
+    assert "invalid agents configuration for project" in sent.stderr
+    assert str(target) in sent.stderr
+    assert str(config_path) in sent.stderr
+    assert "Traceback" not in sent.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
 def test_rt_say_cross_worktree_base_aliases_use_concrete_instances(tmp_path):
     (
         origin,
@@ -1644,7 +1769,7 @@ def test_rt_ack_groups_same_named_senders_by_origin_uuid(tmp_path):
     )
 
 
-def test_rt_ack_multi_origin_failure_archives_none_and_reports_partial_ack(
+def test_rt_ack_multi_origin_failure_archives_successful_group_idempotently(
     tmp_path,
 ):
     (
@@ -1703,7 +1828,7 @@ def test_rt_ack_multi_origin_failure_archives_none_and_reports_partial_ack(
 
     assert ack.returncode != 0
     assert "partial quiet acknowledgements delivered" in ack.stderr
-    assert "inbound mail remains in new/" in ack.stderr
+    assert "retry will not redeliver them" in ack.stderr
     assert len(
         list((first_state / "inbox" / "codex" / "new").glob("ack-*.md"))
     ) == 1
@@ -1712,8 +1837,296 @@ def test_rt_ack_multi_origin_failure_archives_none_and_reports_partial_ack(
     ).exists()
     receiver_new = receiver_state / "inbox" / "codex" / "new"
     receiver_cur = receiver_state / "inbox" / "codex" / "cur"
-    assert all((receiver_new / f"{ref}.md").is_file() for ref in refs)
-    assert all(not (receiver_cur / f"{ref}.md").exists() for ref in refs)
+    assert not (receiver_new / f"{refs[0]}.md").exists()
+    assert (receiver_cur / f"{refs[0]}.md").is_file()
+    assert (receiver_new / f"{refs[1]}.md").is_file()
+    assert not (receiver_cur / f"{refs[1]}.md").exists()
+
+    retry = run_tool(
+        "rt-ack",
+        ",".join(refs),
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert retry.returncode != 0
+    assert len(
+        list((first_state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    ) == 1
+    assert (receiver_cur / f"{refs[0]}.md").is_file()
+    assert (receiver_new / f"{refs[1]}.md").is_file()
+
+
+@pytest.mark.parametrize(
+    ("failure", "problem_fragment"),
+    (
+        ("unregistered", "is not registered"),
+        ("tombstoned", "is tombstoned"),
+        ("undeclared-agent", "does not declare acknowledgement target 'codex'"),
+    ),
+)
+def test_rt_inbox_marks_dead_origin_mail_unackable(
+    tmp_path,
+    failure,
+    problem_fragment,
+):
+    (
+        origin,
+        origin_state,
+        receiver,
+        receiver_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "origin will become unackable",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+    source = receiver_state / "inbox" / "codex" / "new" / f"{ref}.md"
+
+    if failure == "unregistered":
+        origin_uuid = json.loads(
+            (origin_state / "project.json").read_text()
+        )["uuid"]
+
+        def remove_origin(document, _source_payload, _parent_fd):
+            document["projects"] = [
+                entry
+                for entry in document["projects"]
+                if entry.get("uuid") != origin_uuid
+            ]
+            return True
+
+        assert _rtlib._update_project_registry(remove_origin, registry)
+    elif failure == "tombstoned":
+        assert _rtlib.unregister_project(origin, path=registry)
+    else:
+        config_path = origin_state / "agents.yaml"
+        document = yaml.safe_load(config_path.read_text())
+        document["agents"].pop("codex")
+        config_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert problem_fragment in payload[0]["problem"]
+    assert payload[0]["remedy"] == "manual-move"
+    assert "unackable UUID-aware mail file(s)" in inbox.stderr
+    assert source.name in inbox.stderr
+
+    ack = run_tool(
+        "rt-ack",
+        ref,
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+    assert ack.returncode != 0
+    assert source.is_file()
+
+
+def test_rt_inbox_accepts_unique_base_alias_for_origin_ack_target(tmp_path):
+    (
+        origin,
+        origin_state,
+        receiver,
+        receiver_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "base alias remains resolvable",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+
+    config_path = origin_state / "agents.yaml"
+    document = yaml.safe_load(config_path.read_text())
+    document["agents"]["codex"]["instances"] = [{"id": "codex-review"}]
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert "problem" not in payload[0]
+    assert "unackable UUID-aware mail file(s)" not in inbox.stderr
+
+    ack = run_tool(
+        "rt-ack",
+        ref,
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+    assert ack.returncode == 0, ack.stderr
+    assert len(
+        list(
+            (
+                origin_state
+                / "inbox"
+                / "codex-review"
+                / "new"
+            ).glob("ack-*.md")
+        )
+    ) == 1
+
+
+def test_rt_inbox_unackable_marker_does_not_pollute_same_id_ledger_copy(
+    tmp_path,
+):
+    (
+        origin,
+        origin_state,
+        receiver,
+        receiver_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "maildir copy will become unackable",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+    origin_uuid = json.loads(
+        (origin_state / "project.json").read_text()
+    )["uuid"]
+
+    def remove_origin(document, _source_payload, _parent_fd):
+        document["projects"] = [
+            entry
+            for entry in document["projects"]
+            if entry.get("uuid") != origin_uuid
+        ]
+        return True
+
+    assert _rtlib._update_project_registry(remove_origin, registry)
+    (receiver_state / "messages" / "codex.jsonl").write_text(
+        json.dumps(
+            {
+                "msg_id": ref,
+                "ts": "2026-07-29T00:00:00.000Z",
+                "from": "codex",
+                "to": "codex",
+                "kind": "question",
+                "body": "independent ledger copy",
+                "lifecycle": "submitted",
+                "source": "rt-say",
+            }
+        )
+        + "\n"
+    )
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "--all",
+        "-f",
+        "json",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    copies = [
+        record
+        for record in json.loads(inbox.stdout)
+        if record["msg_id"] == ref
+    ]
+    assert len(copies) == 2
+    by_source = {
+        record["delivery_source"]: record
+        for record in copies
+    }
+    assert "is not registered" in by_source["maildir"]["problem"]
+    assert by_source["maildir"]["remedy"] == "manual-move"
+    assert "problem" not in by_source["ledger"]
+    assert "remedy" not in by_source["ledger"]
+
+
+def test_rt_inbox_marks_conflicting_uuid_aware_new_cur_copies_unackable(
+    tmp_path,
+):
+    (
+        origin,
+        _origin_state,
+        receiver,
+        receiver_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "conflicting archive copy",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+    source = receiver_state / "inbox" / "codex" / "new" / f"{ref}.md"
+    archive = receiver_state / "inbox" / "codex" / "cur" / f"{ref}.md"
+    archive.parent.mkdir(exist_ok=True)
+    archive.write_text(source.read_text() + "\nconflict")
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert "conflicting new/cur copies" in payload[0]["problem"]
+    assert payload[0]["remedy"] == "manual-move"
+    assert source.name in inbox.stderr
+
+    ack = run_tool(
+        "rt-ack",
+        ref,
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+    assert ack.returncode != 0
+    assert "conflicting new/cur copies" in ack.stderr
+    assert source.is_file()
+    assert archive.is_file()
 
 
 @pytest.mark.parametrize(
@@ -1916,6 +2329,52 @@ def test_cross_worktree_origin_cutover_can_follow_delivery_commit(tmp_path):
     assert "sent maildir-only" in stdout
     assert (central / "messages" / "codex.jsonl").is_file()
     assert not (origin_state / "messages" / "codex.jsonl").exists()
+
+
+def test_cross_worktree_inflight_ack_follows_origin_uuid_after_cutover(
+    tmp_path,
+):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        f"codex@{target.name}",
+        "question",
+        "sent before origin cutover",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+    inbound = target_state / "inbox" / "codex" / "new" / f"{ref}.md"
+    assert inbound.is_file()
+
+    central = flip_project_to_empty_central(origin, registry)
+    ack = run_tool(
+        "rt-ack",
+        ref,
+        "received after origin cutover",
+        cwd=target,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    assert not inbound.exists()
+    assert (
+        target_state / "inbox" / "codex" / "cur" / f"{ref}.md"
+    ).is_file()
+    central_quiet = list(
+        (central / "inbox" / "codex" / "new").glob("ack-*.md")
+    )
+    assert len(central_quiet) == 1
+    assert f"refs={ref}" in central_quiet[0].read_text()
+    assert not (origin_state / "inbox" / "codex").exists()
 
 
 def test_cross_worktree_send_reconciles_moved_origin_before_return_route(
@@ -2243,6 +2702,178 @@ def test_rt_say_cross_worktree_name_is_case_sensitive(tmp_path):
     assert len(read_ledger(origin_state)) == 1
 
 
+@pytest.mark.parametrize("address", ("@frontend", "claude@", "a@b@c"))
+def test_rt_say_rejects_malformed_project_address_edges(tmp_path, address):
+    (
+        origin,
+        origin_state,
+        _target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+
+    sent = run_tool(
+        "rt-say",
+        address,
+        "question",
+        "invalid address edge",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode != 0
+    assert "invalid project address" in sent.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_rt_say_folds_agent_case_but_keeps_project_name_exact(tmp_path):
+    (
+        origin,
+        _origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+
+    sent = run_tool(
+        "rt-say",
+        f"CLAUDE@{target.name}",
+        "question",
+        "agent case folds",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+    assert (
+        target_state / "inbox" / "claude" / "new" / f"{ref}.md"
+    ).is_file()
+
+
+def test_rt_say_named_address_excludes_sender_project_itself(tmp_path):
+    (
+        origin,
+        origin_state,
+        _target,
+        _target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+
+    sent = run_tool(
+        "rt-say",
+        f"claude@{origin.name}",
+        "question",
+        "qualified form is sibling-only",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode != 0
+    assert f"no active sibling project named {origin.name!r}" in sent.stderr
+    assert not (origin_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_rt_say_same_basename_address_selects_sibling_not_sender(tmp_path):
+    (
+        origin,
+        origin_state,
+        sibling,
+        sibling_state,
+        _registry,
+        env,
+    ) = git_same_basename_sibling_projects(tmp_path)
+
+    sent = run_tool(
+        "rt-say",
+        f"claude@{sibling.name}",
+        "question",
+        "same basename sibling",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+    assert (
+        sibling_state / "inbox" / "claude" / "new" / f"{ref}.md"
+    ).is_file()
+    assert not (origin_state / "inbox" / "claude").exists()
+
+
+def test_rt_say_non_git_group_of_one_refuses_every_named_address(tmp_path):
+    registry = tmp_path / "projects.yaml"
+    origin = tmp_path / "plain-origin"
+    target = tmp_path / "plain-target"
+    origin_state = write_project(origin, registry=registry)
+    target_state = write_project(target, registry=registry)
+    env = {
+        "RT_FROM": "codex",
+        "RT_PROJECTS_FILE": str(registry),
+    }
+
+    for project_name in (target.name, origin.name):
+        sent = run_tool(
+            "rt-say",
+            f"claude@{project_name}",
+            "question",
+            "non-git projects are groups of one",
+            cwd=origin,
+            env=env,
+        )
+
+        assert sent.returncode != 0
+        assert "no active sibling project" in sent.stderr
+    assert not (target_state / "inbox").exists()
+    assert not (origin_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_resolve_project_address_identity_mismatch_echoes_typed_name(
+    tmp_path,
+    monkeypatch,
+):
+    (
+        origin,
+        _origin_state,
+        target,
+        target_state,
+        registry,
+        _env,
+    ) = git_sibling_projects(tmp_path)
+    target_identity = target_state / "project.json"
+    target_uuid = json.loads(target_identity.read_text())["uuid"]
+    real_verify = _rtlib._verify_registered_entry_identity
+
+    def replace_identity_before_verify(entry, **kwargs):
+        if entry["uuid"] == target_uuid:
+            document = json.loads(target_identity.read_text())
+            document["uuid"] = "00000000-0000-4000-8000-000000000099"
+            target_identity.write_text(json.dumps(document) + "\n")
+        return real_verify(entry, **kwargs)
+
+    monkeypatch.setattr(
+        _rtlib,
+        "_verify_registered_entry_identity",
+        replace_identity_before_verify,
+    )
+
+    with pytest.raises(_rtlib.ProjectRegistryError) as raised:
+        _rtlib.resolve_project_address(
+            origin,
+            target_name=target.name,
+            registry_path=registry,
+        )
+
+    assert f"project name {target.name!r}" in str(raised.value)
+    assert "is not witnessed at" in str(raised.value)
+
+
 def test_rt_say_rejects_scoped_legacy_and_untrusted_uuid_environment(tmp_path):
     project, state, env, trace_dir = say_project(tmp_path)
     project_uuid = json.loads((state / "project.json").read_text())["uuid"]
@@ -2346,6 +2977,19 @@ def test_rt_say_ack_uuid_route_renders_only_validated_refs(tmp_path):
     origin_uuid = json.loads((origin_state / "project.json").read_text())[
         "uuid"
     ]
+    literal_uuid_ack = run_tool(
+        "rt-say",
+        f"codex@{origin_uuid}",
+        "sync-ack",
+        f"refs={real_ref}",
+        cwd=receiver,
+        env={
+            **env,
+            "RT_ACK_MODE": "1",
+            "RT_ACK_REFS": real_ref,
+            "RT_ACK_BODY": "",
+        },
+    )
     named_ack = run_tool(
         "rt-say",
         f"codex@{origin.name}",
@@ -2360,6 +3004,8 @@ def test_rt_say_ack_uuid_route_renders_only_validated_refs(tmp_path):
         },
     )
 
+    assert literal_uuid_ack.returncode != 0
+    assert "requires rt-ack's UUID target" in literal_uuid_ack.stderr
     assert named_ack.returncode != 0
     assert "requires rt-ack's UUID target" in named_ack.stderr
     assert not (origin_state / "inbox" / "codex").exists()
@@ -3312,6 +3958,36 @@ def test_rt_inbox_foreign_ledger_cannot_fold_or_ack_local_message(tmp_path):
     by_id = {record["msg_id"]: record for record in payload}
     assert by_id[msg_id]["body"] == "local record must remain visible"
     assert by_id[mail_id]["body"] == "valid maildir remains readable"
+
+
+def test_pre_m4_reader_characterizes_origin_envelope_as_invalid_header():
+    # Exact parser contract from b45307d6f107e1e37aa969386d59ad63b1bac30d
+    # (4a23244^). That reader required the closing bracket immediately after
+    # id=, so every M4 writer envelope takes its malformed/invalid-header path.
+    pre_m4_header = re.compile(
+        r"^\[(?P<from>[a-z0-9#_-]+)→(?P<to>[a-z0-9#_-]+) "
+        r"(?P<kind>[^\s\]]+) id=(?P<msg_id>[^\s\]]+)\]"
+        r"(?: (?P<body>.*))?$",
+        re.IGNORECASE | re.DOTALL,
+    )
+    ref = "20260729T010000Z-codex-to-claude-12345"
+    origin_uuid = "00000000-0000-4000-8000-000000000123"
+    envelope = _rtlib.format_mail_envelope(
+        "codex",
+        "claude",
+        "question",
+        ref,
+        "wire format changed",
+        origin_uuid=origin_uuid,
+    )
+
+    match = pre_m4_header.fullmatch(envelope)
+    legacy_problem = "invalid mail header" if match is None else None
+
+    assert legacy_problem == "invalid mail header"
+    parsed = _rtlib.parse_mail_envelope(envelope)
+    assert parsed is not None
+    assert parsed["origin_uuid"] == origin_uuid
 
 
 def test_rt_inbox_surfaces_malformed_mail_with_specimen_header(tmp_path):

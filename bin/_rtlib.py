@@ -1528,7 +1528,7 @@ def _entry_with_revalidated_group(entry, root):
     return effective
 
 
-def _verify_registered_entry_identity(entry):
+def _verify_registered_entry_identity(entry, *, target_name=None):
     """Prove that one registry row still owns its recorded live root."""
 
     root = Path(entry["root"])
@@ -1536,8 +1536,13 @@ def _verify_registered_entry_identity(entry):
     try:
         observed = _read_project_identity_at(root, state_fd)
         if observed != entry["uuid"]:
+            target = (
+                f"project name {target_name!r}: "
+                if target_name is not None
+                else ""
+            )
             raise ProjectRegistryError(
-                f"project registry entry {entry['uuid']} is not witnessed at "
+                f"{target}project registry entry {entry['uuid']} is not witnessed at "
                 f"{root}"
             )
         _verify_project_guard(root, root_fd, state_fd)
@@ -1669,6 +1674,7 @@ def resolve_project_address(
             raw
             for raw in (document.get("projects") or [])
             if isinstance(raw, dict)
+            and raw.get("uuid") != origin_uuid
             and raw.get("name") == target_name
             and raw.get("status") != "tombstoned"
         ]
@@ -1676,6 +1682,7 @@ def resolve_project_address(
             entry
             for entry in entries
             if entry.get("status") == "active"
+            and entry.get("uuid") != origin_uuid
             and entry.get("name") == target_name
         ]
         candidate_uuids = {entry["uuid"] for entry in candidates}
@@ -1773,7 +1780,10 @@ def resolve_project_address(
                 f"{candidate_label} is not available at "
                 f"{candidate['root']}"
             )
-        target_root = _verify_registered_entry_identity(candidate)
+        target_root = _verify_registered_entry_identity(
+            candidate,
+            target_name=target_name,
+        )
         if target_name is not None and target_root.name != target_name:
             raise ProjectRegistryError(
                 f"project name {target_name!r} is stale for registered root "
@@ -3656,8 +3666,23 @@ def find_project_root(tool, *, allow_cmux_workspace=False):
 def load_agents_doc(root, tool):
     if yaml is None:
         raise SystemExit(f"{tool}: PyYAML is required to read .roundtable/agents.yaml")
-    with project_config_path(root).open() as fh:
-        return yaml.safe_load(fh) or {}
+    config_path = project_config_path(root)
+    try:
+        with config_path.open() as fh:
+            document = yaml.safe_load(fh)
+    except yaml.YAMLError as error:
+        raise SystemExit(
+            f"{tool}: invalid agents configuration for project {root}: "
+            f"cannot parse {config_path}: {error}"
+        ) from None
+    if document is None:
+        return {}
+    if not isinstance(document, dict):
+        raise SystemExit(
+            f"{tool}: invalid agents configuration for project {root}: "
+            f"{config_path} must contain a mapping"
+        )
+    return document
 
 
 def agent_names(agents_doc):

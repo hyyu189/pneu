@@ -11,9 +11,11 @@ from pathlib import Path
 from _rtlib import (
     LIFECYCLE_ORDINAL,
     MailEnvelopeError,
+    ProjectRegistryError,
     current_records,
     find_project_root,
     load_agents_doc,
+    load_project_registry_strict,
     locked_project_mailbox,
     parse_mail_envelope,
     parse_message_id,
@@ -449,6 +451,7 @@ def visible_records(agent, include_all):
         record["delivery_source"] = "maildir"
         record["delivery_sources"] = ["maildir"]
         records.append(record)
+    annotate_unackable(records)
 
     records.sort(
         key=lambda item: (
@@ -463,10 +466,13 @@ def visible_records(agent, include_all):
             continue
         if record.get("kind") == "sync-ack":
             continue
-        if record.get("schema") == MALFORMED_SCHEMA:
-            # A malformed record is a live file in new/; it keeps waking this
-            # seat, so it stays listed as long as the file exists regardless
-            # of acknowledgement bookkeeping that its raw id may collide with.
+        if record.get("schema") == MALFORMED_SCHEMA or (
+            record.get("lifecycle") == "new"
+            and record.get("remedy") == "manual-move"
+        ):
+            # A malformed or permanently unackable record is a live file in
+            # new/; it keeps waking this seat, so it stays listed as long as the
+            # file exists regardless of acknowledgement bookkeeping.
             visible.append(record)
             continue
         if not include_all and record.get("msg_id") in acked_refs:
@@ -477,7 +483,7 @@ def visible_records(agent, include_all):
     return visible
 
 
-def resolvable_instances():
+def resolvable_instances(root=ROOT):
     """Mirror rt-say's configured-target resolution for remediation advice.
 
     An instance id resolves to itself; a base name resolves only when it has
@@ -486,7 +492,7 @@ def resolvable_instances():
     to the manual move that always works.
     """
     try:
-        document = load_agents_doc(ROOT, "rt-inbox")
+        document = load_agents_doc(root, "rt-inbox")
         agents = document.get("agents") or {}
     except (Exception, SystemExit):
         return {}
@@ -535,6 +541,94 @@ def resolvable_instances():
                 instance_names[0] if len(instance_names) == 1 else None
             )
     return resolved
+
+
+def unackable_problem(record, registry_entries, instance_cache):
+    """Explain UUID-aware mail that rt-ack cannot ever complete as-is."""
+
+    if (
+        record.get("schema") == MALFORMED_SCHEMA
+        or record.get("lifecycle") != "new"
+        or record.get("origin_uuid") is None
+        or not record.get("maildir_path")
+    ):
+        return None
+
+    path = Path(record["maildir_path"])
+    archive = path.parent.parent / "cur" / path.name
+    try:
+        source_info = path.lstat()
+    except OSError:
+        return None
+    try:
+        archive_info = archive.lstat()
+    except FileNotFoundError:
+        archive_info = None
+    except OSError:
+        archive_info = None
+    if archive_info is not None and (
+        source_info.st_dev,
+        source_info.st_ino,
+    ) != (
+        archive_info.st_dev,
+        archive_info.st_ino,
+    ):
+        return f"conflicting new/cur copies for inbound ref {record['msg_id']}"
+
+    origin_uuid = record["origin_uuid"]
+    matches = [
+        entry for entry in registry_entries if entry.get("uuid") == origin_uuid
+    ]
+    if not matches:
+        return f"origin project {origin_uuid} is not registered"
+    if len(matches) != 1:
+        return (
+            f"origin project {origin_uuid} has {len(matches)} registry entries"
+        )
+    origin = matches[0]
+    if origin.get("status") != "active":
+        return f"origin project {origin_uuid} is tombstoned"
+    if not origin.get("available"):
+        return (
+            f"origin project {origin_uuid} is unavailable at {origin['root']}"
+        )
+
+    root = origin["root"]
+    if root not in instance_cache:
+        instance_cache[root] = resolvable_instances(root)
+    sender = record.get("from")
+    if instance_cache[root].get(sender) is None:
+        return (
+            f"origin project {origin_uuid} at {root} does not declare "
+            f"acknowledgement target {sender!r}"
+        )
+    return None
+
+
+def annotate_unackable(records):
+    """Attach executable cleanup guidance to permanently unackable mail."""
+
+    try:
+        registry_entries, _warnings = load_project_registry_strict()
+    except ProjectRegistryError:
+        # A globally invalid registry is repairable host state, not proof that
+        # any one message is permanently unackable.
+        return []
+
+    instance_cache = {}
+    problems = []
+    for record in records:
+        problem = unackable_problem(
+            record,
+            registry_entries,
+            instance_cache,
+        )
+        if problem is None:
+            continue
+        record["problem"] = problem
+        record["remedy"] = "manual-move"
+        problems.append((Path(record["maildir_path"]).name, problem))
+    return sorted(problems)
 
 
 def malformed_remedy(record, resolved):
@@ -607,6 +701,14 @@ def _main_locked(args, fenced_agent):
                 f"rt-inbox: archived {archived} quiet acknowledgement(s)",
             )
     records = visible_records(agent, args.all)
+    unackable_by_file = {
+        Path(record["maildir_path"]).name: record["problem"]
+        for record in records
+        if record.get("schema") != MALFORMED_SCHEMA
+        and record.get("remedy") == "manual-move"
+        and record.get("maildir_path")
+    }
+    unackable = sorted(unackable_by_file.items())
     malformed = [
         record for record in records if record.get("schema") == MALFORMED_SCHEMA
     ]
@@ -642,6 +744,16 @@ def _main_locked(args, fenced_agent):
                 + ", ".join(manual)
             )
         notices.append("; ".join(parts))
+    if unackable:
+        details = ", ".join(
+            f"{filename} ({problem})" for filename, problem in unackable
+        )
+        notices.append(
+            f"rt-inbox: {len(unackable)} unackable UUID-aware mail file(s) "
+            "remain in new/ and keep waking this seat; rt-ack cannot complete "
+            "them, so move each file out of new/ (for example into cur/) "
+            f"manually: {details}"
+        )
     return records, args.format, notices
 
 

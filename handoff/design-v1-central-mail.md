@@ -164,7 +164,7 @@ would be breaking. Unrelated projects can already talk today via an explicit
 ## 4. Addressing and the fence
 
 ```
-rt-say claude            ...    unchanged
+rt-say claude            ...    same local selection; M4 adds origin= on wire
 rt-say claude@frontend   ...    a sibling worktree in the same group
 ```
 

@@ -140,14 +140,26 @@ roundtable projects rollback ROOT --manifest PATH
                                   copy current central mail back to the project
 ```
 
-The bare `AGENT` form is unchanged. `AGENT@PROJECT` selects an exact
-registered sibling worktree name inside the sender's derived Git group; zero
-matches, duplicate names, stale registrations, and unrelated projects fail
-closed. The agent or instance is then validated against the target worktree's
-own `agents.yaml`. Every durable envelope records the sender project's stable
-UUID, so `rt-ack` returns its quiet confirmation to that UUID even after the
-origin path or registry name changes and the moved worktree's UUID witness has
-reconciled its registry entry.
+The bare `AGENT` syntax and its current-project target selection are unchanged;
+its durable wire bytes are not. Every newly emitted envelope, including bare
+local sends and quiet acknowledgements, records the sender project's stable
+UUID. `AGENT@PROJECT` selects an exact registered sibling worktree name inside
+the sender's derived Git group; zero matches, duplicate names, stale
+registrations, and unrelated projects fail closed. The agent or instance is
+then validated against the target worktree's own `agents.yaml`. `rt-ack`
+returns its quiet confirmation to the recorded UUID even after the origin path
+or registry name changes and the moved worktree's UUID witness has reconciled
+its registry entry.
+
+Comma-batched acknowledgements commit per origin project: each successfully
+confirmed origin group is archived before the next group is attempted.
+If a later origin group fails, an exact retry treats the earlier groups'
+`cur/` refs as already confirmed and does not mint their quiet receipts again.
+Receipt publication and archival are not one atomic transaction: an archival
+failure after delivery is reported as committed and retrying that current
+group can resend its receipt. `rt-inbox -f json` marks UUID-aware mail whose
+origin is dead or whose `new/` and `cur/` copies conflict with a `problem` and
+`remedy: "manual-move"`.
 
 Migration holds that project's exclusive layout lock through the verified
 copy and registry cutover. Its JSON result reports the durable recovery-record
