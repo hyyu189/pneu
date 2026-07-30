@@ -2,6 +2,23 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-07-29: Migration robustness frozen at the accepted state (Ocean).
+  Remaining `_rtmigrate.py` defects are parked, not fixed — even known
+  ones — unless they break one of the three load-bearing properties:
+  the exclusive layout lock against live writers, the verified
+  pre-cutover backup, or the atomic registry flip. Defects in those
+  three are reported to the product lead, still not unilaterally
+  expanded. Rationale: the heavy machinery (hold-projection admission,
+  budgets, dual-track recovery records) was sized for fleet scale, while
+  the non-empty live-mailbox migration cohort is exactly this team's own
+  machines; new users' mailboxes are empty and hit only the degenerate
+  path. Standing calibration going forward: a surface whose blast radius
+  is only ourselves needs the three properties above, not fleet-grade
+  admission machinery; the M2 scope displacement (addressing gave way to
+  layout serialization while §4 went unbuilt) is the recorded cost of
+  over-applying the bar. Backlog, not current work: post-v1-merge new
+  projects should mint the central layout directly at init so migrate
+  serves only legacy non-empty mailboxes.
 - 2026-07-23: Rename working name "Orca" rejected (Ocean). stablyai/orca —
   a YC-backed Electron ADE with an `orca` CLI and an orchestration
   subsystem adjacent to Roundtable's messaging layer — occupies the name
