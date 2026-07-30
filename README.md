@@ -131,13 +131,23 @@ The most common day-to-day commands are:
 roundtable                         project-first onboarding and launch
 roundtable setup                  read-only harness integration preview
 roundtable doctor                 diagnose setup, leases, and wake services
-rt-say AGENT KIND "MESSAGE"       deliver durable mail
+rt-say AGENT[@PROJECT] KIND "MESSAGE"
+                                  deliver durable local or sibling mail
 rt-inbox                          inspect waiting mail
 rt-ack ID                         acknowledge and archive a message
 roundtable projects migrate ROOT  move one local mailbox to central storage
 roundtable projects rollback ROOT --manifest PATH
                                   copy current central mail back to the project
 ```
+
+The bare `AGENT` form is unchanged. `AGENT@PROJECT` selects an exact
+registered sibling worktree name inside the sender's derived Git group; zero
+matches, duplicate names, stale registrations, and unrelated projects fail
+closed. The agent or instance is then validated against the target worktree's
+own `agents.yaml`. Every durable envelope records the sender project's stable
+UUID, so `rt-ack` returns its quiet confirmation to that UUID even after the
+origin path or registry name changes and the moved worktree's UUID witness has
+reconciled its registry entry.
 
 Migration holds that project's exclusive layout lock through the verified
 copy and registry cutover. Its JSON result reports the durable recovery-record

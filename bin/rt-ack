@@ -1,21 +1,22 @@
 #!/usr/bin/env python3
 import os
-import re
 import stat
 import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
 
-from _rtlib import find_project_root, locked_project_mailbox, require_fenced_seat
+from _rtlib import (
+    MailEnvelopeError,
+    find_project_root,
+    locked_project_mailbox,
+    message_id_route,
+    parse_mail_envelope,
+    parse_message_id,
+    require_fenced_seat,
+)
 
 TOOL_DIR = Path(__file__).resolve().parent
-# Agent names may be multi-instance ids (claude#1, codex-build), so the from/to
-# fields can contain digits, '#', '_' and '-'. Anchor on the timestamp prefix,
-# the literal '-to-' separator, and a hyphen-free random suffix.
-MSG_ID_RE = re.compile(r"^\d{8}T\d{6}Z-([a-z0-9#_-]+)-to-([a-z0-9#_-]+)-[^-]+$")
-
-
 ROOT = find_project_root("rt-ack")
 MAILBOX = None
 
@@ -25,16 +26,31 @@ def usage():
     raise SystemExit(2)
 
 
-def parse_ref(ref):
-    match = MSG_ID_RE.match(ref)
+def validate_ref_spelling(ref):
     if (
-        not match
+        message_id_route(ref) is None
         or Path(ref).name != ref
         or "/" in ref
         or "\x00" in ref
     ):
         raise SystemExit(f"rt-ack: cannot parse msg_id: {ref}")
-    return match.groups()
+
+
+def parse_ref(ref, *, recipient=None):
+    validate_ref_spelling(ref)
+    identity = parse_message_id(ref, recipient=recipient)
+    if (
+        identity is None
+        and recipient is not None
+        and ref.count("-to-") == 1
+    ):
+        # A simple historical id can still explain an explicit/mailbox hint
+        # mismatch precisely. Ambiguous instance ids keep the hinted
+        # fail-closed path.
+        identity = parse_message_id(ref)
+    if identity is None:
+        raise SystemExit(f"rt-ack: cannot parse msg_id: {ref}")
+    return identity
 
 
 def fsync_directory(path):
@@ -52,14 +68,140 @@ def lstat_or_none(path):
         return None
 
 
+def discover_inbound_recipient(mailbox, refs):
+    """Infer one recipient from exact durable refs when no seat hint exists."""
+
+    mail_root = mailbox.inbox_dir
+    root_info = lstat_or_none(mail_root)
+    if (
+        root_info is None
+        or stat.S_ISLNK(root_info.st_mode)
+        or not stat.S_ISDIR(root_info.st_mode)
+    ):
+        raise SystemExit(
+            "rt-ack: cannot infer recipient; pass RT_FROM or --fenced"
+        )
+    recipients = set()
+    for ref in refs:
+        candidates = set()
+        for inbox in mail_root.iterdir():
+            inbox_info = inbox.lstat()
+            if stat.S_ISLNK(inbox_info.st_mode):
+                raise SystemExit(
+                    f"rt-ack: maildir path is a symlink: {inbox}"
+                )
+            if not stat.S_ISDIR(inbox_info.st_mode):
+                continue
+            for lifecycle in ("new", "cur"):
+                path = inbox / lifecycle / f"{ref}.md"
+                info = lstat_or_none(path)
+                if info is None:
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    raise SystemExit(
+                        f"rt-ack: inbound mail is not a regular file: {path}"
+                    )
+                candidates.add(inbox.name)
+        if not candidates:
+            raise SystemExit(
+                "rt-ack: cannot infer recipient for missing inbound ref "
+                f"{ref}; pass RT_FROM or --fenced"
+            )
+        if len(candidates) > 1:
+            raise SystemExit(
+                "rt-ack: ambiguous inbound recipient for ref "
+                f"{ref}: {', '.join(sorted(candidates))}"
+            )
+        recipients.update(candidates)
+    if len(recipients) != 1:
+        raise SystemExit(
+            "rt-ack: refs target multiple recipients: "
+            + ", ".join(sorted(recipients))
+            + "; acknowledge one recipient at a time"
+        )
+    return next(iter(recipients))
+
+
+def inbound_origin_uuid(mailbox, ref, original_from, original_to):
+    """Read one exact inbound envelope before choosing the ack destination."""
+
+    inbox = mailbox.inbox_dir / original_to
+    new_dir = inbox / "new"
+    cur_dir = inbox / "cur"
+    for directory in (mailbox.inbox_dir, inbox, new_dir, cur_dir):
+        info = lstat_or_none(directory)
+        if info is None:
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            raise SystemExit(
+                f"rt-ack: maildir path is not a real directory: {directory}"
+            )
+
+    paths = [
+        directory / f"{ref}.md"
+        for directory in (new_dir, cur_dir)
+        if lstat_or_none(directory / f"{ref}.md") is not None
+    ]
+    if not paths:
+        raise SystemExit(
+            f"rt-ack: cannot determine origin for missing inbound ref: {ref}"
+        )
+
+    stats = []
+    for path in paths:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise SystemExit(f"rt-ack: inbound mail is not a regular file: {path}")
+        stats.append(info)
+    if len(paths) == 2 and (
+        stats[0].st_dev,
+        stats[0].st_ino,
+    ) != (
+        stats[1].st_dev,
+        stats[1].st_ino,
+    ):
+        raise SystemExit(
+            f"rt-ack: conflicting new/cur copies for inbound ref: {ref}"
+        )
+
+    try:
+        content = paths[0].read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise SystemExit(
+            f"rt-ack: cannot read inbound envelope for {ref}: {error}"
+        ) from None
+    try:
+        envelope = parse_mail_envelope(content)
+    except MailEnvelopeError as error:
+        raise SystemExit(
+            f"rt-ack: invalid origin metadata for {ref}: {error}"
+        ) from None
+
+    # Legacy files had no origin metadata and rt-ack historically trusted the
+    # exact filename's from/to tuple. Keep that local-only compatibility. Once
+    # an origin UUID is present, every envelope identity must agree before it
+    # can authorize a cross-project return route.
+    if envelope is None or envelope.get("origin_uuid") is None:
+        return mailbox.project_uuid
+    if (
+        envelope["msg_id"] != ref
+        or envelope["from"] != original_from
+        or envelope["to"] != original_to
+    ):
+        raise SystemExit(
+            f"rt-ack: UUID-aware envelope does not match inbound ref: {ref}"
+        )
+    return envelope["origin_uuid"]
+
+
 def archive_inbound(ref, recipient):
     """Move one exact inbound ref from new/ to cur/ without clobbering.
 
     A hard-link followed by unlink gives us a no-clobber publication and a
     recoverable intermediate state. If a prior attempt stopped between those
     operations, both names identify the same inode and this retry completes the
-    unlink. Missing mail is a compatibility no-op: rt-ack historically accepted
-    a valid ref after a manual drain or when only legacy ledger state remained.
+    unlink. A source that disappears after the preflight is a compatibility
+    no-op only when the archive copy is already a regular file.
     """
 
     mail_root = MAILBOX.inbox_dir
@@ -78,7 +220,11 @@ def archive_inbound(ref, recipient):
     source_stat = lstat_or_none(source)
     destination_stat = lstat_or_none(destination)
     if source_stat is None:
-        if destination_stat is not None and not stat.S_ISREG(destination_stat.st_mode):
+        if destination_stat is None:
+            raise FileNotFoundError(
+                f"inbound mail disappeared before archive: {source}"
+            )
+        if not stat.S_ISREG(destination_stat.st_mode):
             raise OSError(f"archive destination is not a regular file: {destination}")
         return
     if not stat.S_ISREG(source_stat.st_mode):
@@ -124,11 +270,51 @@ def _main(args, fenced_agent):
     refs = [ref.strip() for ref in args[0].split(",") if ref.strip()]
     if not refs:
         usage()
+    # Discovery joins refs to mailbox paths, so preserve the historical
+    # lexical/path guard before any filesystem observation.
+    for ref in refs:
+        validate_ref_spelling(ref)
     body = " ".join(args[1:]) if len(args) > 1 else ""
 
+    explicit_sender = os.environ.get("RT_FROM", "").lower()
+    recipient_hint = fenced_agent or explicit_sender or None
+    if recipient_hint is None:
+        try:
+            with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
+                recipient_hint = discover_inbound_recipient(mailbox, refs)
+        except SystemExit as error:
+            # Preserve the legacy missing-ref diagnostic when the historical
+            # separator is unambiguous. Instance ids containing ``-to-`` need
+            # durable mailbox evidence (or an explicit seat hint) instead of a
+            # guessed recipient.
+            if not str(error).startswith(
+                "rt-ack: cannot infer recipient"
+            ):
+                raise
+            legacy_identities = [parse_message_id(ref) for ref in refs]
+            legacy_recipients = {
+                identity[1]
+                for identity in legacy_identities
+                if identity is not None
+            }
+            if (
+                all(identity is not None for identity in legacy_identities)
+                and all(ref.count("-to-") == 1 for ref in refs)
+                and len(legacy_recipients) == 1
+            ):
+                recipient_hint = next(iter(legacy_recipients))
+            else:
+                raise
+        except OSError as error:
+            raise SystemExit(
+                f"rt-ack: failed to inspect inbound mail: {error}"
+            ) from None
     parsed_refs = []
     for ref in refs:
-        original_from, original_to = parse_ref(ref)
+        original_from, original_to = parse_ref(
+            ref,
+            recipient=recipient_hint,
+        )
         parsed_refs.append((ref, original_from, original_to))
 
     recipients = {original_to for _ref, _original_from, original_to in parsed_refs}
@@ -139,7 +325,6 @@ def _main(args, fenced_agent):
             + "; acknowledge one recipient at a time"
         )
     inferred_sender = next(iter(recipients))
-    explicit_sender = os.environ.get("RT_FROM", "").lower()
     if fenced_agent and inferred_sender != fenced_agent:
         raise SystemExit(
             f"rt-ack: fenced seat {fenced_agent} cannot acknowledge mail for "
@@ -151,12 +336,34 @@ def _main(args, fenced_agent):
             f"{inferred_sender}"
         )
 
+    try:
+        # Read the durable envelope in a short receiver layout section, then
+        # release it before invoking rt-say for the origin project.
+        with locked_project_mailbox(ROOT, tool="rt-ack") as inbound_mailbox:
+            receiver_uuid = inbound_mailbox.project_uuid
+            routed_refs = [
+                (
+                    ref,
+                    original_from,
+                    inbound_origin_uuid(
+                        inbound_mailbox,
+                        ref,
+                        original_from,
+                        original_to,
+                    ),
+                )
+                for ref, original_from, original_to in parsed_refs
+            ]
+    except OSError as error:
+        raise SystemExit(f"rt-ack: failed to inspect inbound mail: {error}") from None
+
     groups = defaultdict(list)
-    for ref, original_from, _original_to in parsed_refs:
-        groups[original_from].append(ref)
+    for ref, original_from, origin_uuid in routed_refs:
+        groups[(origin_uuid, original_from)].append(ref)
 
     outputs = []
-    for target, group_refs in groups.items():
+    delivered_groups = []
+    for (origin_uuid, target), group_refs in groups.items():
         csv = ",".join(group_refs)
         visible_body = f"refs={csv}"
         if body:
@@ -166,6 +373,10 @@ def _main(args, fenced_agent):
         env["RT_ACK_REFS"] = csv
         env["RT_ACK_BODY"] = body
         env["RT_FROM"] = explicit_sender or inferred_sender
+        if origin_uuid != receiver_uuid:
+            env["RT_TARGET_PROJECT_UUID"] = origin_uuid
+        else:
+            env.pop("RT_TARGET_PROJECT_UUID", None)
         # Every ref has already agreed on the message recipient and any
         # explicit RT_FROM has been checked against it. The normal maildir path
         # consumes this validated harness identity without a terminal adapter.
@@ -185,34 +396,63 @@ def _main(args, fenced_agent):
                 env=env,
             )
         except OSError as error:
+            if delivered_groups:
+                delivered = ",".join(
+                    ref
+                    for committed_group in delivered_groups
+                    for ref in committed_group
+                )
+                print(
+                    "rt-ack: partial quiet acknowledgements delivered for "
+                    f"refs={delivered}; inbound mail remains in new/",
+                    file=sys.stderr,
+                )
             raise SystemExit(f"rt-ack: failed to run rt-say: {error}") from None
         if proc.returncode != 0:
             detail = proc.stderr.strip() or f"rt-say exited {proc.returncode}"
+            if delivered_groups:
+                delivered = ",".join(
+                    ref
+                    for committed_group in delivered_groups
+                    for ref in committed_group
+                )
+                print(
+                    "rt-ack: partial quiet acknowledgements delivered for "
+                    f"refs={delivered}; inbound mail remains in new/",
+                    file=sys.stderr,
+                )
             print(detail, file=sys.stderr)
             raise SystemExit(proc.returncode)
         if proc.stderr.strip():
             print(proc.stderr.strip(), file=sys.stderr)
         output = proc.stdout.strip()
-        try:
-            # rt-say owns its shared layout section. Re-resolve under a fresh
-            # section for the archive so an exclusive migration may cut over
-            # between delivery and archival without either operation retaining
-            # a stale physical mailbox path.
-            with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
-                MAILBOX = mailbox
-                for ref in group_refs:
-                    archive_inbound(ref, inferred_sender)
-        except OSError as error:
-            for committed_output in outputs:
-                if committed_output:
-                    print(committed_output)
-            if output:
-                print(output)
-            raise SystemExit(
-                "rt-ack: acknowledgement delivered for "
-                f"refs={csv}, but failed to archive inbound mail: {error}"
-            ) from None
         outputs.append(output)
+        delivered_groups.append(group_refs)
+
+    all_refs = [ref for group_refs in groups.values() for ref in group_refs]
+    all_refs_csv = ",".join(all_refs)
+    try:
+        # Every quiet acknowledgement must succeed before any inbound file
+        # leaves new/. Re-resolve under one fresh receiver layout section so a
+        # migration may cut over between delivery and archival without keeping
+        # a stale physical path.
+        with locked_project_mailbox(ROOT, tool="rt-ack") as mailbox:
+            if mailbox.project_uuid != receiver_uuid:
+                raise OSError(
+                    "receiver project identity changed before archival: "
+                    f"expected {receiver_uuid}, resolved {mailbox.project_uuid}"
+                )
+            MAILBOX = mailbox
+            for ref in all_refs:
+                archive_inbound(ref, inferred_sender)
+    except (OSError, SystemExit) as error:
+        for committed_output in outputs:
+            if committed_output:
+                print(committed_output)
+        raise SystemExit(
+            "rt-ack: acknowledgement delivered for "
+            f"refs={all_refs_csv}, but failed to archive inbound mail: {error}"
+        ) from None
 
     return "\n".join(output for output in outputs if output)
 

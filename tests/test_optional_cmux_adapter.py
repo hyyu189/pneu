@@ -348,7 +348,7 @@ def test_ack_archives_only_exact_batch_refs(tmp_path):
     assert not (cur / unrelated_mail.name).exists()
 
 
-def test_ack_is_idempotent_when_mail_is_already_archived_or_missing(tmp_path):
+def test_ack_accepts_archived_but_rejects_unproven_missing_ref(tmp_path):
     project = tmp_path / "project"
     state = write_project(project)
     archived_ref = "20260718T120005Z-codex-to-claude-110"
@@ -359,11 +359,12 @@ def test_ack_is_idempotent_when_mail_is_already_archived_or_missing(tmp_path):
     archived = cur / mail.name
     mail.rename(archived)
 
-    result = run_tool(
-        "rt-ack", f"{archived_ref},{missing_ref}", cwd=project
-    )
+    archived_result = run_tool("rt-ack", archived_ref, cwd=project)
+    missing_result = run_tool("rt-ack", missing_ref, cwd=project)
 
-    assert result.returncode == 0, result.stderr
+    assert archived_result.returncode == 0, archived_result.stderr
+    assert missing_result.returncode != 0
+    assert "cannot determine origin for missing inbound ref" in missing_result.stderr
     assert archived.read_text().endswith(" archived")
     assert not mail.exists()
     assert not (cur / f"{missing_ref}.md").exists()
@@ -387,7 +388,7 @@ def test_ack_finishes_interrupted_same_inode_archive(tmp_path):
     assert archived.read_text().endswith(" recover")
 
 
-def test_ack_reports_committed_ack_without_overwriting_archive_conflict(tmp_path):
+def test_ack_rejects_archive_conflict_before_sending_confirmation(tmp_path):
     project = tmp_path / "project"
     state = write_project(project)
     original = "20260718T120008Z-codex-to-claude-113"
@@ -400,16 +401,13 @@ def test_ack_reports_committed_ack_without_overwriting_archive_conflict(tmp_path
     result = run_tool("rt-ack", original, cwd=project)
 
     assert result.returncode != 0
-    assert "acknowledgement delivered" in result.stderr
-    assert "failed to archive inbound mail" in result.stderr
-    assert "refusing to overwrite conflicting archive" in result.stderr
+    assert "conflicting new/cur copies" in result.stderr
     assert mail.read_text().endswith(" new copy")
     assert conflict.read_text() == "different archived copy"
     ack_files = list(
         (mailbox_for(project).inbox_dir / "codex" / "new").glob("ack-*.md")
     )
-    assert len(ack_files) == 1
-    assert f"refs={original}" in ack_files[0].read_text()
+    assert ack_files == []
 
 
 def test_ack_rejects_path_traversal_ref_before_delivery(tmp_path):
@@ -417,12 +415,18 @@ def test_ack_rejects_path_traversal_ref_before_delivery(tmp_path):
     state = write_project(project)
     mailbox = mailbox_for(project)
     unsafe = "20260718T120009Z-codex-to-claude-../../outside"
+    # Make the mailbox and traversal components exist. The lexical guard must
+    # still reject before recipient discovery performs any joined-path lstat.
+    new_dir = mailbox.inbox_dir / "claude" / "new"
+    new_dir.mkdir(parents=True)
+    (new_dir / unsafe.split("/", 1)[0]).mkdir()
+    (new_dir.parent / "outside.md").mkdir()
 
     result = run_tool("rt-ack", unsafe, cwd=project)
 
     assert result.returncode != 0
     assert result.stderr == f"rt-ack: cannot parse msg_id: {unsafe}\n"
-    assert not mailbox.inbox_dir.exists()
+    assert (new_dir.parent / "outside.md").is_dir()
 
 
 def test_ack_validated_sender_does_not_invoke_ambient_cmux(tmp_path):

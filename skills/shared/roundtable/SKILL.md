@@ -80,7 +80,7 @@ roundtable-init new-git-project --git
 | `roundtable-setup [plan\|apply\|status\|remove]` | Own host-level harness onboarding; the default is a no-write plan. |
 | `roundtable-init --here` / `roundtable-init NAME` | Adopt the current directory or create and register a project; add `--git` only when wanted. |
 | `rt-claude` / `rt-hermes` / `rt-codex` | Claim a fenced project seat and launch the real harness executable. |
-| `rt-say <agent> <kind> "body"` | Write the message into the target's project mailbox (atomic maildir). |
+| `rt-say <agent>[@<project>] <kind> "body"` | Write the message into this project or one exact registered sibling worktree (atomic maildir). |
 | `rt-ack <id>[,<id>...] ["note"]` | Acknowledge and archive received message(s). Comma-batches. The sender gets a quiet `ack-*` file. |
 | `rt-inbox` | List un-ack'd inbound messages. |
 | `rt-projects <list\|add\|rm\|upgrade>` | Maintain the validated project registry; `upgrade` is the explicit, backed-up v1→v2 gate. |
@@ -119,6 +119,13 @@ mailbox path printed by a diagnostic is not a durable capability across a
 layout migration. `sync-ack` files are named `new/ack-<msgid>.md`: quiet
 confirmations that never wake anyone and never block a stop; drain them
 whenever you are awake for another reason.
+
+The qualified `agent@project` form resolves exactly one active project name
+inside the sender's revalidated derived group, then validates the agent against
+that target project's own `agents.yaml`. Duplicate names and stale group or
+identity claims fail closed. The envelope carries the origin project UUID;
+`rt-ack` uses that exact UUID rather than a mutable path or project name when
+returning its quiet confirmation.
 
 **Receiving (drain protocol)** — when woken by a tripwire/bridge or told the
 inbox has mail: run `rt-inbox -f json`, act on every non-ack message, then
@@ -181,7 +188,9 @@ state and must not be used as routing or liveness truth.
 
 ## Sending
 
-`rt-say <agent> <kind> "body"` from the project root. That's the whole ritual
+`rt-say <agent>[@<project>] <kind> "body"` from the project root. The bare
+form stays inside the current project; `@project` names one registered sibling
+worktree in the same derived group. That's the whole ritual
 — no refresh, no resolve, no liveness check. In a remote Codex app-server
 turn, sender inference uses `CODEX_THREAD_ID`; outside a harness set
 `RT_FROM`. During an automatically woken Claude turn, use the absolute
@@ -200,7 +209,9 @@ in `~/.roundtable/docs/legacy-v1-keyboard.md`; human-coordinated use only.
 
 ## Receiving
 
-1. Inbound arrives as a mail file `[FROM→YOU kind id=<msg_id>] body`.
+1. Inbound arrives as a mail file
+   `[FROM→YOU kind id=<msg_id> origin=<project-uuid>] body` (legacy files may
+   omit `origin`).
 2. Do what it asks.
 3. `rt-ack <msg_id> ["note"]` — batch with commas. This both sends the
    sender's delivery confirmation and archives the processed inbound message.

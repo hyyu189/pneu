@@ -10,10 +10,13 @@ from pathlib import Path
 
 from _rtlib import (
     LIFECYCLE_ORDINAL,
+    MailEnvelopeError,
     current_records,
     find_project_root,
     load_agents_doc,
     locked_project_mailbox,
+    parse_mail_envelope,
+    parse_message_id,
     read_records,
     require_fenced_seat,
 )
@@ -21,18 +24,9 @@ from _rtlib import (
 ROOT = find_project_root("rt-inbox")
 MSG_DIR = None
 INBOX_DIR = None
+PROJECT_UUID = None
 AGENT_COMPONENT_RE = re.compile(r"^[a-z0-9#_-]+$")
-MAIL_HEADER_RE = re.compile(
-    r"^\[(?P<from>[a-z0-9#_-]+)→(?P<to>[a-z0-9#_-]+) "
-    r"(?P<kind>[^\s\]]+) id=(?P<msg_id>[^\s\]]+)\](?: (?P<body>.*))?$",
-    re.IGNORECASE | re.DOTALL,
-)
 MALFORMED_SCHEMA = "roundtable.maildir_malformed.v1"
-# Must stay in lockstep with rt-ack's MSG_ID_RE: remediation advice may only
-# name rt-ack for a raw id that rt-ack will actually accept and archive.
-ACK_MSG_ID_RE = re.compile(r"^\d{8}T\d{6}Z-([a-z0-9#_-]+)-to-([a-z0-9#_-]+)-[^-]+$")
-
-
 def parse_args():
     parser = argparse.ArgumentParser(prog="rt-inbox")
     parser.add_argument("agent", nargs="?", help="agent or instance to inspect; defaults to inferred sender")
@@ -124,7 +118,15 @@ def mail_timestamp(msg_id, path):
     return parsed.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def malformed_record(target, folder, path, problem, content, sender=""):
+def malformed_record(
+    target,
+    folder,
+    path,
+    problem,
+    content,
+    sender="",
+    origin_uuid=None,
+):
     """Describe one undeliverable mail file instead of silently dropping it.
 
     The raw file stem is the id the user acknowledges when the remedy is
@@ -152,6 +154,8 @@ def malformed_record(target, folder, path, problem, content, sender=""):
         "refs": [],
         "correlation": {},
         "source": "maildir",
+        "origin_uuid": origin_uuid,
+        "target_project_uuid": PROJECT_UUID,
         "maildir_path": str(path),
         "delivery_sources": ["maildir"],
     }
@@ -227,8 +231,21 @@ def read_maildir_records():
                         )
                     )
                 continue
-            match = MAIL_HEADER_RE.fullmatch(content)
-            if not match:
+            try:
+                parsed = parse_mail_envelope(content)
+            except MailEnvelopeError as error:
+                if folder == "new":
+                    records.append(
+                        malformed_record(
+                            target,
+                            folder,
+                            path,
+                            f"invalid origin metadata: {error}",
+                            content,
+                        )
+                    )
+                continue
+            if parsed is None:
                 if folder == "new":
                     records.append(
                         malformed_record(
@@ -236,10 +253,10 @@ def read_maildir_records():
                         )
                     )
                 continue
-            parsed = match.groupdict()
             msg_id = parsed["msg_id"]
-            to_agent = parsed["to"].lower()
-            kind = parsed["kind"].lower()
+            to_agent = parsed["to"]
+            kind = parsed["kind"]
+            origin_uuid = parsed.get("origin_uuid")
             # Drained normal mail is no longer inbox-visible. Drained quiet acks
             # remain fact-source tombstones: without the retired rt-watch there
             # is no separate process to materialize an "acked" ledger event.
@@ -257,7 +274,8 @@ def read_maildir_records():
                             path,
                             "filename does not match message id",
                             content,
-                            sender=parsed["from"].lower(),
+                            sender=parsed["from"],
+                            origin_uuid=origin_uuid,
                         )
                     )
                 continue
@@ -270,17 +288,39 @@ def read_maildir_records():
                             path,
                             "recipient does not match mailbox",
                             content,
-                            sender=parsed["from"].lower(),
+                            sender=parsed["from"],
+                            origin_uuid=origin_uuid,
                         )
                     )
                 continue
-            body = parsed.get("body") or ""
+            encoded_identity = parse_message_id(
+                msg_id,
+                recipient=parsed["to"],
+            )
+            if origin_uuid is not None and (
+                encoded_identity is None
+                or encoded_identity != (parsed["from"], parsed["to"])
+            ):
+                if folder == "new":
+                    records.append(
+                        malformed_record(
+                            target,
+                            folder,
+                            path,
+                            "message id identity does not match envelope",
+                            content,
+                            sender=parsed["from"],
+                            origin_uuid=origin_uuid,
+                        )
+                    )
+                continue
+            body = parsed["body"]
             record = {
                 "schema": "roundtable.maildir_message.v1",
                 "msg_id": msg_id,
                 "event_id": "",
                 "ts": mail_timestamp(msg_id, path),
-                "from": parsed["from"].lower(),
+                "from": parsed["from"],
                 "to": to_agent,
                 "kind": kind,
                 "body": body,
@@ -294,6 +334,8 @@ def read_maildir_records():
                 "refs": [],
                 "correlation": {},
                 "source": "maildir",
+                "origin_uuid": parsed.get("origin_uuid"),
+                "target_project_uuid": PROJECT_UUID,
                 "maildir_path": str(path),
                 "delivery_sources": ["maildir"],
             }
@@ -371,21 +413,33 @@ def archive_quiet_acks(agent):
 def visible_records(agent, include_all):
     ledger_records = read_records(MSG_DIR)
     maildir_records = read_maildir_records()
+    # The origin ledger also records cross-project deliveries, but those
+    # lifecycle/ref namespaces belong to the target UUID. Isolate them before
+    # folding by msg_id or deriving ack state so a rare id/ref collision cannot
+    # hide or replace local mail.
+    local_ledger_records = [
+        record
+        for record in ledger_records
+        if (
+            record.get("target_project_uuid") is None
+            or record.get("target_project_uuid") == PROJECT_UUID
+        )
+    ]
     acked_refs = set()
-    for record in ledger_records:
+    for record in local_ledger_records:
         if (
             record.get("msg_id")
             and LIFECYCLE_ORDINAL.get(record.get("lifecycle"), -1)
             >= LIFECYCLE_ORDINAL["acked"]
         ):
             acked_refs.add(record["msg_id"])
-    for record in [*ledger_records, *maildir_records]:
+    for record in [*local_ledger_records, *maildir_records]:
         if record.get("kind") != "sync-ack":
             continue
         acked_refs.update(refs_from_record(record))
 
     records = []
-    for ledger_record in current_records(ledger_records).values():
+    for ledger_record in current_records(local_ledger_records).values():
         record = dict(ledger_record)
         record["delivery_source"] = "ledger"
         record["delivery_sources"] = ["ledger"]
@@ -436,26 +490,50 @@ def resolvable_instances():
         agents = document.get("agents") or {}
     except (Exception, SystemExit):
         return {}
-    resolved = {}
+    if not isinstance(agents, dict):
+        return {}
+    exact_counts = {}
     bases = []
     for base, raw_config in agents.items():
-        config = raw_config if isinstance(raw_config, dict) else {}
-        base_name = str(base).lower()
-        instances = config.get("instances") or [{"id": base_name}]
+        if (
+            not isinstance(base, str)
+            or not AGENT_COMPONENT_RE.fullmatch(base)
+            or not isinstance(raw_config, dict)
+        ):
+            return {}
+        base_name = base
+        instances = raw_config.get("instances")
+        if instances is None or instances == []:
+            instances = [{"id": base_name}]
+        elif not isinstance(instances, list):
+            return {}
         instance_names = []
         for instance in instances:
             if isinstance(instance, str):
-                instance_name = instance.lower()
+                instance_name = instance
+            elif isinstance(instance, dict):
+                instance_name = instance.get("id")
             else:
-                instance_name = str((instance or {}).get("id") or base_name).lower()
+                return {}
+            if (
+                not isinstance(instance_name, str)
+                or not AGENT_COMPONENT_RE.fullmatch(instance_name)
+            ):
+                return {}
             instance_names.append(instance_name)
-            resolved.setdefault(instance_name, instance_name)
+            exact_counts[instance_name] = (
+                exact_counts.get(instance_name, 0) + 1
+            )
         bases.append((base_name, instance_names))
+    resolved = {
+        instance_name: instance_name if count == 1 else None
+        for instance_name, count in exact_counts.items()
+    }
     for base_name, instance_names in bases:
-        resolved.setdefault(
-            base_name,
-            instance_names[0] if len(instance_names) == 1 else None,
-        )
+        if base_name not in exact_counts:
+            resolved[base_name] = (
+                instance_names[0] if len(instance_names) == 1 else None
+            )
     return resolved
 
 
@@ -468,15 +546,30 @@ def malformed_remedy(record, resolved):
     sync-ack, and a registered recipient identity to send it. Everything
     else needs the human to move the file out of new/ instead.
     """
-    if record.get("problem") == "not a regular mail file":
+    if record.get("problem") in {
+        "not a regular mail file",
+        "unreadable mail file",
+    }:
+        return "manual-move"
+    if str(record.get("problem") or "").startswith(
+        "invalid origin metadata:"
+    ):
+        return "manual-move"
+    # UUID-aware mail is authoritative enough for rt-ack to verify every
+    # identity field. If any such record reached the malformed path, rt-ack
+    # will fail closed too, so never advertise it as an executable remedy.
+    if record.get("origin_uuid") is not None:
         return "manual-move"
     path = Path(record.get("maildir_path", ""))
     if path.suffix != ".md":
         return "manual-move"
-    match = ACK_MSG_ID_RE.match(path.stem)
-    if not match:
+    identity = parse_message_id(
+        path.stem,
+        recipient=record.get("to"),
+    )
+    if identity is None:
         return "manual-move"
-    ref_sender, ref_recipient = match.groups()
+    ref_sender, ref_recipient = identity
     if ref_recipient != record.get("to"):
         return "manual-move"
     sender_instance = resolved.get(ref_sender)
@@ -553,7 +646,7 @@ def _main_locked(args, fenced_agent):
 
 
 def main():
-    global MSG_DIR, INBOX_DIR
+    global MSG_DIR, INBOX_DIR, PROJECT_UUID
 
     args = parse_args()
     if args.archive_quiet_acks and not args.fenced:
@@ -564,6 +657,7 @@ def main():
     with locked_project_mailbox(ROOT, tool="rt-inbox") as mailbox:
         MSG_DIR = mailbox.messages_dir
         INBOX_DIR = mailbox.inbox_dir
+        PROJECT_UUID = mailbox.project_uuid
         records, output_format, notices = _main_locked(args, fenced_agent)
     output = (
         json.dumps(records, ensure_ascii=False, indent=2)

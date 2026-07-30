@@ -1,10 +1,17 @@
+import dataclasses
+import importlib.machinery
+import importlib.util
 import json
 import os
 import stat
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
+
+import pytest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,6 +20,7 @@ ISOLATED_BIN = ROOT / "tests" / "fixtures" / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtlib  # noqa: E402
+import _rtruntime  # noqa: E402
 
 
 _PROJECT_REGISTRIES = {}
@@ -77,7 +85,19 @@ def run_executable(name, *args, cwd=None, env=None):
     )
 
 
-def write_project(path, *, workspace_title=None, runtime=None):
+def load_cli_module(name):
+    module_name = f"test_{name.replace('-', '_')}_{time.time_ns()}"
+    loader = importlib.machinery.SourceFileLoader(
+        module_name,
+        str(BIN / name),
+    )
+    spec = importlib.util.spec_from_loader(module_name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def write_project(path, *, workspace_title=None, runtime=None, registry=None):
     state = path / ".roundtable"
     state.mkdir(parents=True)
     title_line = f"workspace_title: {workspace_title}\n" if workspace_title else ""
@@ -121,7 +141,7 @@ project: {path}
     (state / "locks").mkdir()
     if runtime is not None:
         (state / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
-    registry = path.parent / "projects.yaml"
+    registry = registry or path.parent / "projects.yaml"
     _rtlib.register_project(path, path=registry)
     mailbox = _rtlib.resolve_project_mailbox(path, registry_path=registry)
     assert mailbox.layout == "local"
@@ -131,6 +151,94 @@ project: {path}
     assert mailbox.locks_dir == state / "locks"
     _PROJECT_REGISTRIES[path.resolve()] = registry
     return state
+
+
+def git_sibling_projects(tmp_path, first_name="backend", second_name="frontend"):
+    registry = tmp_path / "projects.yaml"
+    first = tmp_path / first_name
+    first.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main"],
+        cwd=first,
+        check=True,
+    )
+    (first / "README.md").write_text("fixture\n")
+    subprocess.run(["git", "add", "README.md"], cwd=first, check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Roundtable Tests",
+            "-c",
+            "user.email=roundtable@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        cwd=first,
+        check=True,
+    )
+    first_state = write_project(first, registry=registry)
+
+    second = tmp_path / second_name
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            f"test-{second_name}-{time.time_ns()}",
+            str(second),
+        ],
+        cwd=first,
+        check=True,
+    )
+    second_state = write_project(second, registry=registry)
+    env = {
+        "RT_FROM": "codex",
+        "RT_PROJECTS_FILE": str(registry),
+    }
+    return first, first_state, second, second_state, registry, env
+
+
+def flip_project_to_empty_central(project, registry):
+    mailbox = _rtlib.resolve_project_mailbox_checked(
+        project,
+        registry_path=registry,
+    )
+    central = registry.parent / "mail" / mailbox.project_uuid
+    for directory in (
+        central,
+        central / "inbox",
+        central / "messages",
+        central / "locks",
+    ):
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+    (central / _rtlib.CENTRAL_MAIL_MARKER_NAME).write_text(
+        json.dumps(
+            {
+                "schema": _rtlib.CENTRAL_MAIL_MARKER_SCHEMA,
+                "project_uuid": mailbox.project_uuid,
+                "operation_id": "00000000-0000-4000-8000-000000000001",
+                "manifest": str(registry.parent / "addressing-test-manifest.json"),
+                "manifest_sha256": "1" * 64,
+                "snapshot_digest": "2" * 64,
+            }
+        )
+        + "\n"
+    )
+
+    def mutate(document, _source_payload, _parent_fd):
+        for entry in document["projects"]:
+            if entry.get("uuid") == mailbox.project_uuid:
+                entry["layout"] = "central"
+                return True
+        raise AssertionError("registered project disappeared")
+
+    assert _rtlib._update_project_registry(mutate, registry)
+    return central
 
 
 def runtime_for(workspace="workspace:7", surface="surface:8", pane="pane:9"):
@@ -540,10 +648,12 @@ def test_rt_ack_still_sends_sync_ack_in_ack_mode(tmp_path):
         identify={"caller": {"workspace_ref": "workspace:1", "surface_ref": "surface:1"}},
     )
     env["RT_FROM"] = "codex"
+    original = "20260610T000000Z-claude-to-codex-12345"
+    write_mail(state, "codex", original, "claude", "question", "please ack")
 
     proc = run_tool(
         "rt-ack",
-        "20260610T000000Z-claude-to-codex-12345",
+        original,
         "received",
         cwd=project,
         env=env,
@@ -727,7 +837,10 @@ def test_rt_say_default_maildir_writes_exact_mail_without_legacy_nudge(tmp_path)
     assert proc.returncode == 0, proc.stderr
     msg_id = proc.stdout.strip().split()[-1]
     new_file = state / "inbox" / "claude" / "new" / f"{msg_id}.md"
-    assert new_file.read_text() == f"[CODEX→CLAUDE question id={msg_id}] {body}"
+    origin_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    assert new_file.read_text() == (
+        f"[CODEX→CLAUDE question id={msg_id} origin={origin_uuid}] {body}"
+    )
     assert list((state / "inbox" / "claude" / "tmp").iterdir()) == []
     assert list((state / "inbox" / "claude" / "cur").iterdir()) == []
 
@@ -740,7 +853,10 @@ def test_rt_say_default_maildir_writes_exact_mail_without_legacy_nudge(tmp_path)
     assert records[0]["surface_ref"] is None
     calls = read_cmux_calls(trace_dir)
     assert calls == []
-    assert records[0]["send_text"] == f"[CODEX→CLAUDE question id={msg_id}] line 1 line 2 with spaces"
+    assert records[0]["send_text"] == (
+        f"[CODEX→CLAUDE question id={msg_id} origin={origin_uuid}] "
+        "line 1 line 2 with spaces"
+    )
 
 
 def test_rt_say_rejects_flag_style_kind_and_refs_without_side_effects(tmp_path):
@@ -876,7 +992,10 @@ def test_rt_say_corrected_reply_form_delivers_reference_in_body(tmp_path):
     assert proc.returncode == 0, proc.stderr
     msg_id = proc.stdout.strip().split()[-1]
     new_file = state / "inbox" / "claude" / "new" / f"{msg_id}.md"
-    assert new_file.read_text() == f"[CODEX→CLAUDE reply id={msg_id}] {body}"
+    origin_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    assert new_file.read_text() == (
+        f"[CODEX→CLAUDE reply id={msg_id} origin={origin_uuid}] {body}"
+    )
     assert read_cmux_calls(trace_dir) == []
 
 
@@ -1068,6 +1187,1500 @@ def test_rt_say_no_nudge_uses_only_maildir_and_pending_ledger(tmp_path):
     assert records[0]["submit"] == "none"
     assert records[0]["workspace_ref"] is None
     assert records[0]["surface_ref"] is None
+
+
+def test_rt_say_cross_worktree_uses_target_config_and_origin_ledger(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    with (target_state / "agents.yaml").open("a") as handle:
+        handle.write(
+            """  reviewer:
+    harness: codex
+    instances:
+      - id: reviewer
+        session_id: null
+"""
+        )
+    # An unrelated project with the same basename is not a sibling and must
+    # neither create ambiguity nor receive the message, even when its stale
+    # registry row is no longer available.
+    unrelated = tmp_path / "unrelated" / target.name
+    unrelated_state = write_project(unrelated, registry=registry)
+    unavailable_unrelated = unrelated.parent / "frontend-unavailable"
+    unrelated.rename(unavailable_unrelated)
+    unrelated_state = unavailable_unrelated / ".roundtable"
+
+    proc = run_tool(
+        "rt-say",
+        f"reviewer@{target.name}",
+        "question",
+        "target config wins",
+        cwd=origin,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    msg_id = proc.stdout.strip().split()[-1]
+    origin_uuid = json.loads((origin_state / "project.json").read_text())["uuid"]
+    target_uuid = json.loads((target_state / "project.json").read_text())["uuid"]
+    delivered = (
+        target_state / "inbox" / "reviewer" / "new" / f"{msg_id}.md"
+    )
+    assert delivered.is_file()
+    assert f" origin={origin_uuid}]" in delivered.read_text()
+    assert not (origin_state / "inbox" / "reviewer").exists()
+    assert not (unrelated_state / "inbox" / "reviewer").exists()
+    assert read_ledger(target_state) == []
+    records = read_ledger(origin_state)
+    assert len(records) == 1
+    assert records[0]["origin_uuid"] == origin_uuid
+    assert records[0]["target_project_uuid"] == target_uuid
+
+    inbox = run_tool(
+        "rt-inbox",
+        "reviewer",
+        "-f",
+        "json",
+        cwd=target,
+        env={**env, "RT_FROM": "reviewer"},
+    )
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert payload[0]["msg_id"] == msg_id
+    assert payload[0]["origin_uuid"] == origin_uuid
+    assert payload[0]["target_project_uuid"] == target_uuid
+
+
+def test_rt_say_cross_worktree_base_aliases_use_concrete_instances(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    agents_path = target_state / "agents.yaml"
+    document = yaml.safe_load(agents_path.read_text())
+    document["agents"]["claude"]["instances"] = [
+        {"id": "claude-to-"}
+    ]
+    agents_path.write_text(yaml.safe_dump(document, sort_keys=False))
+    origin_agents_path = origin_state / "agents.yaml"
+    origin_document = yaml.safe_load(origin_agents_path.read_text())
+    origin_document["agents"]["codex"]["instances"] = [
+        {"id": "codex-to-"}
+    ]
+    origin_agents_path.write_text(
+        yaml.safe_dump(origin_document, sort_keys=False)
+    )
+
+    sent = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "base alias must reach its only seat",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+    assert "-codex-to--to-claude-to--" in msg_id
+    delivered = (
+        target_state
+        / "inbox"
+        / "claude-to-"
+        / "new"
+        / f"{msg_id}.md"
+    )
+    assert delivered.is_file()
+    assert (
+        "[CODEX-TO-→CLAUDE-TO- question "
+        in delivered.read_text()
+    )
+    assert not (target_state / "inbox" / "claude").exists()
+    assert not (origin_state / "messages" / "codex.jsonl").exists()
+    record = read_ledger(origin_state, sender="codex-to-")[0]
+    assert record["from"] == "codex-to-"
+    assert record["to"] == "claude-to-"
+
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        cwd=target,
+        env={**env, "RT_FROM": ""},
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    assert not delivered.exists()
+    quiet = list(
+        (origin_state / "inbox" / "codex-to-" / "new").glob(
+            "ack-*.md"
+        )
+    )
+    assert len(quiet) == 1
+    assert f"refs={msg_id}" in quiet[0].read_text()
+
+
+def test_rt_say_cross_worktree_rejects_duplicate_configured_instance(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    agents_path = target_state / "agents.yaml"
+    document = yaml.safe_load(agents_path.read_text())
+    document["agents"]["claude"]["instances"] = [{"id": "shared"}]
+    document["agents"]["hermes"]["instances"] = [{"id": "shared"}]
+    agents_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    sent = run_tool(
+        "rt-say",
+        f"shared@{target.name}",
+        "question",
+        "ambiguous configured identity",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode != 0
+    assert "ambiguous configured agent or instance shared" in sent.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+@pytest.mark.parametrize(
+    ("instances", "accidental_target", "diagnostic"),
+    [
+        ("hacker", "h", "instances must be a list"),
+        ({"id": "hacker"}, "id", "instances must be a list"),
+        (
+            [{"id": "CLAUDE-BUILD"}],
+            "claude-build",
+            "invalid instance id",
+        ),
+    ],
+)
+def test_rt_say_cross_worktree_rejects_malformed_target_instances(
+    tmp_path,
+    instances,
+    accidental_target,
+    diagnostic,
+):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    agents_path = target_state / "agents.yaml"
+    document = yaml.safe_load(agents_path.read_text())
+    document["agents"]["claude"]["instances"] = instances
+    agents_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    sent = run_tool(
+        "rt-say",
+        f"{accidental_target}@{target.name}",
+        "question",
+        "malformed config is not authority",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode != 0
+    assert diagnostic in sent.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_rt_say_cross_worktree_rejects_non_string_target_agent_key(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    agents_path = target_state / "agents.yaml"
+    document = yaml.safe_load(agents_path.read_text())
+    document["agents"][123] = {"instances": [{"id": "123"}]}
+    agents_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    sent = run_tool(
+        "rt-say",
+        f"123@{target.name}",
+        "question",
+        "numeric key is not a seat",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode != 0
+    assert "invalid base agent 123" in sent.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_rt_say_cross_worktree_accepts_exact_instance_equal_to_base(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    agents_path = origin_state / "agents.yaml"
+    document = yaml.safe_load(agents_path.read_text())
+    document["agents"]["codex"]["instances"] = [
+        {"id": "codex"},
+        {"id": "codex-review"},
+    ]
+    agents_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    sent = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "base spelling is an explicit instance",
+        cwd=origin,
+        env=env,
+    )
+
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+    assert (
+        target_state / "inbox" / "claude" / "new" / f"{msg_id}.md"
+    ).is_file()
+    assert len(read_ledger(origin_state, sender="codex")) == 1
+
+
+def test_rt_say_cross_worktree_rejects_agent_missing_from_target_config(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    agents_path = target_state / "agents.yaml"
+    document = yaml.safe_load(agents_path.read_text())
+    document["agents"].pop("hermes")
+    agents_path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    proc = run_tool(
+        "rt-say",
+        f"hermes@{target.name}",
+        "question",
+        "sender config must not authorize target",
+        cwd=origin,
+        env=env,
+    )
+
+    assert proc.returncode != 0
+    assert "unknown agent or instance: hermes" in proc.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_rt_say_cross_worktree_same_agent_ack_routes_home_by_uuid(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    origin_uuid = json.loads((origin_state / "project.json").read_text())["uuid"]
+    target_uuid = json.loads((target_state / "project.json").read_text())["uuid"]
+
+    sent = run_tool(
+        "rt-say",
+        f"codex@{target.name}",
+        "question",
+        "same agent, different project",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+    inbound = target_state / "inbox" / "codex" / "new" / f"{msg_id}.md"
+    assert inbound.is_file()
+    # The origin's outbound ledger must not appear as an inbound message for
+    # its same-named local agent.
+    origin_before_ack = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=origin,
+        env=env,
+    )
+    assert origin_before_ack.returncode == 0, origin_before_ack.stderr
+    assert json.loads(origin_before_ack.stdout) == []
+
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        "received",
+        cwd=target,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    assert not inbound.exists()
+    assert (
+        target_state / "inbox" / "codex" / "cur" / f"{msg_id}.md"
+    ).is_file()
+    quiet = list((origin_state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    assert len(quiet) == 1
+    assert f" origin={target_uuid}]" in quiet[0].read_text()
+    assert f"refs={msg_id}" in quiet[0].read_text()
+    assert origin_uuid != target_uuid
+
+    for project, project_env in (
+        (origin, env),
+        (target, {**env, "RT_FROM": "codex"}),
+    ):
+        inbox = run_tool(
+            "rt-inbox",
+            "codex",
+            "-f",
+            "json",
+            cwd=project,
+            env=project_env,
+        )
+        assert inbox.returncode == 0, inbox.stderr
+        assert json.loads(inbox.stdout) == []
+
+
+def test_rt_ack_groups_same_named_senders_by_origin_uuid(tmp_path):
+    (
+        first,
+        first_state,
+        receiver,
+        receiver_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    third = tmp_path / "third"
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            f"third-{time.time_ns()}",
+            str(third),
+        ],
+        cwd=first,
+        check=True,
+    )
+    third_state = write_project(third, registry=registry)
+
+    first_send = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "from first",
+        cwd=first,
+        env=env,
+    )
+    third_send = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "from third",
+        cwd=third,
+        env=env,
+    )
+    assert first_send.returncode == 0, first_send.stderr
+    assert third_send.returncode == 0, third_send.stderr
+    refs = [
+        first_send.stdout.strip().split()[-1],
+        third_send.stdout.strip().split()[-1],
+    ]
+
+    ack = run_tool(
+        "rt-ack",
+        ",".join(refs),
+        "both received",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    first_quiet = list(
+        (first_state / "inbox" / "codex" / "new").glob("ack-*.md")
+    )
+    third_quiet = list(
+        (third_state / "inbox" / "codex" / "new").glob("ack-*.md")
+    )
+    assert len(first_quiet) == 1
+    assert len(third_quiet) == 1
+    assert f"refs={refs[0]}" in first_quiet[0].read_text()
+    assert f"refs={refs[1]}" in third_quiet[0].read_text()
+    assert not list(
+        (receiver_state / "inbox" / "codex" / "new").glob(
+            "20*-codex-to-codex-*.md"
+        )
+    )
+
+
+def test_rt_ack_multi_origin_failure_archives_none_and_reports_partial_ack(
+    tmp_path,
+):
+    (
+        first,
+        first_state,
+        receiver,
+        receiver_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    third = tmp_path / "third"
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            f"third-failure-{time.time_ns()}",
+            str(third),
+        ],
+        cwd=first,
+        check=True,
+    )
+    third_state = write_project(third, registry=registry)
+    first_send = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "first origin remains retryable",
+        cwd=first,
+        env=env,
+    )
+    third_send = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "second origin becomes unavailable",
+        cwd=third,
+        env=env,
+    )
+    assert first_send.returncode == 0, first_send.stderr
+    assert third_send.returncode == 0, third_send.stderr
+    refs = [
+        first_send.stdout.strip().split()[-1],
+        third_send.stdout.strip().split()[-1],
+    ]
+    third.rename(tmp_path / "third-moved-without-reconcile")
+
+    ack = run_tool(
+        "rt-ack",
+        ",".join(refs),
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode != 0
+    assert "partial quiet acknowledgements delivered" in ack.stderr
+    assert "inbound mail remains in new/" in ack.stderr
+    assert len(
+        list((first_state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    ) == 1
+    assert not (
+        third_state / "inbox" / "codex" / "new"
+    ).exists()
+    receiver_new = receiver_state / "inbox" / "codex" / "new"
+    receiver_cur = receiver_state / "inbox" / "codex" / "cur"
+    assert all((receiver_new / f"{ref}.md").is_file() for ref in refs)
+    assert all(not (receiver_cur / f"{ref}.md").exists() for ref in refs)
+
+
+@pytest.mark.parametrize(
+    ("central_origin", "central_target"),
+    ((False, False), (False, True), (True, False), (True, True)),
+)
+def test_cross_worktree_send_and_ack_cover_both_layouts(
+    tmp_path,
+    central_origin,
+    central_target,
+):
+    (
+        origin,
+        _origin_state,
+        target,
+        _target_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    if central_origin:
+        flip_project_to_empty_central(origin, registry)
+    if central_target:
+        flip_project_to_empty_central(target, registry)
+    origin_mailbox = _rtlib.resolve_project_mailbox_checked(
+        origin,
+        registry_path=registry,
+    )
+    target_mailbox = _rtlib.resolve_project_mailbox_checked(
+        target,
+        registry_path=registry,
+    )
+
+    sent = run_tool(
+        "rt-say",
+        f"codex@{target.name}",
+        "question",
+        "layout matrix",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+    inbound = target_mailbox.inbox_dir / "codex" / "new" / f"{msg_id}.md"
+    assert inbound.is_file()
+    assert (
+        origin_mailbox.messages_dir / "codex.jsonl"
+    ).is_file()
+
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        "layout matrix",
+        cwd=target,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    assert not inbound.exists()
+    assert (
+        target_mailbox.inbox_dir / "codex" / "cur" / f"{msg_id}.md"
+    ).is_file()
+    assert len(
+        list((origin_mailbox.inbox_dir / "codex" / "new").glob("ack-*.md"))
+    ) == 1
+
+
+def test_cross_worktree_bidirectional_send_does_not_nest_layout_locks(tmp_path):
+    (
+        first,
+        first_state,
+        second,
+        second_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    first_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(BIN / "rt-say"),
+            f"codex@{second.name}",
+            "question",
+            "first to second",
+        ],
+        cwd=first,
+        env=isolated_env(cwd=first, env=env),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    second_process = subprocess.Popen(
+        [
+            sys.executable,
+            str(BIN / "rt-say"),
+            f"codex@{first.name}",
+            "question",
+            "second to first",
+        ],
+        cwd=second,
+        env=isolated_env(cwd=second, env=env),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    first_stdout, first_stderr = first_process.communicate(timeout=15)
+    second_stdout, second_stderr = second_process.communicate(timeout=15)
+
+    assert first_process.returncode == 0, first_stderr
+    assert second_process.returncode == 0, second_stderr
+    first_id = first_stdout.strip().split()[-1]
+    second_id = second_stdout.strip().split()[-1]
+    assert (
+        second_state / "inbox" / "codex" / "new" / f"{first_id}.md"
+    ).is_file()
+    assert (
+        first_state / "inbox" / "codex" / "new" / f"{second_id}.md"
+    ).is_file()
+
+
+def test_cross_worktree_send_waits_for_target_cutover(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    with _rtlib.locked_project_mailbox_checked(
+        target,
+        registry_path=registry,
+        exclusive=True,
+    ):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(BIN / "rt-say"),
+                f"claude@{target.name}",
+                "question",
+                "after sibling cutover",
+            ],
+            cwd=origin,
+            env=isolated_env(cwd=origin, env=env),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.15)
+        assert process.poll() is None
+        assert not (target_state / "inbox" / "claude").exists()
+        central = flip_project_to_empty_central(target, registry)
+
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stderr
+    msg_id = stdout.strip().split()[-1]
+    assert (
+        central / "inbox" / "claude" / "new" / f"{msg_id}.md"
+    ).is_file()
+    assert not (target_state / "inbox" / "claude").exists()
+    assert len(read_ledger(origin_state)) == 1
+
+
+def test_cross_worktree_origin_cutover_can_follow_delivery_commit(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    with _rtlib.locked_project_mailbox_checked(
+        origin,
+        registry_path=registry,
+        exclusive=True,
+    ):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(BIN / "rt-say"),
+                f"claude@{target.name}",
+                "question",
+                "origin cuts over after commit",
+            ],
+            cwd=origin,
+            env=isolated_env(cwd=origin, env=env),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        target_new = target_state / "inbox" / "claude" / "new"
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not list(target_new.glob("*.md")):
+            time.sleep(0.01)
+        assert len(list(target_new.glob("*.md"))) == 1
+        assert process.poll() is None
+        central = flip_project_to_empty_central(origin, registry)
+
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stderr
+    assert "sent maildir-only" in stdout
+    assert (central / "messages" / "codex.jsonl").is_file()
+    assert not (origin_state / "messages" / "codex.jsonl").exists()
+
+
+def test_cross_worktree_send_reconciles_moved_origin_before_return_route(
+    tmp_path,
+):
+    (
+        receiver,
+        receiver_state,
+        origin,
+        _origin_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    moved = tmp_path / "frontend-moved-before-send"
+    origin.rename(moved)
+    moved_state = moved / ".roundtable"
+
+    with _rtlib.locked_project_mailbox_checked(
+        moved,
+        registry_path=registry,
+        exclusive=True,
+    ):
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                str(BIN / "rt-say"),
+                f"codex@{receiver.name}",
+                "question",
+                "return route starts current",
+            ],
+            cwd=moved,
+            env=isolated_env(cwd=moved, env=env),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        time.sleep(0.15)
+        assert process.poll() is None
+
+    stdout, stderr = process.communicate(timeout=10)
+    assert process.returncode == 0, stderr
+    msg_id = stdout.strip().split()[-1]
+    registry_doc = yaml.safe_load(registry.read_text())
+    moved_uuid = json.loads((moved_state / "project.json").read_text())["uuid"]
+    moved_entry = next(
+        entry
+        for entry in registry_doc["projects"]
+        if entry.get("uuid") == moved_uuid
+    )
+    assert Path(moved_entry["path"]) == moved
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    quiet = list(
+        (moved_state / "inbox" / "codex" / "new").glob("ack-*.md")
+    )
+    assert len(quiet) == 1
+    assert f"refs={msg_id}" in quiet[0].read_text()
+    assert not (
+        receiver_state / "inbox" / "codex" / "new" / f"{msg_id}.md"
+    ).exists()
+
+
+def test_rt_ack_routes_to_reindexed_origin_after_worktree_move(tmp_path):
+    (
+        receiver,
+        receiver_state,
+        origin,
+        origin_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    origin_uuid = json.loads((origin_state / "project.json").read_text())["uuid"]
+
+    sent = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "survive origin move",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+
+    moved = tmp_path / "frontend-moved"
+    origin.rename(moved)
+    moved_state = moved / ".roundtable"
+    resolved = _rtlib.resolve_project_mailbox(moved, registry_path=registry)
+    assert resolved.project_uuid == origin_uuid
+
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        "moved origin",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    quiet = list((moved_state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    assert len(quiet) == 1
+    assert f"refs={msg_id}" in quiet[0].read_text()
+    assert not (
+        receiver_state / "inbox" / "codex" / "new" / f"{msg_id}.md"
+    ).exists()
+
+
+def test_rt_ack_stale_origin_move_fails_closed_and_keeps_inbound(tmp_path):
+    (
+        receiver,
+        receiver_state,
+        origin,
+        _origin_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "do not scan for moved roots",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+    inbound = receiver_state / "inbox" / "codex" / "new" / f"{msg_id}.md"
+    assert inbound.is_file()
+
+    origin.rename(tmp_path / "unreindexed-origin")
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        "must fail",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode != 0
+    assert "not available" in ack.stderr or "cannot currently resolve" in ack.stderr
+    assert inbound.is_file()
+
+
+def test_rt_say_cross_worktree_duplicate_name_fails_closed(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    duplicate = tmp_path / "nested" / target.name
+    duplicate.parent.mkdir()
+    subprocess.run(
+        [
+            "git",
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            f"duplicate-{time.time_ns()}",
+            str(duplicate),
+        ],
+        cwd=origin,
+        check=True,
+    )
+    duplicate_state = write_project(duplicate, registry=registry)
+
+    proc = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "must not pick a winner",
+        cwd=origin,
+        env=env,
+    )
+
+    assert proc.returncode != 0
+    assert "ambiguous" in proc.stderr
+    assert not (target_state / "inbox").exists()
+    assert not (duplicate_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+@pytest.mark.parametrize("live_claim", (False, True))
+def test_rt_say_cross_worktree_does_not_hide_malformed_same_name_claim(
+    tmp_path,
+    live_claim,
+):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    document = yaml.safe_load(registry.read_text())
+    origin_uuid = json.loads((origin_state / "project.json").read_text())[
+        "uuid"
+    ]
+    origin_group = next(
+        entry["group"]
+        for entry in document["projects"]
+        if entry.get("uuid") == origin_uuid
+    )
+    document["projects"].append(
+        {
+            "uuid": "not-a-uuid",
+            # A live sibling path must be rederived despite a forged stored
+            # group; a missing path with the sender group remains fail-closed.
+            "path": str(
+                target
+                if live_claim
+                else tmp_path / "missing" / target.name
+            ),
+            "name": target.name,
+            "group": (
+                "forged-different-group" if live_claim else origin_group
+            ),
+            "layout": "local",
+            "status": "active",
+            "registered_at": "2026-07-29T00:00:00Z",
+            "tombstoned_at": None,
+        }
+    )
+    registry.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    proc = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "invalid duplicate must block",
+        cwd=origin,
+        env=env,
+    )
+
+    assert proc.returncode != 0
+    assert "invalid or duplicate active registry claim" in proc.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_rt_say_revalidates_target_group_after_worktree_repoint(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    unrelated = tmp_path / "other-repository"
+    unrelated.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", "-b", "main"],
+        cwd=unrelated,
+        check=True,
+    )
+    (target / ".git").write_text(f"gitdir: {unrelated / '.git'}\n")
+
+    proc = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "stored group is not authority",
+        cwd=origin,
+        env=env,
+    )
+
+    assert proc.returncode != 0
+    assert "no active sibling project" in proc.stderr
+    assert not (target_state / "inbox").exists()
+    assert read_ledger(origin_state) == []
+
+
+def test_rt_say_cross_worktree_name_is_case_sensitive(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path, second_name="FrontEnd")
+
+    wrong_case = run_tool(
+        "rt-say",
+        "claude@frontend",
+        "question",
+        "wrong case",
+        cwd=origin,
+        env=env,
+    )
+    empty_name = run_tool(
+        "rt-say",
+        "claude@",
+        "question",
+        "empty name",
+        cwd=origin,
+        env=env,
+    )
+    exact = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "exact case",
+        cwd=origin,
+        env=env,
+    )
+
+    assert wrong_case.returncode != 0
+    assert "no active sibling project" in wrong_case.stderr
+    assert empty_name.returncode != 0
+    assert "invalid project address" in empty_name.stderr
+    assert exact.returncode == 0, exact.stderr
+    assert len(list((target_state / "inbox" / "claude" / "new").glob("*.md"))) == 1
+    assert len(read_ledger(origin_state)) == 1
+
+
+def test_rt_say_rejects_scoped_legacy_and_untrusted_uuid_environment(tmp_path):
+    project, state, env, trace_dir = say_project(tmp_path)
+    project_uuid = json.loads((state / "project.json").read_text())["uuid"]
+
+    legacy = run_tool(
+        "rt-say",
+        "--legacy-nudge-only",
+        f"claude@{project.name}",
+        "question",
+        "no keyboard sibling route",
+        cwd=project,
+        env=env,
+    )
+    direct = run_tool(
+        "rt-say",
+        "claude",
+        "question",
+        "no direct UUID",
+        cwd=project,
+        env={**env, "RT_TARGET_PROJECT_UUID": project_uuid},
+    )
+    fake_ref = "20260729T000000Z-claude-to-codex-forged"
+    direct_ack = run_tool(
+        "rt-say",
+        "claude",
+        "sync-ack",
+        f"refs={fake_ref}",
+        cwd=project,
+        env={
+            **env,
+            "RT_ACK_MODE": "1",
+            "RT_ACK_REFS": fake_ref,
+            "RT_ACK_BODY": "",
+            "RT_TARGET_PROJECT_UUID": project_uuid,
+        },
+    )
+    local_ack = run_tool(
+        "rt-say",
+        "claude",
+        "sync-ack",
+        f"refs={fake_ref}",
+        cwd=project,
+        env={
+            **env,
+            "RT_ACK_MODE": "1",
+            "RT_ACK_REFS": fake_ref,
+            "RT_ACK_BODY": "",
+        },
+    )
+    unsafe_ref = "20260729T000000Z-claude-to-codex-../../outside"
+    unsafe_ack = run_tool(
+        "rt-say",
+        "claude",
+        "sync-ack",
+        f"refs={unsafe_ref}",
+        cwd=project,
+        env={
+            **env,
+            "RT_ACK_MODE": "1",
+            "RT_ACK_REFS": unsafe_ref,
+            "RT_ACK_BODY": "",
+            "RT_TARGET_PROJECT_UUID": project_uuid,
+        },
+    )
+
+    assert legacy.returncode != 0
+    assert "cross-worktree addressing is maildir-only" in legacy.stderr
+    assert direct.returncode != 0
+    assert "reserved for rt-ack" in direct.stderr
+    assert direct_ack.returncode != 0
+    assert "lacks inbound evidence" in direct_ack.stderr
+    assert local_ack.returncode != 0
+    assert "lacks inbound evidence" in local_ack.stderr
+    assert unsafe_ack.returncode != 0
+    assert "does not match inbound ref" in unsafe_ack.stderr
+    assert not (state / "inbox").exists()
+    assert read_ledger(state) == []
+    assert read_cmux_calls(trace_dir) == []
+
+
+def test_rt_say_ack_uuid_route_renders_only_validated_refs(tmp_path):
+    (
+        origin,
+        origin_state,
+        receiver,
+        receiver_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        f"codex@{receiver.name}",
+        "question",
+        "durable evidence",
+        cwd=origin,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    real_ref = sent.stdout.strip().split()[-1]
+    forged_ref = "20260729T000001Z-codex-to-codex-forged"
+    origin_uuid = json.loads((origin_state / "project.json").read_text())[
+        "uuid"
+    ]
+    named_ack = run_tool(
+        "rt-say",
+        f"codex@{origin.name}",
+        "sync-ack",
+        f"refs={forged_ref}",
+        cwd=receiver,
+        env={
+            **env,
+            "RT_ACK_MODE": "1",
+            "RT_ACK_REFS": forged_ref,
+            "RT_ACK_BODY": "",
+        },
+    )
+
+    assert named_ack.returncode != 0
+    assert "requires rt-ack's UUID target" in named_ack.stderr
+    assert not (origin_state / "inbox" / "codex").exists()
+
+    ack = run_tool(
+        "rt-say",
+        "codex",
+        "sync-ack",
+        f"refs={forged_ref}",
+        cwd=receiver,
+        env={
+            **env,
+            "RT_ACK_MODE": "1",
+            "RT_ACK_REFS": real_ref,
+            "RT_ACK_BODY": "",
+            "RT_TARGET_PROJECT_UUID": origin_uuid,
+        },
+    )
+
+    assert ack.returncode == 0, ack.stderr
+    quiet = list(
+        (origin_state / "inbox" / "codex" / "new").glob("ack-*.md")
+    )
+    assert len(quiet) == 1
+    content = quiet[0].read_text()
+    assert f"refs={real_ref}" in content
+    assert forged_ref not in content
+    assert (
+        receiver_state / "inbox" / "codex" / "new" / f"{real_ref}.md"
+    ).is_file()
+
+
+def test_rt_say_cross_worktree_ledger_failure_stays_committed(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    (origin_state / "messages" / "codex.jsonl").mkdir()
+
+    proc = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "fyi",
+        "ledger degraded",
+        cwd=origin,
+        env=env,
+    )
+
+    assert proc.returncode == 0
+    assert "maildir delivery committed but ledger update failed" in proc.stderr
+    msg_id = proc.stdout.strip().split()[-1]
+    assert (
+        target_state / "inbox" / "claude" / "new" / f"{msg_id}.md"
+    ).is_file()
+
+
+def test_rt_say_fenced_sender_can_address_sibling_without_target_lease(tmp_path):
+    (
+        origin,
+        origin_state,
+        target,
+        target_state,
+        _registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    token = _rtruntime.claim(origin, "codex", "codex", owner_pid=os.getpid())
+    fenced_env = {
+        **env,
+        "RT_PROJECT_ROOT": str(origin),
+        "RT_SESSION_ID": token.session_id,
+        "RT_LEASE_REVISION": token.revision,
+    }
+    try:
+        stale = run_tool(
+            "rt-say",
+            "--fenced",
+            "--no-nudge",
+            f"claude@{target.name}",
+            "question",
+            "stale sender must fail",
+            cwd=origin,
+            env={**fenced_env, "RT_LEASE_REVISION": "stale-revision"},
+        )
+        sent = run_tool(
+            "rt-say",
+            "--fenced",
+            "--no-nudge",
+            f"claude@{target.name}",
+            "question",
+            "sender fence only",
+            cwd=origin,
+            env=fenced_env,
+        )
+    finally:
+        _rtruntime.release(token)
+
+    assert stale.returncode != 0
+    assert "fenced seat validation failed" in stale.stderr
+    assert sent.returncode == 0, sent.stderr
+    assert len(list((target_state / "inbox" / "claude" / "new").glob("*.md"))) == 1
+    assert len(read_ledger(origin_state)) == 1
+
+
+def test_invalid_origin_metadata_is_malformed_and_cannot_be_acked(tmp_path):
+    project, state, env, _trace_dir = say_project(tmp_path)
+    msg_id = "20260729T010000Z-claude-to-codex-invalid"
+    new_dir = state / "inbox" / "codex" / "new"
+    new_dir.mkdir(parents=True)
+    path = new_dir / f"{msg_id}.md"
+    path.write_text(
+        f"[CLAUDE→CODEX question id={msg_id} origin=NOT-A-UUID] unsafe"
+    )
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=project,
+        env=env,
+    )
+    assert inbox.returncode == 0
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert payload[0]["schema"] == "roundtable.maildir_malformed.v1"
+    assert payload[0]["remedy"] == "manual-move"
+    assert "invalid origin metadata" in payload[0]["problem"]
+
+    ack = run_tool("rt-ack", msg_id, "reject", cwd=project, env=env)
+    assert ack.returncode != 0
+    assert "invalid origin metadata" in ack.stderr
+    assert path.is_file()
+
+
+def test_malformed_explicit_origin_without_closing_header_cannot_downgrade(tmp_path):
+    project, state, env, _trace_dir = say_project(tmp_path)
+    origin_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    msg_id = "20260729T011000Z-claude-to-codex-unclosed"
+    new_dir = state / "inbox" / "codex" / "new"
+    new_dir.mkdir(parents=True)
+    path = new_dir / f"{msg_id}.md"
+    path.write_text(
+        f"[CLAUDE→CODEX question id={msg_id} ORIGIN={origin_uuid} unsafe"
+    )
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=project,
+        env=env,
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert payload[0]["problem"].startswith("invalid origin metadata:")
+    assert payload[0]["remedy"] == "manual-move"
+    assert path.is_file()
+
+
+def test_malformed_explicit_origin_after_punctuation_cannot_downgrade(tmp_path):
+    project, state, env, _trace_dir = say_project(tmp_path)
+    origin_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    msg_id = "20260729T011100Z-claude-to-codex-punctuation"
+    new_dir = state / "inbox" / "codex" / "new"
+    new_dir.mkdir(parents=True)
+    path = new_dir / f"{msg_id}.md"
+    path.write_text(
+        f"[CLAUDE→CODEX question id={msg_id},origin={origin_uuid}] unsafe"
+    )
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=project,
+        env=env,
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert payload[0]["problem"].startswith("invalid origin metadata:")
+    assert payload[0]["remedy"] == "manual-move"
+    ack = run_tool("rt-ack", msg_id, cwd=project, env=env)
+    assert ack.returncode != 0
+    assert "invalid origin metadata" in ack.stderr
+    assert path.is_file()
+
+
+def test_explicit_origin_with_leading_bom_or_space_cannot_downgrade(tmp_path):
+    project, state, env, _trace_dir = say_project(tmp_path)
+    origin_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    new_dir = state / "inbox" / "codex" / "new"
+    new_dir.mkdir(parents=True)
+    paths = []
+    for suffix, prefix in (
+        ("bom", "\ufeff"),
+        ("space", "  "),
+        ("damaged", "x"),
+    ):
+        msg_id = f"20260729T011500Z-claude-to-codex-{suffix}"
+        path = new_dir / f"{msg_id}.md"
+        path.write_text(
+            f"{prefix}[CLAUDE→CODEX question id={msg_id} "
+            f"origin={origin_uuid}] unsafe"
+        )
+        paths.append(path)
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=project,
+        env=env,
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 3
+    assert all(
+        record["problem"].startswith("invalid origin metadata:")
+        and record["remedy"] == "manual-move"
+        for record in payload
+    )
+    assert all(path.is_file() for path in paths)
+
+
+@pytest.mark.parametrize(
+    ("stem", "header_from", "header_id", "problem"),
+    [
+        (
+            "20260729T012000Z-claude-to-codex-stem",
+            "claude",
+            "20260729T012001Z-claude-to-codex-header",
+            "filename does not match message id",
+        ),
+        (
+            "20260729T012002Z-claude-to-codex-identity",
+            "hermes",
+            "20260729T012002Z-claude-to-codex-identity",
+            "message id identity does not match envelope",
+        ),
+    ],
+)
+def test_uuid_aware_identity_mismatch_requires_manual_move(
+    tmp_path,
+    stem,
+    header_from,
+    header_id,
+    problem,
+):
+    project, state, env, _trace_dir = say_project(tmp_path)
+    origin_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    new_dir = state / "inbox" / "codex" / "new"
+    new_dir.mkdir(parents=True)
+    path = new_dir / f"{stem}.md"
+    path.write_text(
+        f"[{header_from.upper()}→CODEX question id={header_id} "
+        f"origin={origin_uuid}] unsafe"
+    )
+
+    inbox = run_tool(
+        "rt-inbox",
+        "codex",
+        "-f",
+        "json",
+        cwd=project,
+        env=env,
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert len(payload) == 1
+    assert payload[0]["problem"] == problem
+    assert payload[0]["remedy"] == "manual-move"
+    assert "acknowledge with rt-ack" not in inbox.stderr
+    assert path.is_file()
+
+
+def test_rt_ack_rejects_forged_origin_uuid_outside_receiver_group(tmp_path):
+    (
+        _sibling,
+        _sibling_state,
+        receiver,
+        receiver_state,
+        registry,
+        env,
+    ) = git_sibling_projects(tmp_path)
+    unrelated = tmp_path / "unrelated-project"
+    unrelated_state = write_project(unrelated, registry=registry)
+    unrelated_uuid = json.loads(
+        (unrelated_state / "project.json").read_text()
+    )["uuid"]
+    msg_id = "20260729T020000Z-codex-to-codex-forged"
+    inbound = receiver_state / "inbox" / "codex" / "new" / f"{msg_id}.md"
+    inbound.parent.mkdir(parents=True)
+    inbound.write_text(
+        f"[CODEX→CODEX question id={msg_id} origin={unrelated_uuid}] forged"
+    )
+
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        "must reject",
+        cwd=receiver,
+        env={**env, "RT_FROM": "codex"},
+    )
+
+    assert ack.returncode != 0
+    assert "outside sender group" in ack.stderr
+    assert inbound.is_file()
+    assert not (unrelated_state / "inbox" / "codex").exists()
 
 
 def test_rt_say_no_nudge_rejects_same_multi_instance_but_allows_sibling(tmp_path):
@@ -1410,8 +3023,9 @@ def test_rt_say_maildir_commit_stays_successful_when_ledger_update_fails(tmp_pat
 
 def test_rt_ack_reports_downstream_failure_without_traceback(tmp_path):
     project, state, env, _trace_dir = say_project(tmp_path)
-    (state / "inbox").write_text("not a directory")
     original = "20260717T010000Z-codex-to-claude-original"
+    write_mail(state, "claude", original, "codex", "question", "please ack")
+    (state / "inbox" / "codex").write_text("not a directory")
 
     proc = run_tool(
         "rt-ack",
@@ -1430,6 +3044,71 @@ def test_rt_ack_reports_downstream_failure_without_traceback(tmp_path):
     assert proc.returncode != 0
     assert "failed to publish inbox message" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+@pytest.mark.parametrize("failure", ("identity-change", "lock-failure"))
+def test_rt_ack_reports_committed_ack_when_fresh_archive_admission_fails(
+    tmp_path,
+    monkeypatch,
+    capsys,
+    failure,
+):
+    project, state, env, _trace_dir = say_project(tmp_path)
+    sent = run_tool(
+        "rt-say",
+        "claude",
+        "question",
+        "archive admission boundary",
+        cwd=project,
+        env=env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    ref = sent.stdout.strip().split()[-1]
+    inbound = state / "inbox" / "claude" / "new" / f"{ref}.md"
+    assert inbound.is_file()
+
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("RT_PROJECTS_FILE", env["RT_PROJECTS_FILE"])
+    monkeypatch.setenv("RT_FROM", "claude")
+    module = load_cli_module("rt-ack")
+    real_lock = module.locked_project_mailbox
+    calls = 0
+
+    @contextmanager
+    def scripted_lock(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2 and failure == "lock-failure":
+            raise SystemExit("synthetic fresh receiver lock failure")
+        with real_lock(*args, **kwargs) as mailbox:
+            if calls == 2:
+                mailbox = dataclasses.replace(
+                    mailbox,
+                    project_uuid="00000000-0000-4000-8000-000000000077",
+                )
+            yield mailbox
+
+    monkeypatch.setattr(module, "locked_project_mailbox", scripted_lock)
+    with pytest.raises(SystemExit) as raised:
+        module._main([ref], "")
+
+    captured = capsys.readouterr()
+    error = str(raised.value)
+    assert calls == 2
+    assert "sent maildir-only" in captured.out
+    assert "acknowledgement delivered for" in error
+    assert "failed to archive inbound mail" in error
+    if failure == "identity-change":
+        assert "receiver project identity changed" in error
+    else:
+        assert "synthetic fresh receiver lock failure" in error
+    quiet = list((state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    assert len(quiet) == 1
+    assert f"refs={ref}" in quiet[0].read_text()
+    assert inbound.is_file()
+    assert not (
+        state / "inbox" / "claude" / "cur" / f"{ref}.md"
+    ).exists()
 
 
 def test_rt_ack_mail_commit_survives_ledger_failure_and_cur_ref_stays_effective(tmp_path):
@@ -1553,6 +3232,88 @@ def test_rt_inbox_shows_ledger_and_maildir_copies_with_source_labels(tmp_path):
     assert cur_id not in text_proc.stdout
 
 
+def test_rt_inbox_foreign_ledger_cannot_fold_or_ack_local_message(tmp_path):
+    project = tmp_path / "project"
+    state = write_project(project)
+    project_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    foreign_uuid = "00000000-0000-4000-8000-000000000099"
+    msg_id = "20260729T030000Z-codex-to-claude-collision"
+    mail_id = "20260729T030003Z-hermes-to-claude-mail"
+    records = [
+        {
+            "msg_id": msg_id,
+            "ts": "2026-07-29T03:00:00.000Z",
+            "from": "codex",
+            "to": "claude",
+            "kind": "question",
+            "body": "local record must remain visible",
+            "lifecycle": "pending",
+            "source": "rt-say",
+            "target_project_uuid": project_uuid,
+        },
+        {
+            "msg_id": msg_id,
+            "ts": "2026-07-29T03:00:01.000Z",
+            "from": "codex",
+            "to": "claude",
+            "kind": "question",
+            "body": "foreign lifecycle collision",
+            "lifecycle": "acked",
+            "source": "rt-say",
+            "target_project_uuid": foreign_uuid,
+        },
+        {
+            "msg_id": "20260729T030002Z-claude-to-codex-foreign-ack",
+            "ts": "2026-07-29T03:00:02.000Z",
+            "from": "claude",
+            "to": "codex",
+            "kind": "sync-ack",
+            "body": f"refs={msg_id}",
+            "refs": [msg_id],
+            "lifecycle": "pending",
+            "source": "rt-say",
+            "target_project_uuid": foreign_uuid,
+        },
+        {
+            "msg_id": "20260729T030004Z-codex-to-claude-corrupt",
+            "ts": "2026-07-29T03:00:04.000Z",
+            "from": "codex",
+            "to": "claude",
+            "kind": "fyi",
+            "body": "optional ledger field is corrupt",
+            "lifecycle": "pending",
+            "source": "rt-say",
+            "target_project_uuid": [],
+        },
+    ]
+    (state / "messages" / "codex.jsonl").write_text(
+        "".join(json.dumps(record) + "\n" for record in records)
+    )
+    write_mail(
+        state,
+        "claude",
+        mail_id,
+        "hermes",
+        "fyi",
+        "valid maildir remains readable",
+    )
+
+    inbox = run_tool(
+        "rt-inbox",
+        "claude",
+        "-f",
+        "json",
+        cwd=project,
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = json.loads(inbox.stdout)
+    assert {record["msg_id"] for record in payload} == {msg_id, mail_id}
+    by_id = {record["msg_id"]: record for record in payload}
+    assert by_id[msg_id]["body"] == "local record must remain visible"
+    assert by_id[mail_id]["body"] == "valid maildir remains readable"
+
+
 def test_rt_inbox_surfaces_malformed_mail_with_specimen_header(tmp_path):
     # Structural replay of field specimen 29195 (2026-07-21 cutover): the
     # Hermes reply template pushed a multi-word sentence into the single-token
@@ -1641,15 +3402,14 @@ def test_rt_inbox_malformed_variants_and_cur_stays_hidden(tmp_path):
         and record["lifecycle"] == "new"
         for record in payload
     )
-    # rt-ack archives the drifted stem and the unreadable file because their
-    # stems still target this mailbox between registered peers; the
-    # wrong-mailbox file is refused by rt-ack's identity checks, so only a
-    # manual move can break its wake loop.
+    # rt-ack can archive the legacy drifted header by its exact stem. The
+    # wrong-mailbox and unreadable files cannot pass its durable identity/origin
+    # preflight, so only a manual move can break those wake loops.
     remedies = {record["msg_id"]: record["remedy"] for record in payload}
     assert remedies == {
         "20260721T230001Z-codex-to-claude-renamed": "rt-ack",
         "20260721T230002Z-codex-to-hermes-22222": "manual-move",
-        "20260721T230003Z-codex-to-claude-33333": "rt-ack",
+        "20260721T230003Z-codex-to-claude-33333": "manual-move",
     }
     assert "3 malformed mail file(s) remain in new/" in proc.stderr
     assert "acknowledge with rt-ack (--fenced) <raw-id>:" in proc.stderr
@@ -2332,6 +4092,7 @@ def test_sync_ack_uses_quiet_ack_filename_without_changing_header_id(tmp_path):
         }
     )
     original = "20260717T010000Z-codex-to-claude-original"
+    write_mail(state, "claude", original, "codex", "question", "please ack")
 
     proc = run_tool("rt-ack", original, "received", cwd=project, env=env)
 
@@ -2339,7 +4100,9 @@ def test_sync_ack_uses_quiet_ack_filename_without_changing_header_id(tmp_path):
     ack_id = proc.stdout.strip().split()[-1]
     path = state / "inbox" / "codex" / "new" / f"ack-{ack_id}.md"
     assert path.is_file()
-    assert path.read_text().startswith(f"[CLAUDE→CODEX sync-ack id={ack_id}]")
+    assert path.read_text().startswith(
+        f"[CLAUDE→CODEX sync-ack id={ack_id} origin="
+    )
 
 
 def test_legacy_delivery_config_cannot_reenable_normal_nudges(tmp_path):
@@ -2552,6 +4315,7 @@ def test_maildir_rt_ack_uses_unique_codex_thread_environment_without_cmux(tmp_pa
         }
     )
     original = "20260717T010000Z-hermes-to-codex-original"
+    write_mail(state, "codex", original, "hermes", "question", "please ack")
 
     proc = run_tool("rt-ack", original, "remote ack", cwd=project, env=env)
 
@@ -2559,7 +4323,9 @@ def test_maildir_rt_ack_uses_unique_codex_thread_environment_without_cmux(tmp_pa
     ack_id = proc.stdout.strip().split()[-1]
     ack_path = state / "inbox" / "hermes" / "new" / f"ack-{ack_id}.md"
     assert ack_path.is_file()
-    assert ack_path.read_text().startswith(f"[CODEX→HERMES sync-ack id={ack_id}]")
+    assert ack_path.read_text().startswith(
+        f"[CODEX→HERMES sync-ack id={ack_id} origin="
+    )
     calls = read_cmux_calls(trace_dir)
     assert [call for call in calls if call[:1] in (["send"], ["send-key"])] == []
 

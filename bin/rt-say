@@ -4,6 +4,7 @@ import os
 import re
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -12,10 +13,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _rtlib import (
+    MailEnvelopeError,
+    ProjectAddress,
+    ProjectRegistryError,
+    authenticate_fenced_sender,
     find_project_root,
+    format_mail_envelope,
     load_agents_doc,
     locked_project_mailbox,
-    require_fenced_seat,
+    parse_mail_envelope,
+    parse_message_id,
+    resolve_project_address,
 )
 
 TOOL_DIR = Path(__file__).resolve().parent
@@ -40,7 +48,7 @@ def usage():
     print(
         "usage: rt-say [--verbose] [--fenced] "
         "[--no-nudge | --legacy-nudge-only] "
-        "<agent-or-instance> <kind> <body...>",
+        "<agent-or-instance>[@<project-name>] <kind> <body...>",
         file=sys.stderr,
     )
     raise SystemExit(2)
@@ -48,11 +56,13 @@ def usage():
 
 def print_help():
     print(
-        """usage: rt-say [--verbose] [--fenced] [--no-nudge | --legacy-nudge-only] <agent-or-instance> <kind> <body...>
+        """usage: rt-say [--verbose] [--fenced] [--no-nudge | --legacy-nudge-only] <agent-or-instance>[@<project-name>] <kind> <body...>
 
 Deliver a roundtable message through the project's maildir. A successful atomic
 write to inbox/<agent>/new is successful delivery and exits 0. Normal delivery
-does not require a topology map and never touches the keyboard.
+does not require a topology map and never touches the keyboard. The @project
+form addresses exactly one registered sibling worktree in the same derived
+group.
 
 options:
   --fenced             require the current Roundtable launcher lease; use with --no-nudge
@@ -98,27 +108,83 @@ def configured_target(root, target, *, required=True, runtime=None):
     """Resolve a configured target to (base agent, concrete instance)."""
     doc = load_agents_doc(root, "rt-say")
     agents = doc.get("agents") or {}
+    if not isinstance(agents, dict):
+        raise SystemExit(
+            "rt-say: invalid agents configuration: agents must be a mapping"
+        )
+    exact_candidates = []
+    base_candidates = []
     for base, config in agents.items():
-        base_name = str(base).lower()
-        instances = config.get("instances") if isinstance(config, dict) else None
-        if not instances:
+        if not isinstance(base, str) or not AGENT_COMPONENT_RE.fullmatch(base):
+            raise SystemExit(
+                "rt-say: invalid agents configuration: invalid base agent "
+                f"{base!r}"
+            )
+        base_name = base
+        if not isinstance(config, dict):
+            raise SystemExit(
+                "rt-say: invalid agents configuration for "
+                f"{base_name}: expected a mapping"
+            )
+        instances = config.get("instances")
+        if instances is None or instances == []:
             instances = [{"id": base_name}]
+        elif not isinstance(instances, list):
+            raise SystemExit(
+                "rt-say: invalid agents configuration for "
+                f"{base_name}: instances must be a list"
+            )
         instance_names = []
         for instance in instances:
             if isinstance(instance, str):
-                instance_name = instance.lower()
+                instance_name = instance
+            elif isinstance(instance, dict):
+                instance_id = instance.get("id")
+                if not isinstance(instance_id, str) or not instance_id:
+                    raise SystemExit(
+                        "rt-say: invalid agents configuration for "
+                        f"{base_name}: every instance needs an id"
+                    )
+                instance_name = instance_id
             else:
-                instance_name = str((instance or {}).get("id") or base_name).lower()
+                raise SystemExit(
+                    "rt-say: invalid agents configuration for "
+                    f"{base_name}: instance entries must be strings or mappings"
+                )
+            if not AGENT_COMPONENT_RE.fullmatch(instance_name):
+                raise SystemExit(
+                    "rt-say: invalid agents configuration for "
+                    f"{base_name}: invalid instance id {instance_name!r}"
+                )
             instance_names.append(instance_name)
             if instance_name == target:
-                return base_name, instance_name
+                exact_candidates.append((base_name, instance_name))
         if base_name == target:
-            if len(instance_names) == 1:
-                return base_name, instance_names[0]
-            raise SystemExit(
-                f"rt-say: {target} has multiple instances; use one of: "
-                + ", ".join(instance_names)
-            )
+            base_candidates.append((base_name, instance_names))
+    if len(exact_candidates) == 1:
+        return exact_candidates[0]
+    if len(exact_candidates) > 1:
+        matches = ", ".join(
+            f"{base}/{instance}"
+            for base, instance in sorted(exact_candidates)
+        )
+        raise SystemExit(
+            f"rt-say: ambiguous configured agent or instance {target}: "
+            f"{matches}"
+        )
+    if len(base_candidates) > 1:
+        matches = ", ".join(base for base, _instances in base_candidates)
+        raise SystemExit(
+            f"rt-say: ambiguous configured base agent {target}: {matches}"
+        )
+    if len(base_candidates) == 1:
+        base_name, instance_names = base_candidates[0]
+        if len(instance_names) == 1:
+            return base_name, instance_names[0]
+        raise SystemExit(
+            f"rt-say: {target} has multiple instances; use one of: "
+            + ", ".join(sorted(set(instance_names)))
+        )
     if not required and target in ((runtime or {}).get("agents") or {}):
         return target, target
     raise SystemExit(f"rt-say: unknown agent or instance: {target}")
@@ -156,6 +222,196 @@ def infer_sender_from_harness_env(root):
 def validate_agent_component(value, label):
     if not AGENT_COMPONENT_RE.fullmatch(value):
         raise SystemExit(f"rt-say: invalid {label} agent component: {value}")
+
+
+def parse_target_address(value):
+    """Return ``(agent, optional exact project name)``."""
+
+    agent, separator, project_name = value.partition("@")
+    agent = agent.lower()
+    if separator and (not agent or not project_name):
+        raise SystemExit(
+            "rt-say: invalid project address: expected "
+            "<agent-or-instance>@<project-name>"
+        )
+    validate_agent_component(agent, "target")
+    return agent, project_name if separator else None
+
+
+def positional_args(args):
+    return [
+        arg
+        for arg in args
+        if arg
+        not in {
+            "--verbose",
+            "--fenced",
+            "--no-nudge",
+            "--legacy-nudge-only",
+        }
+    ]
+
+
+def validate_ack_route(address, target, *, mailbox=None):
+    """Require durable inbound evidence for every quiet acknowledgement."""
+
+    sender = os.environ.get("RT_FROM", "").lower()
+    refs = [
+        ref
+        for ref in os.environ.get("RT_ACK_REFS", "").split(",")
+        if ref
+    ]
+    if not sender or not refs:
+        raise SystemExit(
+            "rt-say: acknowledgement UUID target requires inbound refs "
+            "and RT_FROM"
+        )
+    if mailbox is None:
+        with locked_project_mailbox(ROOT, tool="rt-say") as locked_mailbox:
+            return validate_ack_route(
+                address,
+                target,
+                mailbox=locked_mailbox,
+            )
+    if mailbox.project_uuid != address.origin_uuid:
+        raise SystemExit(
+            "rt-say: acknowledgement receiver identity changed: "
+            f"expected {address.origin_uuid}, "
+            f"resolved {mailbox.project_uuid}"
+        )
+    for ref in refs:
+        identity = parse_message_id(ref, recipient=sender)
+        if identity != (target, sender):
+            raise SystemExit(
+                "rt-say: acknowledgement UUID target does not match "
+                f"inbound ref: {ref}"
+            )
+        inbox = mailbox.inbox_dir / sender
+        directories = (inbox, inbox / "new", inbox / "cur")
+        for directory in directories:
+            try:
+                directory_info = directory.lstat()
+            except FileNotFoundError:
+                continue
+            if (
+                stat.S_ISLNK(directory_info.st_mode)
+                or not stat.S_ISDIR(directory_info.st_mode)
+            ):
+                raise SystemExit(
+                    "rt-say: acknowledgement maildir path is not a real "
+                    f"directory: {directory}"
+                )
+        paths = []
+        for directory in directories[1:]:
+            path = directory / f"{ref}.md"
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            paths.append(path)
+        if not paths:
+            raise SystemExit(
+                "rt-say: acknowledgement UUID target lacks inbound "
+                f"evidence for ref: {ref}"
+            )
+        identities = []
+        for path in paths:
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                raise SystemExit(
+                    "rt-say: acknowledgement inbound evidence is not a "
+                    f"regular file: {path}"
+                )
+            identities.append((info.st_dev, info.st_ino))
+        if len(set(identities)) != 1:
+            raise SystemExit(
+                "rt-say: conflicting acknowledgement inbound evidence "
+                f"for ref: {ref}"
+            )
+        try:
+            envelope = parse_mail_envelope(
+                paths[0].read_text(encoding="utf-8")
+            )
+        except (MailEnvelopeError, OSError, UnicodeError) as error:
+            raise SystemExit(
+                "rt-say: invalid acknowledgement inbound evidence for "
+                f"{ref}: {error}"
+            ) from None
+        cross_project = address.origin_uuid != address.target_uuid
+        if envelope is None or envelope.get("origin_uuid") is None:
+            if not cross_project:
+                continue
+        elif (
+            envelope.get("origin_uuid") == address.target_uuid
+            and envelope.get("msg_id") == ref
+            and envelope.get("from") == target
+            and envelope.get("to") == sender
+        ):
+            continue
+        raise SystemExit(
+            "rt-say: acknowledgement UUID target is not authorized "
+            f"by inbound ref: {ref}"
+        )
+
+
+def requested_project_address(args):
+    """Resolve scoped delivery only after sender fence authentication."""
+
+    positional = positional_args(args)
+    if len(positional) < 2:
+        usage()
+    target, project_name = parse_target_address(positional[0])
+    direct_uuid = os.environ.get("RT_TARGET_PROJECT_UUID", "").strip()
+    ack_mode = os.environ.get("RT_ACK_MODE") == "1"
+    requested_kind = positional[1] if len(positional) > 1 else ""
+    if ack_mode and requested_kind != "sync-ack":
+        raise SystemExit("rt-say: RT_ACK_MODE is reserved for rt-ack")
+    if direct_uuid and (not ack_mode or requested_kind != "sync-ack"):
+        raise SystemExit(
+            "rt-say: RT_TARGET_PROJECT_UUID is reserved for rt-ack"
+        )
+    if project_name and direct_uuid:
+        raise SystemExit(
+            "rt-say: project name and acknowledgement UUID target conflict"
+        )
+    if ack_mode and project_name:
+        raise SystemExit(
+            "rt-say: acknowledgement cross-project routing requires "
+            "rt-ack's UUID target"
+        )
+    if (project_name or direct_uuid) and "--legacy-nudge-only" in args:
+        raise SystemExit(
+            "rt-say: cross-worktree addressing is maildir-only and cannot "
+            "use --legacy-nudge-only"
+        )
+    if not project_name and not direct_uuid:
+        if ack_mode:
+            with locked_project_mailbox(ROOT, tool="rt-say") as mailbox:
+                local_address = ProjectAddress(
+                    origin_uuid=mailbox.project_uuid,
+                    origin_root=ROOT,
+                    origin_group="",
+                    target_uuid=mailbox.project_uuid,
+                    target_root=ROOT,
+                    target_name=ROOT.name,
+                )
+                validate_ack_route(
+                    local_address,
+                    target,
+                    mailbox=mailbox,
+                )
+        return target, None
+    try:
+        address = resolve_project_address(
+            ROOT,
+            target_name=project_name,
+            target_uuid=direct_uuid or None,
+        )
+    except ProjectRegistryError as error:
+        raise SystemExit(f"rt-say: project address failed: {error}") from None
+    if direct_uuid:
+        validate_ack_route(address, target)
+    return target, address
 
 
 def reject_unsupported_message_options(args):
@@ -362,7 +618,24 @@ def append_ledger_after_delivery(sender, record):
         )
 
 
-def base_record(msg_id, sender, target, kind, body, rendered, send_text, route, submit, refs, lifecycle, source, correlation=None):
+def base_record(
+    msg_id,
+    sender,
+    target,
+    kind,
+    body,
+    rendered,
+    send_text,
+    route,
+    submit,
+    refs,
+    lifecycle,
+    source,
+    correlation=None,
+    *,
+    origin_uuid=None,
+    target_project_uuid=None,
+):
     return {
         "schema": "roundtable.message_event.v1",
         "msg_id": msg_id,
@@ -382,6 +655,8 @@ def base_record(msg_id, sender, target, kind, body, rendered, send_text, route, 
         "refs": refs,
         "correlation": correlation or {},
         "source": source,
+        "origin_uuid": origin_uuid,
+        "target_project_uuid": target_project_uuid,
     }
 
 
@@ -531,18 +806,19 @@ def _prepare_legacy_context(args):
             file=sys.stderr,
         )
         raise SystemExit(2)
-    positional = [
-        arg
-        for arg in args
-        if arg not in {"--verbose", "--fenced", "--legacy-nudge-only"}
-    ]
+    positional = positional_args(args)
     if len(positional) < 2:
         usage()
 
     # From this point the caller explicitly requested an operational legacy
     # action, so preserve its uniform exit-3 failure contract.
     LEGACY_OPERATION_ACTIVE = True
-    target = positional[0].lower()
+    target, project_name = parse_target_address(positional[0])
+    if project_name:
+        raise SystemExit(
+            "rt-say: cross-worktree addressing is maildir-only and cannot "
+            "use --legacy-nudge-only"
+        )
     runtime = read_runtime()
     route = parse_resolve(target)
     runtime = read_runtime()
@@ -550,13 +826,13 @@ def _prepare_legacy_context(args):
     return {"runtime": runtime, "route": route}
 
 
-def _main_locked(fenced_agent, legacy_context):
+def _main_locked(fenced_agent, legacy_context, address):
     global LEGACY_OPERATION_ACTIVE
 
     args = sys.argv[1:]
     if "-h" in args or "--help" in args:
         print_help()
-        return
+        return None, None
 
     reject_unsupported_message_options(args)
 
@@ -583,7 +859,11 @@ def _main_locked(fenced_agent, legacy_context):
     ]
     if len(args) < 2:
         usage()
-    target = args[0].lower()
+    target, project_name = parse_target_address(args[0])
+    if project_name and address.target_name != project_name:
+        raise SystemExit(
+            "rt-say: project address changed during delivery preparation"
+        )
     kind = args[1]
     body_arg = " ".join(args[2:])
     validate_mail_kind(kind)
@@ -604,12 +884,14 @@ def _main_locked(fenced_agent, legacy_context):
     LOCK_DIR.mkdir(exist_ok=True)
     MSG_DIR.mkdir(exist_ok=True)
 
-    validate_agent_component(target, "target")
     explicit_sender = os.environ.get("RT_FROM", "").lower()
     if explicit_sender:
         validate_agent_component(explicit_sender, "sender")
     if maildir_only:
-        target_agent, target_instance = configured_target(ROOT, target)
+        target_agent, target_instance = configured_target(
+            address.target_root,
+            target,
+        )
         # Identity belongs to the harness adapter, not the terminal emulator.
         # Launchers inject RT_FROM; Codex app-server turns expose
         # CODEX_THREAD_ID. The compatibility --no-nudge flag is intentionally
@@ -633,11 +915,21 @@ def _main_locked(fenced_agent, legacy_context):
     validate_agent_component(sender, "sender")
     if maildir_only:
         _sender_agent, sender_instance = configured_target(ROOT, sender)
-        is_self_send = sender_instance == target_instance
+        is_self_send = (
+            address.origin_uuid == address.target_uuid
+            and sender_instance == target_instance
+        )
     else:
         is_self_send = sender in {target_agent, target_instance}
     if is_self_send and os.environ.get("RT_ALLOW_SELF_SEND", "0") != "1":
         raise SystemExit(f"rt-say: refusing self-send from {sender} to {target}")
+
+    # A base agent with exactly one configured instance is an address alias,
+    # not a mailbox or ledger identity. Durable identity must use concrete
+    # instances or an accepted send/ack can land where no configured seat
+    # consumes it.
+    durable_sender = sender_instance if maildir_only else sender
+    durable_target = target_instance if maildir_only else target
 
     refs = [ref for ref in os.environ.get("RT_ACK_REFS", "").split(",") if ref] if ack_mode else []
     if kind == "sync-ack" and not refs:
@@ -648,16 +940,44 @@ def _main_locked(fenced_agent, legacy_context):
     body = os.environ.get("RT_ACK_BODY") if ack_mode else body_arg
     if ack_mode and body == "":
         body = None
+    if ack_mode and kind == "sync-ack":
+        if not refs:
+            raise SystemExit(
+                "rt-say: acknowledgement requires at least one ref"
+            )
+        if body and any(part.startswith("refs=") for part in body.split()):
+            raise SystemExit(
+                "rt-say: acknowledgement body must not contain a refs token"
+            )
+        # RT_ACK_REFS is the validated lifecycle authority. Render the durable
+        # body from it instead of trusting a second argv copy that could name a
+        # different message.
+        body_arg = f"refs={','.join(refs)}"
+        if body:
+            body_arg = f"{body_arg} {body}"
 
-    msg_id = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{sender}-to-{target}-{os.getpid()}"
-    from_tag = sender.upper()
-    to_tag = target.upper()
-    header = f"[{from_tag}→{to_tag} {kind} id={msg_id}]"
-    mail_text = header + (f" {body_arg}" if body_arg else "")
-    rendered = f"{header} {body_arg}".rstrip()
+    msg_id = (
+        f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-"
+        f"{durable_sender}-to-{durable_target}-{os.getpid()}"
+    )
+    cross_project = address.origin_uuid != address.target_uuid
+    mail_text = format_mail_envelope(
+        durable_sender,
+        durable_target,
+        kind,
+        msg_id,
+        body_arg,
+        origin_uuid=address.origin_uuid,
+    )
+    rendered = mail_text
 
     if maildir_only:
-        publish_maildir(target, msg_id, mail_text, quiet_ack=kind == "sync-ack")
+        publish_maildir(
+            durable_target,
+            msg_id,
+            mail_text,
+            quiet_ack=kind == "sync-ack",
+        )
 
     if maildir_only:
         route = {"workspace": None, "surface": None, "pane": None}
@@ -665,8 +985,8 @@ def _main_locked(fenced_agent, legacy_context):
         send_text = terminal_single_line(rendered)
         pending = base_record(
             msg_id,
-            sender,
-            target,
+            durable_sender,
+            durable_target,
             kind,
             body,
             rendered,
@@ -676,14 +996,22 @@ def _main_locked(fenced_agent, legacy_context):
             refs,
             "pending",
             "rt-say",
+            origin_uuid=address.origin_uuid,
+            target_project_uuid=address.target_uuid,
         )
-        append_ledger_after_delivery(sender, pending)
+        deferred_ledger = None
+        if cross_project:
+            deferred_ledger = (durable_sender, pending)
+        else:
+            append_ledger_after_delivery(durable_sender, pending)
         if verbose:
             return (
-                f"sent id={msg_id} from={sender} to={target} "
-                "delivery=maildir submit=none"
+                f"sent id={msg_id} from={durable_sender} "
+                f"to={durable_target} "
+                "delivery=maildir submit=none",
+                deferred_ledger,
             )
-        return f"sent maildir-only {msg_id}"
+        return f"sent maildir-only {msg_id}", deferred_ledger
 
     # Everything below is the explicit, keyboard-only legacy path. It never
     # publishes maildir state; failures are therefore independent of delivery.
@@ -732,7 +1060,22 @@ def _main_locked(fenced_agent, legacy_context):
         }
         (send_lock / "meta.json").write_text(json.dumps(meta, ensure_ascii=False) + "\n")
 
-        pending = base_record(msg_id, sender, target, kind, body, rendered, send_text, route, submit, refs, "pending", "rt-say")
+        pending = base_record(
+            msg_id,
+            sender,
+            target,
+            kind,
+            body,
+            rendered,
+            send_text,
+            route,
+            submit,
+            refs,
+            "pending",
+            "rt-say",
+            origin_uuid=address.origin_uuid,
+            target_project_uuid=address.target_uuid,
+        )
         append_ledger(sender, pending)
 
         watcher = subprocess.Popen(
@@ -766,7 +1109,23 @@ def _main_locked(fenced_agent, legacy_context):
                         watcher.kill()
                     except Exception:
                         pass
-        injected = base_record(msg_id, sender, target, kind, body, rendered, send_text, route, submit, refs, "injected", "rt-say", correlation)
+        injected = base_record(
+            msg_id,
+            sender,
+            target,
+            kind,
+            body,
+            rendered,
+            send_text,
+            route,
+            submit,
+            refs,
+            "injected",
+            "rt-say",
+            correlation,
+            origin_uuid=address.origin_uuid,
+            target_project_uuid=address.target_uuid,
+        )
         append_ledger(sender, injected)
 
         if submit != "none":
@@ -774,7 +1133,23 @@ def _main_locked(fenced_agent, legacy_context):
             time.sleep(settle_delay)
             correlation["submit_settle_delay_ms"] = int(settle_delay * 1000)
             run("cmux", "send-key", "--workspace", route["workspace"], "--surface", route["surface"], submit, stdout=subprocess.DEVNULL)
-        submitted = base_record(msg_id, sender, target, kind, body, rendered, send_text, route, submit, refs, "submitted", "rt-say", correlation)
+        submitted = base_record(
+            msg_id,
+            sender,
+            target,
+            kind,
+            body,
+            rendered,
+            send_text,
+            route,
+            submit,
+            refs,
+            "submitted",
+            "rt-say",
+            correlation,
+            origin_uuid=address.origin_uuid,
+            target_project_uuid=address.target_uuid,
+        )
         append_ledger(sender, submitted)
     finally:
         release_lock(send_lock)
@@ -783,9 +1158,10 @@ def _main_locked(fenced_agent, legacy_context):
         return (
             f"sent id={msg_id} from={sender} to={target} "
             f"workspace={route['workspace']} surface={route['surface']} "
-            f"submit={submit}"
+            f"submit={submit}",
+            None,
         )
-    return f"sent {msg_id}"
+    return f"sent {msg_id}", None
 
 
 def main():
@@ -803,16 +1179,74 @@ def main():
     if fenced and "--no-nudge" not in args:
         print("rt-say: --fenced requires --no-nudge", file=sys.stderr)
         raise SystemExit(2)
+    reject_unsupported_message_options(args)
+    if "--no-nudge" in args and "--legacy-nudge-only" in args:
+        print(
+            "rt-say: --no-nudge and --legacy-nudge-only are mutually exclusive",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
     # Fence validation uses host-runtime locks. Complete it before taking the
-    # mailbox layout lock so migration never waits on the inverse order.
-    fenced_agent = require_fenced_seat(ROOT, "rt-say") if fenced else ""
+    # target registry or mailbox lock. It always authenticates the sender
+    # project, never the independently authorized target.
+    fenced_agent = authenticate_fenced_sender(ROOT, "rt-say") if fenced else ""
+    _target, requested_address = requested_project_address(args)
     legacy_context = _prepare_legacy_context(args)
-    with locked_project_mailbox(ROOT, tool="rt-say") as mailbox:
+    target_root = (
+        requested_address.target_root if requested_address is not None else ROOT
+    )
+    with locked_project_mailbox(target_root, tool="rt-say") as mailbox:
+        if (
+            requested_address is not None
+            and mailbox.project_uuid != requested_address.target_uuid
+        ):
+            raise SystemExit(
+                "rt-say: address target changed before delivery: "
+                f"expected {requested_address.target_uuid}, "
+                f"resolved {mailbox.project_uuid}"
+            )
+        address = requested_address or ProjectAddress(
+            origin_uuid=mailbox.project_uuid,
+            origin_root=ROOT,
+            origin_group="",
+            target_uuid=mailbox.project_uuid,
+            target_root=ROOT,
+            target_name=ROOT.name,
+        )
         LOCK_DIR = mailbox.locks_dir
         MSG_DIR = mailbox.messages_dir
         INBOX_DIR = mailbox.inbox_dir
         LEDGER_LOCK = LOCK_DIR / "ledger.lock"
-        output = _main_locked(fenced_agent, legacy_context)
+        output, deferred_ledger = _main_locked(
+            fenced_agent,
+            legacy_context,
+            address,
+        )
+
+    if deferred_ledger is not None:
+        sender, pending = deferred_ledger
+        try:
+            # Delivery committed in the target UUID mailbox. Record the
+            # outbound event under the origin UUID in a fresh, non-nested
+            # layout section so A→B and B→A cannot form a lock cycle.
+            with locked_project_mailbox(ROOT, tool="rt-say") as origin_mailbox:
+                if origin_mailbox.project_uuid != address.origin_uuid:
+                    raise SystemExit(
+                        "rt-say: origin project changed after delivery: "
+                        f"expected {address.origin_uuid}, "
+                        f"resolved {origin_mailbox.project_uuid}"
+                    )
+                LOCK_DIR = origin_mailbox.locks_dir
+                MSG_DIR = origin_mailbox.messages_dir
+                INBOX_DIR = origin_mailbox.inbox_dir
+                LEDGER_LOCK = LOCK_DIR / "ledger.lock"
+                append_ledger_after_delivery(sender, pending)
+        except (Exception, SystemExit) as error:
+            print(
+                "rt-say: warning: maildir delivery committed but ledger "
+                f"update failed: {error}",
+                file=sys.stderr,
+            )
     if output:
         print(output)
 

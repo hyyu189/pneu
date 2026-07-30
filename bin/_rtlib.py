@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -55,6 +56,17 @@ GIT_ROUTING_ENVIRONMENT = frozenset(
         "GIT_CONFIG_NOSYSTEM",
     }
 )
+MAIL_ENVELOPE_RE = re.compile(
+    r"^\[(?P<from>[a-z0-9#_-]+)→(?P<to>[a-z0-9#_-]+) "
+    r"(?P<kind>[^\s\]]+) id=(?P<msg_id>[^\s\]]+)"
+    r"(?: origin=(?P<origin_uuid>[^\s\]]+))?\]"
+    r"(?: (?P<body>.*))?$",
+    re.IGNORECASE | re.DOTALL,
+)
+MESSAGE_ID_OUTER_RE = re.compile(
+    r"^\d{8}T\d{6}Z-(?P<route>[a-z0-9#_-]+)-(?P<nonce>[^-]+)$"
+)
+MESSAGE_ID_AGENT_RE = re.compile(r"^[a-z0-9#_-]+$")
 
 
 @dataclass(frozen=True)
@@ -72,6 +84,18 @@ class ProjectMailbox:
     layout_lock: Path
 
 
+@dataclass(frozen=True)
+class ProjectAddress:
+    """One sender/target pair pinned from a single registry snapshot."""
+
+    origin_uuid: str
+    origin_root: Path
+    origin_group: str
+    target_uuid: str
+    target_root: Path
+    target_name: str
+
+
 class ProjectRegistryError(ValueError):
     """A registry or project identity cannot be used safely."""
 
@@ -82,6 +106,10 @@ class ProjectLayoutLockTimeout(ProjectRegistryError):
 
 class ProjectRegistryLockTimeout(ProjectRegistryError):
     """A registry writer did not quiesce before the caller's bound."""
+
+
+class MailEnvelopeError(ValueError):
+    """A mail file declares structured metadata that cannot be trusted."""
 
 
 def _validated_lock_timeout(value, label):
@@ -637,8 +665,12 @@ def _structural_registry_warnings(warnings):
     ]
 
 
-def require_fenced_seat(project, tool):
-    """Validate the exact launcher lease before a pre-approved mail action."""
+def authenticate_fenced_sender(project, tool):
+    """Authenticate the sender's exact launcher lease.
+
+    Cross-project target authorization is deliberately separate and happens
+    through ``resolve_project_address`` plus the target's own agents document.
+    """
 
     from _rtruntime import RuntimeStateError, inspect_seat, load_validated_lease
 
@@ -687,6 +719,12 @@ def require_fenced_seat(project, tool):
     ):
         raise SystemExit(f"{tool}: fenced seat changed during validation")
     return agent
+
+
+def require_fenced_seat(project, tool):
+    """Compatibility wrapper for callers that authenticate one local seat."""
+
+    return authenticate_fenced_sender(project, tool)
 
 
 def _absolute_registry_path(value):
@@ -980,6 +1018,126 @@ def _canonical_uuid(value, label):
             f"{label} UUID is not canonical lowercase form: {value!r}"
         )
     return canonical
+
+
+def mail_envelope_declares_origin(content):
+    """Return whether the structured header carries an origin token."""
+
+    if not isinstance(content, str):
+        return False
+    # Scan only the first header-shaped segment. A damaged opener, BOM, or
+    # leading whitespace must not erase an explicit UUID authority marker and
+    # silently downgrade the file to the legacy local-only grammar.
+    header, _separator, _body = content.partition("]")
+    return bool(
+        re.search(
+            r"(?<![A-Za-z0-9_])origin\s*=",
+            header,
+            re.IGNORECASE,
+        )
+    )
+
+
+def parse_mail_envelope(content):
+    """Parse a legacy or UUID-aware mail header.
+
+    ``None`` means the content is not a valid Roundtable envelope. An explicit
+    but invalid origin token is different: callers must fail closed rather
+    than silently treating a cross-project message as legacy local mail.
+    """
+
+    if not isinstance(content, str):
+        return None
+    match = MAIL_ENVELOPE_RE.fullmatch(content)
+    if match is None:
+        if mail_envelope_declares_origin(content):
+            raise MailEnvelopeError("invalid UUID-aware mail envelope")
+        return None
+    parsed = match.groupdict()
+    origin_uuid = parsed.get("origin_uuid")
+    if origin_uuid is None and mail_envelope_declares_origin(content):
+        raise MailEnvelopeError("invalid UUID-aware mail envelope")
+    if origin_uuid is not None:
+        try:
+            origin_uuid = _canonical_uuid(origin_uuid, "mail origin")
+        except ProjectRegistryError as error:
+            raise MailEnvelopeError(str(error)) from error
+    return {
+        "from": parsed["from"].lower(),
+        "to": parsed["to"].lower(),
+        "kind": parsed["kind"].lower(),
+        "msg_id": parsed["msg_id"],
+        "origin_uuid": origin_uuid,
+        "body": parsed.get("body") or "",
+    }
+
+
+def format_mail_envelope(
+    sender,
+    target,
+    kind,
+    msg_id,
+    body,
+    *,
+    origin_uuid=None,
+):
+    """Render the durable human-readable maildir envelope."""
+
+    origin = ""
+    if origin_uuid is not None:
+        try:
+            canonical = _canonical_uuid(origin_uuid, "mail origin")
+        except ProjectRegistryError as error:
+            raise MailEnvelopeError(str(error)) from error
+        origin = f" origin={canonical}"
+    header = f"[{sender.upper()}→{target.upper()} {kind} id={msg_id}{origin}]"
+    return header + (f" {body}" if body else "")
+
+
+def message_id_route(value):
+    """Return a path-safe message-id route component, or ``None``."""
+    if not isinstance(value, str):
+        return None
+    if "\x00" in value or "/" in value or Path(value).name != value:
+        return None
+    match = MESSAGE_ID_OUTER_RE.fullmatch(value)
+    if match is None:
+        return None
+    route = match.group("route")
+    return route if "-to-" in route else None
+
+
+def parse_message_id(value, *, recipient=None):
+    """Return the durable ``(from, to)`` tuple, optionally using a to hint.
+
+    Agent instance ids may themselves contain the historical ``-to-``
+    separator. The mailbox/seat recipient is authoritative when available and
+    makes that grammar unambiguous; callers without a recipient retain the
+    legacy rightmost-separator interpretation.
+    """
+
+    route = message_id_route(value)
+    if route is None:
+        return None
+    if recipient is not None:
+        if (
+            not isinstance(recipient, str)
+            or not MESSAGE_ID_AGENT_RE.fullmatch(recipient)
+        ):
+            return None
+        suffix = f"-to-{recipient}"
+        if not route.endswith(suffix):
+            return None
+        sender = route[: -len(suffix)]
+        target = recipient
+    else:
+        sender, target = route.rsplit("-to-", 1)
+    if (
+        not MESSAGE_ID_AGENT_RE.fullmatch(sender)
+        or not MESSAGE_ID_AGENT_RE.fullmatch(target)
+    ):
+        return None
+    return sender, target
 
 
 def _canonical_registered_path(value, label):
@@ -1368,6 +1526,311 @@ def _entry_with_revalidated_group(entry, root):
     if authoritative:
         effective["group"] = derived_group
     return effective
+
+
+def _verify_registered_entry_identity(entry):
+    """Prove that one registry row still owns its recorded live root."""
+
+    root = Path(entry["root"])
+    root_fd, state_fd = _open_project_guard(root)
+    try:
+        observed = _read_project_identity_at(root, state_fd)
+        if observed != entry["uuid"]:
+            raise ProjectRegistryError(
+                f"project registry entry {entry['uuid']} is not witnessed at "
+                f"{root}"
+            )
+        _verify_project_guard(root, root_fd, state_fd)
+    finally:
+        _close_project_guard(root_fd, state_fd)
+    return root
+
+
+def resolve_project_address(
+    sender_project,
+    *,
+    target_name=None,
+    target_uuid=None,
+    registry_path=None,
+):
+    """Resolve one authorized project pair from one immutable registry read.
+
+    External short-form sends select by the exact derived project name.
+    Quiet acknowledgements select the recorded origin UUID directly. Both
+    paths rederive and compare the live Git groups before granting authority;
+    the UUID path avoids mutable-name resolution, not sibling confinement.
+    """
+
+    if (target_name is None) == (target_uuid is None):
+        raise ProjectRegistryError(
+            "project address requires exactly one target name or target UUID"
+        )
+    if target_name is not None:
+        if (
+            not isinstance(target_name, str)
+            or not target_name
+            or "\x00" in target_name
+            or "\n" in target_name
+            or "\r" in target_name
+        ):
+            raise ProjectRegistryError("project address has an invalid target name")
+    if target_uuid is not None:
+        target_uuid = _canonical_uuid(target_uuid, "address target")
+
+    registry = _registry_path(registry_path)
+    raw_root = Path(sender_project).expanduser()
+    if raw_root.is_symlink():
+        raise ProjectRegistryError(
+            f"project root is a symbolic link: {raw_root}"
+        )
+    origin_root = raw_root.resolve()
+    if origin_root in {Path.home().resolve(), Path(origin_root.anchor)}:
+        guidance = not_project_message("rt-say")
+        raise ProjectRegistryError(
+            guidance.removeprefix("rt-say: ")
+        )
+    reconciled_origin = False
+    while True:
+        root_fd, state_fd = _open_project_guard(origin_root)
+        try:
+            origin_uuid = _read_project_identity_at(origin_root, state_fd)
+            if origin_uuid is None:
+                raise _missing_project_identity_error(origin_root, registry)
+            try:
+                _validate_registry_source(registry)
+                document = _read_projects_doc(registry)
+            except (ProjectRegistryError, ValueError) as error:
+                raise ProjectRegistryError(str(error)) from error
+            origin_entry, entries, _warnings = (
+                _target_registry_entry_from_document(
+                    document,
+                    registry,
+                    origin_uuid,
+                    current_root=origin_root,
+                )
+            )
+            if origin_entry["status"] != "active":
+                raise ProjectRegistryError(
+                    f"sender project identity {origin_uuid} is tombstoned"
+                )
+            stale_origin_path = (
+                origin_entry["root"] != origin_root
+                and not _same_existing_inode(
+                    origin_entry["root"],
+                    origin_root,
+                )
+            )
+            if not stale_origin_path:
+                origin_effective = _entry_with_revalidated_group(
+                    {
+                        **origin_entry,
+                        "root": origin_root,
+                        "path": origin_root,
+                    },
+                    origin_root,
+                )
+                origin_group = origin_effective["group"]
+                _verify_project_guard(origin_root, root_fd, state_fd)
+        finally:
+            _close_project_guard(root_fd, state_fd)
+        if not stale_origin_path:
+            break
+        if reconciled_origin:
+            raise ProjectRegistryError(
+                "sender project registry path remains stale after "
+                f"reconciliation: {origin_entry['root']} != {origin_root}"
+            )
+        # A scoped send creates a durable return route immediately. Reconcile
+        # only an observed UUID-witnessed move, under layout → registry order,
+        # before taking the final immutable sender/target snapshot. Normal
+        # sends retain the delivery-first/ledger-second lock behavior.
+        with locked_project_mailbox_checked(
+            origin_root,
+            registry_path=registry,
+        ):
+            resolve_project_mailbox_checked(
+                origin_root,
+                registry_path=registry,
+                reconcile=True,
+            )
+        reconciled_origin = True
+
+    if target_uuid is not None:
+        target_entry, _entries, _target_warnings = (
+            _target_registry_entry_from_document(
+                document,
+                registry,
+                target_uuid,
+            )
+        )
+        candidates = [target_entry]
+    else:
+        raw_claims = [
+            raw
+            for raw in (document.get("projects") or [])
+            if isinstance(raw, dict)
+            and raw.get("name") == target_name
+            and raw.get("status") != "tombstoned"
+        ]
+        candidates = [
+            entry
+            for entry in entries
+            if entry.get("status") == "active"
+            and entry.get("name") == target_name
+        ]
+        candidate_uuids = {entry["uuid"] for entry in candidates}
+        consumed_uuids = set()
+        invalid_related_claims = []
+
+        def malformed_claim_could_be_sibling(raw):
+            stored_group = raw.get("group")
+            unproven_group_could_match = (
+                stored_group == origin_group
+                or not isinstance(stored_group, str)
+            )
+            raw_path = raw.get("path")
+            if not isinstance(raw_path, str) or not raw_path:
+                return True
+            claim_root = Path(raw_path)
+            if not claim_root.is_absolute():
+                return True
+            try:
+                claim_info = claim_root.lstat()
+            except FileNotFoundError:
+                # An unavailable malformed row cannot currently be a live
+                # address candidate. Its stored group is useful only to keep a
+                # syntactically different group inert, never to authorize.
+                return unproven_group_could_match
+            except OSError:
+                return True
+            if stat.S_ISLNK(claim_info.st_mode):
+                return True
+            if not stat.S_ISDIR(claim_info.st_mode):
+                return unproven_group_could_match
+            claim_root_fd = claim_state_fd = None
+            try:
+                claim_root_fd, claim_state_fd = _open_project_guard(claim_root)
+                witnessed_uuid = _read_project_identity_at(
+                    claim_root,
+                    claim_state_fd,
+                )
+                if witnessed_uuid is None:
+                    return True
+                witnessed_group, _authoritative = _derive_project_group(
+                    claim_root,
+                    witnessed_uuid,
+                )
+                _verify_project_guard(
+                    claim_root,
+                    claim_root_fd,
+                    claim_state_fd,
+                )
+            except (OSError, ProjectRegistryError):
+                return True
+            finally:
+                if claim_root_fd is not None and claim_state_fd is not None:
+                    _close_project_guard(claim_root_fd, claim_state_fd)
+            return witnessed_group == origin_group
+
+        for raw in raw_claims:
+            raw_uuid = raw.get("uuid")
+            if raw_uuid in candidate_uuids and raw_uuid not in consumed_uuids:
+                consumed_uuids.add(raw_uuid)
+                continue
+            # A malformed row cannot grant authority, but neither may its
+            # stored group be trusted to exclude it. Re-witness any live path
+            # and ignore only a proven different group (or a missing path).
+            if malformed_claim_could_be_sibling(raw):
+                invalid_related_claims.append(raw)
+        if invalid_related_claims:
+            claims = ", ".join(
+                f"uuid={raw.get('uuid', '<missing>')} "
+                f"path={raw.get('path', '<missing>')}"
+                for raw in invalid_related_claims
+            ) or "none"
+            raise ProjectRegistryError(
+                f"project name {target_name!r} has an invalid or duplicate "
+                f"active registry claim; colliding claims: {claims}"
+            )
+
+    matches = []
+    for candidate in candidates:
+        candidate_label = (
+            f"project {target_name!r} ({candidate['uuid']})"
+            if target_name is not None
+            else f"address target {candidate['uuid']}"
+        )
+        if candidate.get("status") != "active":
+            if target_uuid is not None:
+                raise ProjectRegistryError(
+                    f"{candidate_label} is tombstoned"
+                )
+            continue
+        if not candidate.get("available"):
+            if candidate.get("group") != origin_group:
+                continue
+            raise ProjectRegistryError(
+                f"{candidate_label} is not available at "
+                f"{candidate['root']}"
+            )
+        target_root = _verify_registered_entry_identity(candidate)
+        if target_name is not None and target_root.name != target_name:
+            raise ProjectRegistryError(
+                f"project name {target_name!r} is stale for registered root "
+                f"{target_root}"
+            )
+        effective = _entry_with_revalidated_group(candidate, target_root)
+        if effective["group"] == origin_group:
+            matches.append((effective, target_root))
+        elif target_uuid is not None:
+            raise ProjectRegistryError(
+                f"{candidate_label} is outside sender group"
+            )
+
+    if not matches:
+        if target_uuid is not None:
+            raise ProjectRegistryError(
+                f"address target {target_uuid} is not an active sibling"
+            )
+        sibling_names = []
+        for entry in entries:
+            if (
+                entry.get("uuid") == origin_uuid
+                or entry.get("status") != "active"
+                or not entry.get("available")
+            ):
+                continue
+            try:
+                sibling_root = _verify_registered_entry_identity(entry)
+                sibling = _entry_with_revalidated_group(entry, sibling_root)
+            except ProjectRegistryError:
+                continue
+            if sibling["group"] == origin_group:
+                sibling_names.append(str(sibling["name"]))
+        available = ", ".join(sorted(set(sibling_names))) or "none"
+        raise ProjectRegistryError(
+            f"no active sibling project named {target_name!r} in sender group; "
+            f"available sibling projects: {available}"
+        )
+    if len(matches) != 1:
+        identifiers = ", ".join(
+            f"{entry['name']} (uuid={entry['uuid']}, root={root})"
+            for entry, root in matches
+        )
+        raise ProjectRegistryError(
+            f"project name {target_name!r} is ambiguous in sender group: "
+            f"{identifiers}"
+        )
+
+    target_entry, target_root = matches[0]
+    return ProjectAddress(
+        origin_uuid=origin_uuid,
+        origin_root=origin_root,
+        origin_group=origin_group,
+        target_uuid=target_entry["uuid"],
+        target_root=target_root,
+        target_name=target_entry["name"],
+    )
 
 
 def load_project_registry_strict(path=None):

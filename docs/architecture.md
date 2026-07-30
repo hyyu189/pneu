@@ -101,6 +101,12 @@ upgraded entries start with the project-local layout. The Claude project-skill
 bridge is a portable relative symlink and is part of the optional initial
 commit; an existing user-managed skills directory is preserved instead.
 
+`rt-say agent@project` uses one registry snapshot to pin the sender UUID and
+exactly one active target UUID. It rederives both live Git groups, checks the
+target's current basename, and only then reads the target worktree's own
+`agents.yaml`. The durable header records `origin=<sender-uuid>`; return
+receipts route by that UUID rather than repeating the mutable project name.
+
 ## P0 state placement and session ownership
 
 Roundtable separates project facts from facts that are meaningful only on one
@@ -134,9 +140,14 @@ retain a physical mailbox path as a capability.
 Fenced host-runtime validation completes before a mailbox layout section.
 Within a layout section the order is layout admission, layout resource,
 bounded registry mutation when required, then mailbox send/ledger locks.
-`rt-ack` uses separate shared sections for delivery and archive, re-resolving
-between them, so an exclusive cutover can safely occur at that boundary
-without a nested `rt-say` lock.
+For a sibling send, `rt-say` commits the target mail file under the target
+UUID's shared section, releases it, then records the best-effort outbound
+ledger event under the origin UUID in a fresh section. `rt-ack` first reads
+the exact inbound envelope under the receiver UUID, releases that section,
+delivers the quiet acknowledgement to the recorded origin UUID, and finally
+re-resolves the receiver UUID to archive. No operation nests two project
+layout locks, so opposite-direction sends cannot form a lock cycle and an
+exclusive cutover can safely occur at either boundary.
 
 Forward migration is a one-way copy transaction:
 local source → verified archival backup → durable registry-adjacent recovery
@@ -196,7 +207,7 @@ These identities are intentionally different:
 
 | Identity | Meaning | Reused |
 | --- | --- | --- |
-| `agent_id` | Stable project address and mailbox seat, such as `codex` | Yes |
+| `agent_id` | Stable mailbox seat inside one project, such as `codex` | Yes |
 | `session_id` | One Roundtable launch and ownership term | No |
 | `native_session_id` | Harness-native Codex thread or equivalent, when available | Only for an explicit resume |
 | `lease_revision` | Fencing token for the current owner of the seat | No |
