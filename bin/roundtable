@@ -470,7 +470,15 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
 
     print("Choose a harness seat:", file=stderr)
     for index, (harness, agent_id) in enumerate(seats, 1):
-        print(f"  {index}) {harness} — {agent_id}", file=stderr)
+        activation_hint = (
+            " (starts with a visible automatic Roundtable activation turn)"
+            if harness == "codex"
+            else ""
+        )
+        print(
+            f"  {index}) {harness} — {agent_id}{activation_hint}",
+            file=stderr,
+        )
     for harness, detail in unavailable:
         print(f"  unavailable: {harness} — {detail}", file=stderr)
     raw = read_choice(stdin, stderr, "Select harness: ")

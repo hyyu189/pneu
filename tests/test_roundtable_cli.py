@@ -630,7 +630,11 @@ def test_selector_marks_configured_but_missing_harness_unavailable(
 
     assert selected == ("codex", "codex")
     assert "unavailable: claude" in stderr.getvalue()
-    assert "1) codex" in stderr.getvalue()
+    assert (
+        "1) codex — codex "
+        "(starts with a visible automatic Roundtable activation turn)"
+        in stderr.getvalue()
+    )
 
 
 def test_direct_missing_harness_fails_before_setup(
