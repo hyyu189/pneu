@@ -128,3 +128,44 @@ displays the derived group/sibling set, refusals never say WHICH project's
 configuration refused, pre-reconcile failures don't hint at the self-heal —
 overlap the M5 communication batch and should be triaged there, not fixed
 piecemeal now.
+
+## Closure verification — 2026-07-30
+
+Codex's fix commit `6a6fb79` was verified by replaying every recorded
+reproduction (three independent replay agents; the F1/F2 agent also
+re-reproduced both original defects against the pre-fix `4a23244` code in
+the same harness as a negative control).
+
+- **F1 closed** — fresh-origin cross-worktree send: no warning, both
+  ledger records present; bare same-project send unaffected.
+- **F2 closed** — unparseable and non-mapping target agents.yaml now fail
+  closed with one-line diagnostics naming the file; valid-YAML delivery
+  unaffected.
+- **F3 closed** — all four dead-mail classes carry `problem` +
+  `remedy: "manual-move"` in JSON plus a per-file stderr notice in every
+  format; the executed remedy breaks the wake loop; batch posture is
+  archive-on-first-pass per origin group with idempotent retry (two
+  identical runs, exactly one receipt), disclosed verbatim in SKILL.md.
+- **F4 closed** — the identity-mismatch refusal now leads with the typed
+  name; unit regression pins it.
+- **F5.1/.3/.4 closed** — origin=-on-every-envelope stated in
+  README/SKILL/architecture/handoff with the pre-M4 reader characterized
+  against pinned commit `b45307d` (`problem=invalid mail header`) and a
+  regression test; suite reproduced at 835/0/0 with a clean tree;
+  public-safety 115 tracked files, self-consistent.
+- **F5.2 was NOT closed by `6a6fb79`** — the claimed `py_compile` sweep
+  was a one-off manual run recorded in prose; no committed gate existed,
+  CI's `compileall` still matched only `*.py`, and `bin/rt-claude` /
+  `bin/rt-hermes` were executed by no test at all, so a syntax error in
+  them passed every check. Per the project lead's arbitration this was
+  closed by the product lead directly: `tests/test_bin_syntax.py`
+  compiles every Python file under `bin/` (`.py` or python-shebang;
+  currently 23) with `py_compile(doraise=True)` plus a discovery-count
+  floor, riding CI's existing pytest step. Verified green on the clean
+  tree and red on a syntax error injected into `bin/rt-hermes`. Full
+  suite: 859/0/0.
+- Coverage-gap tests all present; the `agent@<uuid>` ack-only gate test
+  turned out to predate the acceptance (introduced in `4a23244` itself) —
+  a critic misclassification, no action needed.
+
+**M4 is accepted unconditionally as of `6a6fb79` + `tests/test_bin_syntax.py`.**
