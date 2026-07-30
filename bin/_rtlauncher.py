@@ -285,6 +285,40 @@ def append_codex_seat_overrides(argv: list[str]) -> list[str]:
     return [*argv[:separator], *overrides, *argv[separator:]]
 
 
+CODEX_SEAT_PRIMER = (
+    "[roundtable] Seat activation turn. Do not call tools, inspect files, "
+    "or modify the workspace. Reply exactly: ready."
+)
+
+
+def codex_seat_primer_args(argv: list[str]) -> list[str]:
+    """Launcher-primed first turn for a bare project-anchored Codex launch.
+
+    Codex dispatches its queued SessionStart hook only from a turn, so a
+    seat that never receives one stays unbound.  On the verified standalone
+    Codex 0.146 a positional prompt auto-submits: the real first turn
+    materializes the rollout and fires the hook before model sampling,
+    completing the fenced native-thread binding with no human message.
+    Other releases keep the existing live launch gates; per the version
+    policy this is a documented tested combination, not a version-range
+    support claim.
+
+    The text must remain a no-action instruction: it runs as a genuine
+    model turn, and under a full-auto approval configuration an inviting
+    prompt would mean unattended workspace changes.  Explicit native
+    arguments disable the primer entirely so prompts, flags, and
+    subcommands pass through untouched; RT_CODEX_NO_PRIMER=1 is the
+    emergency opt-out.  The model's reply is never a binding health
+    source — the host runtime record is.
+    """
+
+    if argv:
+        return []
+    if os.environ.get("RT_CODEX_NO_PRIMER") == "1":
+        return []
+    return ["--", CODEX_SEAT_PRIMER]
+
+
 def anchor_codex_project(root: Path, argv: list[str]) -> list[str]:
     """Make the selected project the explicit native Codex working root.
 
@@ -587,6 +621,7 @@ def launch(harness: str, argv: list[str]) -> int:
         command.append("--tui")
     if harness == "codex" and root is not None:
         command.extend(append_codex_seat_overrides(codex_argv))
+        command.extend(codex_seat_primer_args(argv))
     else:
         command.extend(argv)
     command[0] = str(executable)

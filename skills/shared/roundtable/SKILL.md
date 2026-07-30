@@ -183,7 +183,11 @@ its watcher with the Hermes session.
 `rt-codex`). The trusted SessionStart hook atomically queues the native thread
 identity; the wake bridge validates its exact project cwd and fenced launcher
 lease before binding. On first use Codex may ask the human to review the hook
-with `/hooks`; never bypass that trust decision. Manual
+with `/hooks`; never bypass that trust decision. A bare project-anchored
+launch primes its own first turn with a fixed no-action activation prompt,
+so the seat normally binds before any human message; explicit native
+arguments or `RT_CODEX_NO_PRIMER=1` skip the primer and that seat binds on
+its first real turn instead. Manual
 `rt-codex-wake bind <project-root>` is a diagnostic fallback only. An unbound
 session has no waker, but its mail still waits durably like any offline agent's.
 

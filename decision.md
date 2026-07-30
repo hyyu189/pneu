@@ -2,6 +2,31 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-07-30: Launcher-primed first turn for bare Codex launches (Ocean).
+  Supersedes the earlier refusal to send a synthetic turn — the zero-turn
+  upstream draft explicitly wanted binding "without sending a fake
+  prompt, starting a model turn, or injecting synthetic conversation
+  history" — because Ocean accepts the visible tradeoff to make the
+  central-mail v1 usable for ourselves now. A bare project-anchored
+  `rt-codex`/`roundtable codex` launch appends `--` and a fixed
+  activation prompt; on the verified standalone Codex 0.146 the
+  positional prompt auto-submits, so the real first turn materializes
+  the rollout and dispatches SessionStart before model sampling,
+  completing the fenced native-thread binding with no human message.
+  The primer is a no-action instruction (no tools, no file access, no
+  workspace changes, single-word reply) pinned by exact-argv tests,
+  because it runs as a genuine model turn and an inviting prompt under a
+  full-auto approval configuration would mean unattended workspace
+  changes. Explicit native prompts, flags, and subcommands pass through
+  untouched and disable the primer; `RT_CODEX_NO_PRIMER=1` is the
+  emergency opt-out, deliberately not a configuration system. Per the
+  version policy there is no `>=` support claim and no new probe: 0.146
+  is the documented tested combination and other releases keep the
+  existing live launch gates. Boundaries: `/clear` rebinds on the next
+  real prompt; a blank parked seat has no wake promise; `/new` and
+  in-process resume/fork stay outside the v1 wake-safe contract — work
+  right after clear, or exit and relaunch. The model's reply text is
+  never a binding health source; the host runtime record is.
 - 2026-07-29: Migration robustness frozen at the accepted state (Ocean).
   Remaining `_rtmigrate.py` defects are parked, not fixed — even known
   ones — unless they break one of the three load-bearing properties:

@@ -107,8 +107,18 @@ queues the native session identity after resolving its UUIDv7 launch window,
 current lease revision, and live launcher-owner identity. The wake bridge then
 validates the exact project cwd and thread shape before recording the binding.
 The callback does not re-enter the app-server while the thread is starting.
-Manual binding remains a troubleshooting fallback, not a normal onboarding
-step:
+
+A bare Roundtable Codex launch primes that first turn itself: the launcher
+appends a fixed, visible no-action activation prompt (the launcher-primed
+first turn, verified against standalone Codex 0.146), so the thread normally
+binds before the first human message. Explicit native prompts, flags, and
+subcommands pass through untouched and skip the primer, as does
+`RT_CODEX_NO_PRIMER=1`; those launches bind on their first real turn as
+before. `/clear` rebinds on the next real prompt, and a parked seat that
+never takes a turn has no wake promise. The activation reply is cosmetic —
+binding health is read from the host runtime record, never from the model's
+answer. Manual binding remains a troubleshooting fallback, not a normal
+onboarding step:
 
 ```bash
 rt-codex-wake bind /absolute/path/to/project

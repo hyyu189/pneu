@@ -774,3 +774,91 @@ def test_codex_cd_conflict_fails_before_preflight_or_claim(tmp_path, monkeypatch
         _rtlauncher.launch("codex", ["--cd", "/other"])
 
     assert calls == []
+
+
+def _codex_launch_fixture(tmp_path, monkeypatch, user_argv, extra_env=None):
+    project = write_project(
+        tmp_path / "project", agent_id="codex", harness="codex"
+    )
+    fake_binary = tmp_path / "codex"
+    observed = {}
+
+    clear_lease_environment(monkeypatch)
+    monkeypatch.setenv("RT_FROM", "codex")
+    monkeypatch.delenv("RT_CODEX_NO_PRIMER", raising=False)
+    for name, value in (extra_env or {}).items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setattr(
+        _rtlauncher, "choose_launch_cwd", lambda _harness: project
+    )
+    monkeypatch.setattr(_rtlauncher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(
+        _rtlauncher, "harness_bin", lambda _harness: fake_binary
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "preflight_codex_services",
+        lambda *, ready_action: ready_action(),
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "claim",
+        lambda root, agent_id, harness: lease(root, agent_id, revision=3),
+    )
+    monkeypatch.setattr(
+        _rtlauncher, "arm_codex_launch_intent", lambda _token: None
+    )
+
+    def fake_execv(program, command):
+        observed["command"] = command
+        raise ExecCalled
+
+    monkeypatch.setattr(_rtlauncher.os, "execv", fake_execv)
+
+    with pytest.raises(ExecCalled):
+        _rtlauncher.launch("codex", user_argv)
+    return observed["command"]
+
+
+def test_bare_codex_launch_appends_the_seat_primer(tmp_path, monkeypatch):
+    command = _codex_launch_fixture(tmp_path, monkeypatch, [])
+
+    # The primer is the exact no-action activation text, one argv element,
+    # behind the -- separator so Codex reads it as a prompt literal.
+    assert command[-2:] == ["--", _rtlauncher.CODEX_SEAT_PRIMER]
+    assert command.count(_rtlauncher.CODEX_SEAT_PRIMER) == 1
+    assert _rtlauncher.CODEX_SEAT_PRIMER == (
+        "[roundtable] Seat activation turn. Do not call tools, inspect "
+        "files, or modify the workspace. Reply exactly: ready."
+    )
+
+
+def test_explicit_codex_arguments_disable_the_primer(tmp_path, monkeypatch):
+    command = _codex_launch_fixture(
+        tmp_path, monkeypatch, ["--model", "gpt-5.6"]
+    )
+
+    assert _rtlauncher.CODEX_SEAT_PRIMER not in command
+    assert command[-2:] != ["--", _rtlauncher.CODEX_SEAT_PRIMER]
+    assert "--model" in command and "gpt-5.6" in command
+
+
+def test_user_prompt_literals_stay_untouched_without_a_primer(
+    tmp_path, monkeypatch
+):
+    command = _codex_launch_fixture(
+        tmp_path, monkeypatch, ["--", "explain this repo"]
+    )
+
+    assert command.count("--") == 1
+    assert command[-1] == "explain this repo"
+    assert _rtlauncher.CODEX_SEAT_PRIMER not in command
+
+
+def test_rt_codex_no_primer_disables_the_bare_primer(tmp_path, monkeypatch):
+    command = _codex_launch_fixture(
+        tmp_path, monkeypatch, [], extra_env={"RT_CODEX_NO_PRIMER": "1"}
+    )
+
+    assert _rtlauncher.CODEX_SEAT_PRIMER not in command
+    assert "--" not in command
