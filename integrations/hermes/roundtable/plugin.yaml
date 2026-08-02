@@ -1,5 +1,5 @@
 name: roundtable
-version: "0.2.0"
+version: "0.2.1"
 description: "Wake an opted-in Hermes CLI session when durable Roundtable mail arrives."
 author: Roundtable contributors
 provides_hooks:

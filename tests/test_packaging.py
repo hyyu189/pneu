@@ -685,8 +685,8 @@ def test_same_version_source_reinstall_rejects_different_input_tree(tmp_path):
     assert (prefix / "install-manifest.json").read_bytes() == manifest_before
 
 
-def test_install_020_beside_pre_migration_019_runtime(tmp_path):
-    assert VERSION == "0.2.0"
+def test_install_021_beside_pre_migration_019_runtime(tmp_path):
+    assert VERSION == "0.2.1"
     home = tmp_path / "home"
     home.mkdir()
     prefix = home / ".roundtable"
@@ -738,12 +738,12 @@ def test_install_020_beside_pre_migration_019_runtime(tmp_path):
     )
 
     assert upgraded.returncode == 0, upgraded.stderr
-    assert os.readlink(current) == "versions/0.2.0"
+    assert os.readlink(current) == "versions/0.2.1"
     assert not (old_dir / "bin" / "_rtmigrate.py").exists()
-    assert (prefix / "versions" / "0.2.0" / "bin" / "_rtmigrate.py").is_file()
+    assert (prefix / "versions" / "0.2.1" / "bin" / "_rtmigrate.py").is_file()
     upgraded_manifest = json.loads(manifest_path.read_text())
     assert upgraded_manifest["versions"] == sorted(
-        [str(old_dir), str(prefix / "versions" / "0.2.0")]
+        [str(old_dir), str(prefix / "versions" / "0.2.1")]
     )
 
 
