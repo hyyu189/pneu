@@ -264,6 +264,27 @@ def test_idle_three_messages_produce_one_wake(tmp_path):
     assert len(list(inbox.iterdir())) == 3
 
 
+def test_origin_aware_mail_produces_one_wake(tmp_path):
+    project = write_project(tmp_path / "project")
+    msg_id = "20260716T040010Z-claude-to-codex-origin"
+    project_uuid = json.loads(
+        (project / ".roundtable" / "project.json").read_text()
+    )["uuid"]
+    inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
+    inbox.mkdir(parents=True, exist_ok=True)
+    (inbox / f"{msg_id}.md").write_text(
+        f"[CLAUDE→CODEX directive id={msg_id} origin={project_uuid}] test\n"
+    )
+    client = FakeClient(thread(project))
+    store = wake.StateStore(tmp_path / "state.json")
+    bridge = wake.WakeBridge(client, [project], store, auto_discover=True)
+
+    result = bridge.step()
+
+    assert result[0].ok and result[0].detail == "wake started"
+    assert client.turn_count == 1
+
+
 def test_layout_contention_is_transient_not_identity_error(tmp_path):
     project = write_project(tmp_path / "project")
     client = FakeClient(thread(project))
