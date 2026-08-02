@@ -316,7 +316,7 @@ acknowledgement, and drain. It does not prove interactive wake UX.
 | iTerm2 | Same maildir core | Pending promotion gate |
 | Ghostty | Same maildir core | Pending promotion gate |
 | cmux | Same maildir core; optional topology features | Pending baseline and separate optional-adapter gate |
-| tmux | Core design is reusable | Unsupported until lifecycle and wake E2E pass |
+| tmux | Delivery/ack loop, cross-worktree addressing, watcher wake mechanics (attached and detached), app-server socket and launchd reachability all validated under tmux in isolated labs on 2026-08-02; static audit found no terminal-sensitive code on the delivery or wake paths | Promotion gate: one full credentialed seat launched inside tmux; docs must carry the env-propagation caveat (a running tmux server does not see a client shell's later exports — use `tmux new-window -e VAR=...` or `set-environment` plus a fresh pane) |
 | Cross-host SSH | No P0 transport | Unsupported |
 
 Every supported P0 participant currently shares one host filesystem and one

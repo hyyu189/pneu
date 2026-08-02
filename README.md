@@ -39,7 +39,8 @@ transport.
 | npm Codex CLI `0.144.6` | Exact-release protocol smoke, live RC5 cutover, cold start, launchd-to-socket-peer identity, SessionStart thread/lease identity, auto-bind, and isolated upgrade pass; full credentialed wake E2E remains a release gate; any release at or above the `0.144.6` floor launches when its identity-proven daemon passes a live protocol probe and fails closed otherwise |
 | Codex standalone | Canonical resolver path implemented; standalone `0.145.0` launches when its identity-proven daemon passes the live protocol probe and fails closed on probe failure — permitted to run, still not a validated support claim because no standalone install has completed the live gate |
 | cmux | The same baseline plus optional project/workspace topology, diagnostics, and notifications |
-| tmux and cross-host SSH | Not yet supported |
+| tmux | Delivery, ack, cross-worktree addressing, and the Claude wake watcher validated under tmux in isolated labs (both directions, detached sessions included); a full credentialed seat-in-tmux session remains the promotion gate. tmux windows do not inherit a client shell's later exports, so pass environment overrides with `tmux new-window -e` when scripting seats |
+| Cross-host SSH | Not yet supported |
 
 ## What "done" means
 
