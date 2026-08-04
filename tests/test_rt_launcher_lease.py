@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -13,6 +14,7 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtlauncher
+import _rtruntime
 
 
 class ExecCalled(Exception):
@@ -104,6 +106,63 @@ def test_anchored_launcher_claims_seat_and_exports_lease_environment(
             "RT_LEASE_REVISION": "7",
         },
     }
+
+
+def test_resume_shaped_launch_reuses_same_process_lease_and_exports_record(
+    tmp_path, monkeypatch
+):
+    project = write_project(
+        tmp_path / "project", agent_id="claude", harness="claude-code"
+    )
+    runtime = tmp_path / "runtime"
+    fake_binary = tmp_path / "claude"
+    observed = {}
+
+    clear_lease_environment(monkeypatch)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    token = _rtruntime.claim(project, "claude", "claude")
+    # Simulate a resume launcher inheriting a prior fence. The launcher must
+    # reconcile it against the live record before exec instead of claiming a
+    # second revision.
+    monkeypatch.setenv("RT_PROJECT_ROOT", str(project))
+    monkeypatch.setenv("RT_FROM", "claude")
+    monkeypatch.setenv("RT_SESSION_ID", "stale-export")
+    monkeypatch.setenv("RT_LEASE_REVISION", "stale-revision")
+    monkeypatch.setattr(
+        _rtlauncher, "choose_launch_cwd", lambda _harness: project
+    )
+    monkeypatch.setattr(_rtlauncher.os, "chdir", lambda _path: None)
+    monkeypatch.setattr(
+        _rtlauncher, "harness_bin", lambda _harness: fake_binary
+    )
+    monkeypatch.setattr(
+        _rtlauncher,
+        "claim",
+        lambda *_args: pytest.fail("resume path claimed the seat twice"),
+    )
+
+    def fake_execv(program, command):
+        observed.update(
+            program=program,
+            command=command,
+            environment={
+                name: os.environ.get(name) for name in _rtlauncher.LEASE_ENV_NAMES
+            },
+        )
+        raise ExecCalled
+
+    monkeypatch.setattr(_rtlauncher.os, "execv", fake_execv)
+
+    with pytest.raises(ExecCalled):
+        _rtlauncher.launch("claude", ["--resume", "native-thread"])
+
+    record_path = _rtruntime.seat_paths(project, "claude").lease
+    record = json.loads(record_path.read_text())
+    assert observed["command"] == [str(fake_binary), "--resume", "native-thread"]
+    assert observed["environment"]["RT_SESSION_ID"] == record["sessionId"]
+    assert observed["environment"]["RT_LEASE_REVISION"] == record["revision"]
+    assert observed["environment"]["RT_SESSION_ID"] == token.session_id
 
 
 def test_bare_claude_launcher_forces_a_fresh_native_chat(tmp_path, monkeypatch):

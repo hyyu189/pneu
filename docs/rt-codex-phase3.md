@@ -107,6 +107,28 @@ feedback loop.
 ~/.roundtable/bin/rt-doctor
 ```
 
+### Thread-preserving seat handoff
+
+When a Codex seat must be restarted without losing its native thread, use the
+guarded handoff command from outside the active seat:
+
+```bash
+~/.roundtable/bin/rt-codex-wake handoff /absolute/project/root \
+  --thread-id "$CODEX_THREAD_ID"
+```
+
+It verifies the thread's project identity, refuses a live or ambiguous Codex
+seat, clears only a launch intent proven stale, removes the old binding, and
+prints the exact `rt-codex --resume <thread-id>` command plus the next binding
+step. It prepares the restart; it does not launch a detached Codex process.
+
+The manual fallback remains the four-step sequence: verify the old seat is
+stale, run `rt-codex-wake unbind <project>`, remove only the matching stale
+`codex-launch-intent.json`, then run `rt-codex --resume <thread-id>` and send
+one activation turn. If SessionStart does not bind the resumed thread, use
+the diagnostic `rt-codex-wake bind <project> --thread-id <thread-id>` from
+that Codex turn.
+
 ## Project registry and launchers (WP4)
 
 `~/.roundtable/projects.yaml` is the sole discovery source for the wake bridge,
