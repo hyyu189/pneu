@@ -114,6 +114,7 @@ def configured_target(root, target, *, required=True, runtime=None):
         )
     exact_candidates = []
     base_candidates = []
+    valid_names = set()
     for base, config in agents.items():
         if not isinstance(base, str) or not AGENT_COMPONENT_RE.fullmatch(base):
             raise SystemExit(
@@ -121,6 +122,7 @@ def configured_target(root, target, *, required=True, runtime=None):
                 f"{base!r}"
             )
         base_name = base
+        valid_names.add(base_name)
         if not isinstance(config, dict):
             raise SystemExit(
                 "rt-say: invalid agents configuration for "
@@ -157,6 +159,7 @@ def configured_target(root, target, *, required=True, runtime=None):
                     f"{base_name}: invalid instance id {instance_name!r}"
                 )
             instance_names.append(instance_name)
+            valid_names.add(instance_name)
             if instance_name == target:
                 exact_candidates.append((base_name, instance_name))
         if base_name == target:
@@ -187,7 +190,10 @@ def configured_target(root, target, *, required=True, runtime=None):
         )
     if not required and target in ((runtime or {}).get("agents") or {}):
         return target, target
-    raise SystemExit(f"rt-say: unknown agent or instance: {target}")
+    rendered = ", ".join(sorted(valid_names)) or "none configured"
+    raise SystemExit(
+        f"rt-say: unknown agent or instance: {target}; use one of: {rendered}"
+    )
 
 
 def infer_sender_from_harness_env(root):
@@ -221,7 +227,30 @@ def infer_sender_from_harness_env(root):
 
 def validate_agent_component(value, label):
     if not AGENT_COMPONENT_RE.fullmatch(value):
-        raise SystemExit(f"rt-say: invalid {label} agent component: {value}")
+        raise SystemExit(
+            f"rt-say: invalid {label} agent component: {value}; "
+            "expected pattern [a-z0-9#_-]+"
+        )
+
+
+def warn_if_target_not_active(root, target):
+    """Report a dead target after durable delivery without blocking delivery."""
+
+    try:
+        from _rtruntime import RuntimeStateError, inspect_seat
+
+        inspection = inspect_seat(root, target)
+    except (OSError, RuntimeStateError):
+        inspection = None
+    if inspection is None or not str(
+        getattr(inspection, "status", "")
+    ).startswith("active_"):
+        print(
+            f"note: no active seat observed for {target}; mail is durable and "
+            "will deliver when the seat resumes.",
+            file=sys.stderr,
+        )
+        return
 
 
 def parse_target_address(value):
@@ -927,7 +956,11 @@ def _main_locked(fenced_agent, legacy_context, address):
     else:
         is_self_send = sender in {target_agent, target_instance}
     if is_self_send and os.environ.get("RT_ALLOW_SELF_SEND", "0") != "1":
-        raise SystemExit(f"rt-say: refusing self-send from {sender} to {target}")
+        raise SystemExit(
+            f"rt-say: refusing self-send from {sender} to {target}; "
+            "self-send is disabled by default (set RT_ALLOW_SELF_SEND=1 "
+            "only for controlled tests)"
+        )
 
     # A base agent with exactly one configured instance is an address alias,
     # not a mailbox or ledger identity. Durable identity must use concrete
@@ -983,6 +1016,7 @@ def _main_locked(fenced_agent, legacy_context, address):
             mail_text,
             quiet_ack=kind == "sync-ack",
         )
+        warn_if_target_not_active(address.target_root, durable_target)
 
     if maildir_only:
         route = {"workspace": None, "surface": None, "pane": None}
@@ -1033,7 +1067,11 @@ def _main_locked(fenced_agent, legacy_context, address):
         sender in {resolved_target_agent, resolved_target_instance}
         and os.environ.get("RT_ALLOW_SELF_SEND", "0") != "1"
     ):
-        raise SystemExit(f"rt-say: refusing self-send from {sender} to {target}")
+        raise SystemExit(
+            f"rt-say: refusing self-send from {sender} to {target}; "
+            "self-send is disabled by default (set RT_ALLOW_SELF_SEND=1 "
+            "only for controlled tests)"
+        )
     # Verify the resolved surface actually belongs to the target agent.
     # Multi-instance: rt-resolve reports agent=<base>, but runtime keys by
     # instance id (e.g. codex#1, codex-build). Accept both base and instance.
@@ -1281,7 +1319,12 @@ if __name__ == "__main__":
             detail = terminal_single_line(str(error)) or error.__class__.__name__
             print(f"rt-say: legacy nudge failed: {detail}", file=sys.stderr)
             raise SystemExit(LEGACY_FAILURE_EXIT) from None
-        raise SystemExit(f"rt-say: command failed: {error}") from None
+        mailbox_detail = (
+            f" while writing mailbox {INBOX_DIR}" if INBOX_DIR is not None else ""
+        )
+        raise SystemExit(
+            f"rt-say: command failed{mailbox_detail}: {error}"
+        ) from None
     except Exception as error:
         if not LEGACY_OPERATION_ACTIVE:
             raise

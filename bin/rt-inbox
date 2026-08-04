@@ -543,6 +543,12 @@ def resolvable_instances(root=ROOT):
     return resolved
 
 
+def configured_target_names(root=ROOT):
+    """Return the names a caller can use to select a configured inbox."""
+
+    return sorted(resolvable_instances(root))
+
+
 def unackable_problem(record, registry_entries, instance_cache):
     """Explain UUID-aware mail that rt-ack cannot ever complete as-is."""
 
@@ -690,6 +696,14 @@ def render_text(records):
 def _main_locked(args, fenced_agent):
     notices = []
     agent = (args.agent or fenced_agent or infer_agent()).lower()
+    if args.agent:
+        valid_names = configured_target_names()
+        if agent not in valid_names:
+            rendered = ", ".join(valid_names) or "none configured"
+            raise SystemExit(
+                f"rt-inbox: unknown agent or instance: {agent}; "
+                f"use one of: {rendered}"
+            )
     if fenced_agent and agent != fenced_agent:
         raise SystemExit(
             f"rt-inbox: fenced seat {fenced_agent} cannot inspect {agent}"

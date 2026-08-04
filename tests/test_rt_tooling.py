@@ -4895,7 +4895,9 @@ def test_maildir_default_does_not_probe_even_an_unhealthy_cmux(tmp_path):
     proc = run_tool("rt-say", "claude", "fyi", "silent probe", cwd=project, env=env)
 
     assert proc.returncode == 0
-    assert proc.stderr == ""
+    assert (
+        "note: no active seat observed for claude; mail is durable" in proc.stderr
+    )
     assert proc.stdout.startswith("sent maildir-only ")
     assert read_cmux_calls(trace_dir) == []
 

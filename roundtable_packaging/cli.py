@@ -788,7 +788,10 @@ def install_main(argv: list[str] | None = None) -> int:
         print(f"commands linked in {link_dir}")
         print(f"run now: {link_dir / 'roundtable'}")
         if str(link_dir) not in os.environ.get("PATH", "").split(os.pathsep):
-            print(f"add to PATH: export PATH={shlex.quote(str(link_dir))}:$PATH")
+            print(
+                "add to PATH once per shell (persist it in your shell profile): "
+                f"export PATH={shlex.quote(str(link_dir))}:$PATH"
+            )
         return 0
     except (InstallError, OSError) as error:
         print(f"roundtable-install: {error}", file=sys.stderr)
