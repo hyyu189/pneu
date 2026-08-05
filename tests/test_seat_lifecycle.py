@@ -31,9 +31,9 @@ def load_script(name: str, module_name: str):
     return module
 
 
-wake = load_script("rt-codex-wake", "rt_wp4_codex_wake")
-doctor = load_script("rt-doctor", "rt_wp4_doctor")
-advisory = load_script("rt-startup-advisory", "rt_wp4_startup_advisory")
+wake = load_script("rt-codex-wake", "seat_lifecycle_codex_wake")
+doctor = load_script("rt-doctor", "seat_lifecycle_doctor")
+advisory = load_script("rt-startup-advisory", "seat_lifecycle_startup_advisory")
 
 
 def run_tool(name: str, *args: str, cwd: Path | None = None, env=None):

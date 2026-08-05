@@ -76,7 +76,6 @@ package-dir = { "" = "bin", "roundtable_packaging" = "roundtable_packaging" }
   "docs/install.md",
   "docs/legacy-v1-keyboard.md",
   "docs/release.md",
-  "docs/rt-codex-phase3.md",
   "docs/wp21-quiet-ack-nudge-retirement.md",
 ]
 "share/roundtable/integrations/hermes/roundtable" = [

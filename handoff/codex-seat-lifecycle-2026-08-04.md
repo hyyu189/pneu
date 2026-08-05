@@ -1,8 +1,8 @@
-# Codex app-server wake bridge (historical Phase 3)
+# Codex app-server wake bridge — seat lifecycle handoff
 
-> This file records the original `0.144.3` implementation milestone. It is not
-> the current support matrix. See `docs/compatibility.md` for release claims and
-> validation gates.
+> This file records the original `0.144.3` implementation milestone and the
+> 2026-07-17 validation evidence. It is not the current support matrix. See
+> `docs/compatibility.md` for release claims and validation gates.
 
 Implementation target: Codex CLI `0.144.3`. The wire schema and wake path are
 version-gated to that exact release.
@@ -129,7 +129,7 @@ one activation turn. If SessionStart does not bind the resumed thread, use
 the diagnostic `rt-codex-wake bind <project> --thread-id <thread-id>` from
 that Codex turn.
 
-## Project registry and launchers (WP4)
+## Project registry and launchers
 
 `~/.roundtable/projects.yaml` is the sole discovery source for the wake bridge,
 doctor, startup advisory, workspace lookup, and harness launch menu. Manage it
@@ -146,7 +146,7 @@ receives its original arguments unchanged. A bare Hermes seat defaults to
 `hermes --tui`; explicit Hermes arguments remain unchanged for compatibility
 with its scripted and management modes.
 
-At the time of this historical Phase 3 proof, the local harness configurations
+At the time of this historical validation proof, the local harness configurations
 called `rt-watch-ensure`. That watcher and its SessionStart path are now
 retired. The current release treats `rt-startup-advisory` as an optional cmux
 integration and still requires ownership-safe Claude/Hermes hook onboarding;
@@ -197,4 +197,4 @@ ran against `/private/tmp/rt-phase3-accept-20260717` and its scratch TUI:
    daemon/socket/RPC/bridge failure matrix, unsupported-version `WARN`, and
    socket/plist drift remediation.
 
-Final verification: `101 passed` in the combined Phase 3 and tooling suite.
+Final verification: `101 passed` in the combined bridge and tooling suite.
