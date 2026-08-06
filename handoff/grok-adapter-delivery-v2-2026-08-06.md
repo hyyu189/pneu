@@ -1,8 +1,8 @@
 # Grok ACP adapter delivery — 2026-08-06
 
-Status: implementation, focused verification, and extracted-artifact smoke
-complete; production support remains unclaimed because the current read-only
-credentialed adapter E2E was blocked by an expired host OAuth credential.
+Status: implementation, focused verification, credentialed two-generation
+recovery E2E, and extracted-artifact smoke complete; production/public support
+remains unclaimed pending the broader release gates.
 
 Commits: `26bd0a068d95583ee041871ec570548b15c9c2cb` (implementation) and
 `3962b7d788d95e7109d0d465a6eadfef8bbadd09` (provenance).
@@ -48,15 +48,31 @@ the commits above passed both checksum layers, contained all three Grok wheel
 surfaces, installed into a disposable HOME, and passed `roundtable-smoke`.
 Artifact SHA-256: `f8e80b4516530c315c21c1d8f753f072c3787230a459fabd8aab1c9563ace875`.
 
-## Credentialed adapter E2E boundary
+## Credentialed adapter E2E and token lifecycle
 
-The new adapter lab was attempted read-only with two generations and optional
-child restart. ACP `initialize` and `session/new` reached the provider, but the
-first `session/prompt` returned HTTP 403
-`unauthenticated:bad-credentials` because the host OAuth credential had
-expired. The adapter left the exact message in `new/` and did not acknowledge
-it. The live auth file's metadata was unchanged. No login, refresh, credential
-copy, or credential logging was attempted.
+The first read-only adapter attempt correctly failed closed: the host OAuth
+credential was expired and ACP returned HTTP 403
+`unauthenticated:bad-credentials`; the exact message stayed in `new/` and was
+not acknowledged. No login, refresh, credential copy, or credential logging
+was attempted by the adapter.
+
+After Ocean launched the Grok TUI separately, the read-only auth metadata
+showed a later expiry. The adapter lab then passed two consecutive
+mail-to-wake-to-drain-to-ack generations, killing the ACP child between them.
+Both generations returned `end_turn`; the combined event log recorded two
+`initialize`, two `session/new`, and two `session/prompt` requests. The final
+mailbox had zero files in `new/` and two archived files in `cur/`. The auth file
+size/mtime was unchanged across the lab, and the temporary lab's credential
+scan was clean.
+
+The lifecycle boundary is explicit: the host TUI refreshes its OIDC login
+state outside this adapter; the adapter reads the current auth-file `key` only
+at child start/restart and passes it to ACP as the child `XAI_API_KEY`. It does
+not refresh tokens, use a keychain, or depend on a TUI being manually launched
+as part of wake. An expired credential must therefore fail closed with durable
+mail left in `new/`; public production support still needs an approved
+vendor-supported refresh/preflight contract rather than a hidden refresh side
+effect.
 
 Therefore the current tier claim is:
 
@@ -64,11 +80,14 @@ Therefore the current tier claim is:
   isolated lab;
 - **adapter implementation:** focused fault, mutation, soak, and interop
   checks pass;
-- **production/public support:** **unclaimed** until a fresh valid credential
-  proves two generations, recovery, and extracted-artifact smoke.
+- **credentialed development-host E2E:** two generations plus child restart
+  and extracted-artifact smoke pass;
+- **production/public support:** **unclaimed** pending the broader clean
+  account, terminal-matrix, and token-lifecycle promotion gates.
 
 ## Remaining release evidence
 
-Run the adapter lab again with a fresh valid credential under the same
-read-only boundary to prove two generations and recovery. No public `main`
-push or release asset mutation is authorized.
+No further Grok credentialed lab is required for this implementation handoff.
+The remaining work is the broader clean-account, terminal-matrix, and explicit
+token-refresh promotion gate. No public `main` push or release asset mutation
+is authorized.
