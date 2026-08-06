@@ -2,6 +2,21 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-08-06: Product name is **pneu** (Ocean). From Paris pneumatique
+  slang where "un pneu" is the message itself; dual backronyms adopted:
+  "Project-Native Envelope Utility" for technical contexts and "Postal
+  Network, Entirely Unplugged" as the tagline. Chosen from a four-round
+  naming search (western creative, CJK imagery, deep Chinese, Wade-Giles
+  military/pastoral/commercial) totaling ~140 candidates and 36 real
+  collision checks; 18 finalists cleared PyPI+npm+brew and both search
+  gates. Runners-up recorded for history: chienmo 阡陌, chidu 尺牍,
+  ekirei 駅鈴, restante. The rename ships as release 1.0.0 in a
+  dedicated worktree after the in-flight grok and worktree-cmd branches
+  merge; rt-* tool names and RT_* env vars are retained in 1.0.0 as
+  pneu's tool prefix (deployed hook paths and permission allowlists
+  reference them; migration to a pn- prefix is a later major at most).
+  The 0.3.0 version number is skipped as a public release: its content
+  rolls into 1.0.0.
 - 2026-08-05: Antigravity harness parked at T0, workstream closed (Ocean).
   Hands-on validation of Antigravity CLI (`agy` 1.1.10) confirmed no
   startup/resume hook and no external wake surface, so automatic wake is
