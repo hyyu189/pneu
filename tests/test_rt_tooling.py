@@ -3502,6 +3502,7 @@ def test_rt_say_rejects_ambiguous_or_unknown_target_before_mail(tmp_path):
     )
     assert ambiguous.returncode != 0
     assert "has multiple instances" in ambiguous.stderr
+    assert "use one of:" in ambiguous.stderr
     assert not (ambiguous_state / "inbox").exists()
     assert read_ledger(ambiguous_state) == []
     ambiguous_calls = read_cmux_calls(ambiguous_trace)
@@ -3522,6 +3523,7 @@ def test_rt_say_rejects_ambiguous_or_unknown_target_before_mail(tmp_path):
     )
     assert unknown.returncode != 0
     assert "unknown agent or instance" in unknown.stderr
+    assert "use one of:" in unknown.stderr
     assert not (unknown_state / "inbox").exists()
     assert read_ledger(unknown_state) == []
     unknown_calls = read_cmux_calls(unknown_trace)
@@ -4900,6 +4902,33 @@ def test_maildir_default_does_not_probe_even_an_unhealthy_cmux(tmp_path):
     )
     assert proc.stdout.startswith("sent maildir-only ")
     assert read_cmux_calls(trace_dir) == []
+
+
+def test_maildir_status_precedes_inactive_seat_advisory_on_terminal(tmp_path):
+    project, _state, env, _trace_dir = say_project(tmp_path)
+    env.update({"RT_FROM": "codex", "CMUX_FAKE_FAIL_IDENTIFY": "1"})
+    merged_env = isolated_env(cwd=project, env=env)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            str(BIN / "rt-say"),
+            "claude",
+            "fyi",
+            "combined output order",
+        ],
+        cwd=project,
+        env=merged_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+    assert proc.returncode == 0
+    assert proc.stdout.index("sent maildir-only") < proc.stdout.index(
+        "note: no active seat observed"
+    )
 
 
 def test_default_maildir_sender_uses_unique_codex_thread_environment_without_cmux(tmp_path):

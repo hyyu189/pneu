@@ -597,7 +597,10 @@ def main(argv: list[str] | None = None) -> int:
         print("rt-wait-inbox: seat lease or watcher was superseded")
         return 0 if follow_generation else 2
     except (ProjectRegistryError, RuntimeStateError, OSError) as error:
-        print(f"rt-wait-inbox: {error}", file=sys.stderr)
+        message = str(error)
+        if not message.startswith("rt-wait-inbox: "):
+            message = f"rt-wait-inbox: {message}"
+        print(message, file=sys.stderr)
         return 2
 
 

@@ -114,9 +114,10 @@ class MailEnvelopeError(ValueError):
 
 def _lock_timeout_hint():
     return (
-        "another Roundtable seat may hold this lock; retry safely with "
-        "--layout-lock-timeout <seconds> (registry waits also accept "
-        "--registry-lock-timeout <seconds>)"
+        "another Roundtable seat may hold this lock; retry safely. For "
+        "rt-projects migrate/rollback, use --layout-lock-timeout "
+        "<seconds> (registry waits also accept --registry-lock-timeout "
+        "<seconds>)"
     )
 
 
@@ -3068,7 +3069,8 @@ def register_project(root, path=None, registered_at=None):
                     f"is not witness-confirmed ({claims}); this may be a moved "
                     "project. Refusing to mint a new UUID. Restore the verified "
                     "marker, or explicitly tombstone the old registration "
-                    "before creating a distinct identity"
+                    "before creating a distinct identity (for example: "
+                    "rt-projects rm <old-root>; rt-projects add <new-root>)"
                 )
 
         replace_uuid = None

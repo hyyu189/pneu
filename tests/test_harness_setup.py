@@ -314,6 +314,13 @@ def test_clean_apply_status_idempotence_and_remove(
             home / "Library" / "LaunchAgents" / f"{label}.plist"
         ).exists()
 
+    human_remove = harness_setup.main(
+        ["remove", "--home", str(home), "--prefix", str(prefix)]
+    )
+    human_output = capsys.readouterr()
+    assert human_remove == 0
+    assert "preserved project registry" in human_output.out
+
     code, repeated_remove = _run(
         capsys, home, prefix, "remove", *_all_harness_args()
     )

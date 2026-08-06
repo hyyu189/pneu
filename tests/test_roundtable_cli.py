@@ -247,6 +247,55 @@ def test_interactive_onboarding_ctrl_c_is_a_clean_cancellation(
     assert "Traceback" not in stderr.getvalue()
 
 
+def test_onboarding_eof_after_project_selection_mentions_created_project(
+    tmp_path, isolated_registry, fake_commands
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    stderr = io.StringIO()
+
+    result = roundtable.main(
+        [],
+        cwd=project,
+        home=tmp_path / "home",
+        stdin=TTYInput(""),
+        stderr=stderr,
+        exec_runner=lambda *_: 0,
+        chdir_runner=lambda _: None,
+    )
+
+    assert result == 2
+    assert f"project already created at {project}" in stderr.getvalue()
+
+
+def test_onboarding_ctrl_c_after_project_selection_mentions_created_project(
+    tmp_path, isolated_registry, fake_commands
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+
+    class InterruptingTTY:
+        def isatty(self):
+            return True
+
+        def readline(self):
+            raise KeyboardInterrupt
+
+    stderr = io.StringIO()
+    result = roundtable.main(
+        [],
+        cwd=project,
+        home=tmp_path / "home",
+        stdin=InterruptingTTY(),
+        stderr=stderr,
+        exec_runner=lambda *_: 0,
+        chdir_runner=lambda _: None,
+    )
+
+    assert result == 130
+    assert f"project already created at {project}" in stderr.getvalue()
+
+
 def test_public_cli_has_no_pre_manifest_migration_surface():
     assert "migrate" not in roundtable.ALIASES
     assert "migrate" not in roundtable.HELP

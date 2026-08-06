@@ -250,7 +250,6 @@ def warn_if_target_not_active(root, target):
             "will deliver when the seat resumes.",
             file=sys.stderr,
         )
-        return
 
 
 def parse_target_address(value):
@@ -866,7 +865,7 @@ def _main_locked(fenced_agent, legacy_context, address):
     args = sys.argv[1:]
     if "-h" in args or "--help" in args:
         print_help()
-        return None, None
+        return None, None, None
 
     reject_unsupported_message_options(args)
 
@@ -1016,7 +1015,6 @@ def _main_locked(fenced_agent, legacy_context, address):
             mail_text,
             quiet_ack=kind == "sync-ack",
         )
-        warn_if_target_not_active(address.target_root, durable_target)
 
     if maildir_only:
         route = {"workspace": None, "surface": None, "pane": None}
@@ -1049,8 +1047,13 @@ def _main_locked(fenced_agent, legacy_context, address):
                 f"to={durable_target} "
                 "delivery=maildir submit=none",
                 deferred_ledger,
+                (address.target_root, durable_target),
             )
-        return f"sent maildir-only {msg_id}", deferred_ledger
+        return (
+            f"sent maildir-only {msg_id}",
+            deferred_ledger,
+            (address.target_root, durable_target),
+        )
 
     # Everything below is the explicit, keyboard-only legacy path. It never
     # publishes maildir state; failures are therefore independent of delivery.
@@ -1203,8 +1206,9 @@ def _main_locked(fenced_agent, legacy_context, address):
             f"workspace={route['workspace']} surface={route['surface']} "
             f"submit={submit}",
             None,
+            None,
         )
-    return f"sent {msg_id}", None
+    return f"sent {msg_id}", None, None
 
 
 def main():
@@ -1260,7 +1264,7 @@ def main():
         MSG_DIR = mailbox.messages_dir
         INBOX_DIR = mailbox.inbox_dir
         LEDGER_LOCK = LOCK_DIR / "ledger.lock"
-        output, deferred_ledger = _main_locked(
+        output, deferred_ledger, activity_advisory = _main_locked(
             fenced_agent,
             legacy_context,
             address,
@@ -1294,6 +1298,9 @@ def main():
             )
     if output:
         print(output)
+        sys.stdout.flush()
+    if activity_advisory is not None:
+        warn_if_target_not_active(*activity_advisory)
 
 
 if __name__ == "__main__":
