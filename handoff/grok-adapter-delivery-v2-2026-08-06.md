@@ -5,7 +5,8 @@ recovery E2E, and extracted-artifact smoke complete; production/public support
 remains unclaimed pending the broader release gates.
 
 Commits: `26bd0a068d95583ee041871ec570548b15c9c2cb` (implementation) and
-`3962b7d788d95e7109d0d465a6eadfef8bbadd09` (provenance).
+`3962b7d788d95e7109d0d465a6eadfef8bbadd09` (provenance), with refreshed
+credential lifecycle documentation in the follow-up docs commits.
 
 ## Delivered
 

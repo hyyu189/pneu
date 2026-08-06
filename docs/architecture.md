@@ -354,7 +354,8 @@ The remaining P0 promotion work is:
    end-to-end gates before claiming support;
 3. pass real clean-account Claude and Hermes skill discovery, lifecycle, and
    wake acceptance;
-4. pass the Grok credentialed two-generation adapter E2E and artifact smoke;
+4. complete the Grok clean-account/terminal-matrix and approved
+   token-lifecycle promotion gates;
 5. repeat the same harness acceptance in Terminal.app, iTerm2, Ghostty, and
    cmux;
 6. test cmux topology, navigation, and notifications separately as optional
