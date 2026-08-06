@@ -2,43 +2,60 @@
 
 ## North star
 
-Roundtable is the durable messaging and coordination layer for coding agents
-that live on the same machine: per-project maildir mailboxes as the delivery
-fact source, fenced seat identities, and harness-native wake bridges. `v0.1.8`
-proved it under Build Week conditions; `0.2` makes it dependable for daily use
-by people who did not build it.
+**pneu** (naming decided 2026-08-06; ships as 1.0.0) is the durable messaging
+and coordination layer for coding agents that live on the same machine:
+per-project maildir mailboxes as the delivery fact source, fenced seat
+identities, and harness-native wake bridges. Backronyms: "Project-Native
+Envelope Utility" (technical), "Postal Network, Entirely Unplugged"
+(tagline). `v0.1.8` proved the design under Build Week conditions; the 0.2
+line made it dependable for daily use; 1.0.0 gives it its name and takes it
+public.
 
-## 0.2 roadmap
+## Completed (0.2 line, evidence in handoff/ and decision.md)
 
-1. **Hermes native wake, redesigned.** Fix the TUI lifecycle
-   (`on_session_reset` vs `on_session_start` arming), the reply-template
-   argument construction bug (flags leaking into message bodies, tokens landing
-   in `kind`), and the drain contract (archive processed mail `new/` → `cur/`
-   so the watcher re-arms; RC10 field evidence in the archive worktree).
-2. **Inbox robustness.** Fenced `rt-inbox` must surface malformed mail as
-   malformed instead of silently hiding it while the file keeps waking the
-   watcher (two reproduced specimens on 2026-07-21).
-3. **Wake ergonomics.** Product-owned guidance for tripwire arming (no shell
-   `&`; harness-native background), and re-examine wake latency expectations
-   for slow-turn seats.
-4. **Clean-machine and terminal matrix validation.** Fresh-account install,
-   Terminal.app / iTerm2 / Ghostty wake UX matrix — the promotion gates the
-   Build Week window did not close.
-5. **Onboarding and brand.** First-run polish; continue the rename search.
-   The earlier working name Orca is rejected (2026-07-23, see decision.md:
-   stablyai/orca occupies the coding-agent category and GNOME Orca owns the
-   `orca` command). A candidate needs an unclaimed command name on
-   brew/apt/PyPI/npm, a clean first search page for "<name> agent" and
-   "<name> CLI", and no collision with an active developer-tool brand. A
-   GitHub repo rename preserves history and redirects.
-6. **README productization.** Product-first front page; Build Week narrative
-   moves to a history section. `PROVENANCE.md`, `CREDITS.md`, and `v0.1.8`
-   remain untouched.
+Central mail v1 (UUID identity, central layout, crash-safe migration,
+cross-worktree `agent@project` addressing) · launcher-primed Codex first
+turn · M5 onboarding/communication batch · D6 uniform addressing display ·
+seat/thread lifecycle package (handoff verb, resume lease idempotency,
+binding adoption) · OpenClaw Gateway adapter (credentialed real-model E2E) ·
+inbox malformed/dead-mail robustness · live central migration of this host ·
+tmux transport/wake validation · Antigravity evaluated and parked at T0.
+
+## Launch-phase roadmap (target: pneu 1.0.0 and the public push)
+
+1. **In flight — Grok ACP adapter** (wt/grok): productize on the OpenClaw
+   supervisor template; credentialed E2E is the support bar.
+2. **In flight — worktree lifecycle commands** (wt/worktree-cmd):
+   `roundtable worktree add/remove/list`, restate-before-act, group-aware
+   fail-closed.
+3. **The rename → 1.0.0.** Dedicated worktree after 1–2 merge; scope: brand,
+   top-level command (`pneu`), package/artifact names, install prefix with
+   deployed-state migration (hooks, permission allowlists, plists reference
+   absolute paths — setup owns and rewrites them), skill rename, README
+   rewrite with the new name and taglines, repo rename (GitHub redirects).
+   `rt-*` tool names and `RT_*` env vars are retained as pneu's tool prefix.
+   0.3.0 is skipped as a public release; its content rolls into 1.0.0.
+4. **Clean-machine validation + demo recording** (combined): fresh user
+   account walkthrough of the five-minute install, screen-recorded as the
+   launch demo. Blocks the public "five minutes" claim.
+5. **Launch materials**: repo page rewrite, Twitter/LinkedIn posts, resume
+   entry — all unblocked by the name.
+6. **Good citizenship**: file the zero-turn-resume upstream issue draft
+   (awaiting Ocean's nod).
+
+## Deferred / later
+
+Hermes wake redesign residuals (BRIEF-0.2 #1; plugin works, RC10-era bugs to
+re-verify) · wake-latency ergonomics study · v2 candidates: naming-system
+unification (`rt-*`→`pn-*` at most in a later major), `-f json` everywhere,
+teammate-as-instance, statusline unread counts · v3: switchboard GUI.
 
 ## Constraints
 
-- Review-window freeze: no pushes to `main`, no tag/Release changes until
-  winners are announced (conservatively 2026-08-12).
+- Review-window freeze on the competition repo (`origin`, push-disabled):
+  no pushes, no tag/Release changes until winners are announced
+  (conservatively 2026-08-12). The product repo (`product` remote) is not
+  frozen.
 - Provenance and attribution rules in `AGENTS.md` are non-negotiable.
-- Judging-period availability: the released `v0.1.8` behavior on this machine
-  must stay reproducible until at least 2026-08-05.
+- The judged `v0.1.8` artifact and the pinned archive worktree
+  (`archive/build-week`) remain untouched.
