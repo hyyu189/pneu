@@ -15,6 +15,7 @@ real vendor session can wake.
 | Claude Code | Global skill link; owned asynchronous SessionStart/Stop watchers; absolute lease-fenced mail permissions; plan/apply/status/remove tests; two sequential installed-RC8 development-host wake generations | Clean-account real send-to-wake-to-drain/ack repeat |
 | Hermes | Global skill link; packaged lifecycle plugin; marked plugin enablement; plan/apply/status/remove tests; two sequential RC7 development-host wake generations | RC8 artifact and clean-account plugin/wake repeat |
 | Codex | Shared executable resolver; global skill link; owned SessionStart auto-bind hook; owned app-server and wake plist generation; fail-closed service preflight tests; development-host cutover and thread/lease identity spike | Clean-account repeat and real send-to-wake-to-drain/ack |
+| Grok Build `0.2.118` | Isolated stdlib ACP supervisor; fenced lease and identity checks; bounded HOME/XDG/GROK_HOME/TMP/log state; exact mail-only permission policy; child-death recovery; focused fault, mutation, soak, three-seat interop, refreshed-credential two-generation E2E, and extracted release-artifact smoke | Clean-account/terminal-matrix repeat and an explicit vendor-supported token-refresh/preflight contract before public support promotion |
 
 The Codex plist files are written but not loaded by setup. This is an
 intentional safety boundary, not evidence that the daemon is running.
@@ -25,6 +26,40 @@ loaded job cannot be orphaned after its plist and executable are removed.
 The normal `roundtable` launcher owns the next step: it performs a targeted
 Codex service preflight and starts or repairs only states proven safe. Users do
 not normally run the two low-level service reload commands themselves.
+
+## Grok ACP adapter
+
+The Grok path is a project-anchored, stdlib-only wake adapter. `rt-grok` claims
+the `grok` seat and transfers the fenced identity to `rt-grok-wake`, which
+supervises one `grok agent --no-leader stdio` child. It does not install hooks,
+plugins, LaunchAgents, a shared leader, or a daemon, and it does not replace
+the durable maildir as the delivery fact source.
+
+The child environment is bounded to an adapter-owned root for `HOME`,
+`GROK_HOME`, XDG directories, `TMPDIR`, logs, and temporary state. It receives
+only the selected executable, project/registry paths, lease identity, and an
+existing credential supplied through the runtime boundary. The adapter refuses
+missing or ambiguous identity, stale lease revisions, shell operators, and
+commands outside the exact fenced `rt-inbox`/`rt-ack` policy. It reports a
+successful generation only after the triggered filenames leave `new/`; a
+timeout or failed child leaves mail durable for manual recovery.
+
+Focused product tests cover process-down and killed-turn recovery, auth and
+permission failures, bounded hung prompts, fence mutations, duplicate-safe
+generation handling, 25 wake cycles with resource bounds, and three-seat
+Grok/Claude/Codex mail interop. The first 2026-08-06 product-adapter attempt
+correctly failed closed on an expired host OAuth credential with ACP 403
+`unauthenticated:bad-credentials`. After an external Grok TUI refresh, a
+read-only rerun passed two mail-to-wake-to-drain-to-ack generations with the
+ACP child killed and restarted between them; the final `new/` was empty and
+the auth file was unchanged during the lab.
+
+The lifecycle boundary is deliberate: the adapter reads the current OIDC auth
+file key at each child start/restart and supplies it as `XAI_API_KEY`, but does
+not refresh tokens or depend on a manually launched TUI. Expired credentials
+remain a durable-mail/manual-recovery condition until an approved
+vendor-supported refresh/preflight contract exists. Grok is therefore
+credentialed-development-host verified but not yet promoted as public support.
 
 ## Codex executable selection
 

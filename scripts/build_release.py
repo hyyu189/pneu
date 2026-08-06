@@ -201,6 +201,7 @@ REQUIRED_PROJECT_DATA_FILES = frozenset(
         "share/roundtable/integrations/hermes/roundtable/__init__.py",
         "share/roundtable/integrations/hermes/roundtable/plugin.yaml",
         "share/roundtable/integrations/openclaw/roundtable/__init__.py",
+        "share/roundtable/integrations/grok/roundtable/__init__.py",
         "share/roundtable/skills/shared/roundtable/SKILL.md",
     }
 )
@@ -224,6 +225,8 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "rt-inbox",
         "rt-openclaw",
         "rt-openclaw-wake",
+        "rt-grok",
+        "rt-grok-wake",
         "rt-projects",
         "rt-refresh",
         "rt-resolve",

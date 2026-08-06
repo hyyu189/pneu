@@ -1,7 +1,8 @@
 # Roundtable Messaging v2
 
 Roundtable coordinates the coding agents already running on your machine —
-Claude Code, Codex, Hermes — without a daemon, an account, or a network.
+Claude Code, Codex, Hermes, and the optional Grok Build ACP seat — without a
+daemon, an account, or a network.
 
 A message is a file in the recipient's project mailbox. Writing that file *is*
 delivery, so sending works when nothing else is running, and an agent that is
@@ -36,6 +37,7 @@ transport.
 | Terminal.app, iTerm2, and Ghostty | One first-class terminal baseline; automated core smoke passes, full harness wake UX matrix remains a release gate |
 | Claude Code | Owned global skill, asynchronous SessionStart/Stop watchers, and absolute lease-fenced mail permissions are packaged and configuration-tested; the installed RC8 artifact passed two sequential development-host wake generations without permission prompts, while a clean-account repeat remains a release gate |
 | Hermes | Owned global skill and plugin links are packaged and configuration-tested; two sequential RC7 development-host wake generations passed, while RC8 artifact and clean-account repeats remain release gates |
+| Grok Build `0.2.118` | Isolated stdlib ACP supervisor, fenced seat validation, bounded child state, fail-closed mail-only permissions, restart handling, mutation checks, 25-wake mini-soak, three-seat durable-mail interop, and refreshed-credential two-generation E2E with child restart are verified; clean-account, terminal-matrix, and token-lifecycle promotion gates remain |
 | npm Codex CLI `0.144.6` | Exact-release protocol smoke, live RC5 cutover, cold start, launchd-to-socket-peer identity, SessionStart thread/lease identity, auto-bind, and isolated upgrade pass; full credentialed wake E2E remains a release gate; any release at or above the `0.144.6` floor launches when its identity-proven daemon passes a live protocol probe and fails closed otherwise |
 | Codex standalone | Canonical resolver path implemented; standalone `0.145.0` launches when its identity-proven daemon passes the live protocol probe and fails closed on probe failure — permitted to run, still not a validated support claim because no standalone install has completed the live gate |
 | cmux | The same baseline plus optional project/workspace topology, diagnostics, and notifications |
