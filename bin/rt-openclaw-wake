@@ -9,10 +9,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
-if str(BIN) not in sys.path:
-    sys.path.insert(0, str(BIN))
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+INSTALLED_SHARE = ROOT / "share" / "roundtable"
+for import_root in (BIN, INSTALLED_SHARE, ROOT):
+    if import_root.is_dir() and str(import_root) not in sys.path:
+        sys.path.insert(0, str(import_root))
 
 from integrations.openclaw.roundtable import main  # noqa: E402
 
