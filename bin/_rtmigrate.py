@@ -1298,7 +1298,10 @@ def _commit_observed_after_error(
         unknown = MailMigrationCommitUnknownError(
             "registry cutover outcome is unknown; "
             f"cutover error: {cutover_error}; "
-            f"registry re-read error: {probe_error}"
+            f"registry re-read error: {probe_error}; "
+            "do not assume success: inspect the registry and mailbox, then "
+            "rerun migrate, or use rollback with the exact manifest if the "
+            "cutover committed"
         )
         unknown.cutover_error = cutover_error
         unknown.probe_error = probe_error

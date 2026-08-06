@@ -98,6 +98,9 @@ roundtable setup apply    # explicit expert/scriptable apply
 roundtable setup status
 ```
 
+`roundtable setup` is the project-first alias for the installed
+`roundtable-setup` command; both use the same managed integration workflow.
+
 For Codex, setup installs an owned SessionStart hook and two owned macOS
 LaunchAgent definitions. On first use, Codex may require one `/hooks` review of
 the user-level hook. Roundtable does not bypass that trust decision.
@@ -140,6 +143,7 @@ The most common day-to-day commands are:
 
 ```text
 roundtable                         project-first onboarding and launch
+roundtable guide                   show the mailroom and harness-wake tutorial
 roundtable setup                  read-only harness integration preview
 roundtable doctor                 diagnose setup, leases, and wake services
 rt-say AGENT[@PROJECT] KIND "MESSAGE"

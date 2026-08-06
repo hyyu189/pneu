@@ -54,6 +54,20 @@ def clear_lease_environment(monkeypatch) -> None:
         monkeypatch.delenv(name, raising=False)
 
 
+def test_launcher_ctrl_c_is_a_clean_cancellation(monkeypatch, capsys):
+    def interrupting_launch(*_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(_rtlauncher, "launch", interrupting_launch)
+
+    result = _rtlauncher.main("claude")
+
+    captured = capsys.readouterr()
+    assert result == 130
+    assert "rt-claude: cancelled by user (Ctrl-C)" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_anchored_launcher_claims_seat_and_exports_lease_environment(
     tmp_path, monkeypatch
 ):

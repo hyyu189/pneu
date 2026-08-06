@@ -19,11 +19,30 @@ from _rtlib import (
 TOOL_DIR = Path(__file__).resolve().parent
 ROOT = find_project_root("rt-ack")
 MAILBOX = None
+MSG_ID_HINT = (
+    "expected YYYYMMDDTHHMMSSZ-<sender>-to-<recipient>-<nonce>; "
+    "see rt-inbox -f json"
+)
 
 
 def usage():
     print("usage: rt-ack [--fenced] <ref_csv> [body]", file=sys.stderr)
     raise SystemExit(2)
+
+
+def print_help():
+    print(
+        """usage: rt-ack [--fenced] <ref_csv> [body]
+
+Acknowledge one or more message ids from the durable Roundtable inbox.
+
+options:
+  --fenced   require the current Roundtable launcher lease
+  -h, --help show this help
+
+ref_csv is a comma-separated list of ids reported by `rt-inbox -f json`.
+"""
+    )
 
 
 def validate_ref_spelling(ref):
@@ -33,7 +52,9 @@ def validate_ref_spelling(ref):
         or "/" in ref
         or "\x00" in ref
     ):
-        raise SystemExit(f"rt-ack: cannot parse msg_id: {ref}")
+        raise SystemExit(
+            f"rt-ack: cannot parse msg_id: {ref}; {MSG_ID_HINT}"
+        )
 
 
 def parse_ref(ref, *, recipient=None):
@@ -49,7 +70,9 @@ def parse_ref(ref, *, recipient=None):
         # fail-closed path.
         identity = parse_message_id(ref)
     if identity is None:
-        raise SystemExit(f"rt-ack: cannot parse msg_id: {ref}")
+        raise SystemExit(
+            f"rt-ack: cannot parse msg_id: {ref}; {MSG_ID_HINT}"
+        )
     return identity
 
 
@@ -274,6 +297,9 @@ def archive_refs(refs, recipient, receiver_uuid):
 
 def parse_args():
     args = list(sys.argv[1:])
+    if any(argument in {"-h", "--help"} for argument in args):
+        print_help()
+        raise SystemExit(0)
     fenced = bool(args and args[0] == "--fenced")
     if fenced:
         args.pop(0)

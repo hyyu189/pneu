@@ -425,7 +425,9 @@ def test_ack_rejects_path_traversal_ref_before_delivery(tmp_path):
     result = run_tool("rt-ack", unsafe, cwd=project)
 
     assert result.returncode != 0
-    assert result.stderr == f"rt-ack: cannot parse msg_id: {unsafe}\n"
+    assert f"rt-ack: cannot parse msg_id: {unsafe};" in result.stderr
+    assert "expected YYYYMMDDTHHMMSSZ-<sender>-to-<recipient>-<nonce>" in result.stderr
+    assert "see rt-inbox -f json" in result.stderr
     assert (new_dir.parent / "outside.md").is_dir()
 
 

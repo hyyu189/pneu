@@ -131,6 +131,171 @@ def test_no_argument_non_tty_fails_with_help_without_exec(fake_commands, tmp_pat
     assert calls == []
 
 
+def test_guide_command_renders_ascii_mailroom_and_wake_model(tmp_path):
+    stdout = io.StringIO()
+
+    result = roundtable.main(
+        ["guide"],
+        cwd=tmp_path,
+        home=tmp_path / "home",
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    rendered = stdout.getvalue()
+    assert result == 0
+    assert "Roundtable = a local mailroom for coding-agent seats" in rendered
+    assert "project mailbox: new/  ->  cur/" in rendered
+    assert "Claude  SessionStart/Stop hooks" in rendered
+    assert "Hermes  the session-start plugin" in rendered
+    assert "Codex   the app-server and Unix-socket notification bridge" in rendered
+    assert "Grok Build, OpenClaw, and Antigravity" in rendered
+
+
+def test_version_command_reports_manifest_prefix_and_current_target(
+    tmp_path, monkeypatch
+):
+    prefix = tmp_path / "install"
+    (prefix / "versions" / "0.2.1").mkdir(parents=True)
+    (prefix / "current").symlink_to("versions/0.2.1")
+    (prefix / "install-manifest.json").write_text(
+        json.dumps({"version": "0.2.1"})
+    )
+    monkeypatch.setenv("ROUNDTABLE_INSTALL_PREFIX", str(prefix))
+    stdout = io.StringIO()
+
+    result = roundtable.main(
+        ["version"],
+        cwd=tmp_path,
+        home=tmp_path / "home",
+        stdout=stdout,
+        stderr=io.StringIO(),
+    )
+
+    assert result == 0
+    rendered = stdout.getvalue()
+    assert "version: 0.2.1" in rendered
+    assert f"install prefix: {prefix}" in rendered
+    assert "current target: versions/0.2.1" in rendered
+
+
+def test_project_menu_reprompts_after_invalid_numeric_input(
+    tmp_path, isolated_registry
+):
+    project = write_project(tmp_path / "registered")
+    register_project(project, isolated_registry)
+    cwd = tmp_path / "outside"
+    cwd.mkdir()
+    stderr = io.StringIO()
+
+    selected = roundtable.choose_project(
+        cwd=cwd,
+        home=tmp_path / "home",
+        stdin=TTYInput("0\n1\n1\n"),
+        stderr=stderr,
+    )
+
+    assert selected == project
+    assert "please try again" in stderr.getvalue()
+
+
+def test_interactive_onboarding_prints_guide_before_menu(
+    tmp_path, isolated_registry, fake_commands
+):
+    home = tmp_path / "home"
+    home.mkdir()
+    stderr = io.StringIO()
+
+    result = roundtable.main(
+        [],
+        cwd=home,
+        home=home,
+        stdin=TTYInput("9\n"),
+        stderr=stderr,
+        exec_runner=lambda *_: 0,
+        chdir_runner=lambda _: None,
+    )
+
+    assert result == 2
+    assert "Roundtable = a local mailroom for coding-agent seats" in stderr.getvalue()
+
+
+def test_interactive_onboarding_ctrl_c_is_a_clean_cancellation(
+    tmp_path, isolated_registry, fake_commands
+):
+    class InterruptingTTY:
+        def isatty(self):
+            return True
+
+        def readline(self):
+            raise KeyboardInterrupt
+
+    stderr = io.StringIO()
+
+    result = roundtable.main(
+        [],
+        cwd=tmp_path,
+        home=tmp_path / "home",
+        stdin=InterruptingTTY(),
+        stderr=stderr,
+        exec_runner=lambda *_: 0,
+        chdir_runner=lambda _: None,
+    )
+
+    assert result == 130
+    assert "cancelled by user (Ctrl-C)" in stderr.getvalue()
+    assert "Traceback" not in stderr.getvalue()
+
+
+def test_onboarding_eof_after_project_selection_mentions_created_project(
+    tmp_path, isolated_registry, fake_commands
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    stderr = io.StringIO()
+
+    result = roundtable.main(
+        [],
+        cwd=project,
+        home=tmp_path / "home",
+        stdin=TTYInput(""),
+        stderr=stderr,
+        exec_runner=lambda *_: 0,
+        chdir_runner=lambda _: None,
+    )
+
+    assert result == 2
+    assert f"project already created at {project}" in stderr.getvalue()
+
+
+def test_onboarding_ctrl_c_after_project_selection_mentions_created_project(
+    tmp_path, isolated_registry, fake_commands
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+
+    class InterruptingTTY:
+        def isatty(self):
+            return True
+
+        def readline(self):
+            raise KeyboardInterrupt
+
+    stderr = io.StringIO()
+    result = roundtable.main(
+        [],
+        cwd=project,
+        home=tmp_path / "home",
+        stdin=InterruptingTTY(),
+        stderr=stderr,
+        exec_runner=lambda *_: 0,
+        chdir_runner=lambda _: None,
+    )
+
+    assert result == 130
+    assert f"project already created at {project}" in stderr.getvalue()
+
+
 def test_public_cli_has_no_pre_manifest_migration_surface():
     assert "migrate" not in roundtable.ALIASES
     assert "migrate" not in roundtable.HELP

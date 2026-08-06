@@ -1380,8 +1380,11 @@ def test_renamed_project_without_marker_refuses_to_mint_and_names_old_uuid(
 
     with pytest.raises(SystemExit, match=project_uuid):
         _rtlib.resolve_project_mailbox(moved, registry_path=registry)
-    with pytest.raises(SystemExit, match=project_uuid):
+    with pytest.raises(SystemExit, match=project_uuid) as captured:
         _rtlib.register_project(moved, path=registry)
+    assert "rt-projects rm <old-root>; rt-projects add <new-root>" in str(
+        captured.value
+    )
     with pytest.raises(SystemExit, match=project_uuid):
         _rtlib.unregister_project(moved, path=registry)
 

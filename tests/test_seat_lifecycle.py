@@ -320,6 +320,24 @@ def test_launcher_menu_selects_registered_project(tmp_path, monkeypatch):
     assert f"1) {project}" in stderr.getvalue()
 
 
+def test_launcher_menu_reprompts_after_invalid_numeric_input(tmp_path, monkeypatch):
+    project = write_project(tmp_path / "registered", codex=False)
+    registry = tmp_path / "projects.yaml"
+    _rtlib.register_project(project, registry)
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
+    stderr = io.StringIO()
+
+    selected = _rtlauncher.choose_launch_cwd(
+        "claude",
+        cwd=tmp_path / "outside",
+        stdin=TTYInput("0\n1\n"),
+        stderr=stderr,
+    )
+
+    assert selected == project
+    assert "please try again" in stderr.getvalue()
+
+
 def test_launcher_menu_creates_then_selects_project(tmp_path, monkeypatch):
     registry = write_registry(tmp_path / "projects.yaml", [])
     monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))

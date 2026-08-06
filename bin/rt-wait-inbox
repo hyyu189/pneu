@@ -22,6 +22,7 @@ from _rtlib import (
     ProjectRegistryError,
     is_project_root,
     locked_project_mailbox_checked,
+    not_project_message,
 )
 from _rtruntime import (
     FenceRejected,
@@ -97,9 +98,7 @@ def _project_root() -> Path:
             )
         return project
     if discovered is None:
-        raise RuntimeStateError(
-            f"no roundtable project (.roundtable/agents.yaml) at or above {Path.cwd()}"
-        )
+        raise RuntimeStateError(not_project_message("rt-wait-inbox"))
     return discovered
 
 
@@ -598,7 +597,10 @@ def main(argv: list[str] | None = None) -> int:
         print("rt-wait-inbox: seat lease or watcher was superseded")
         return 0 if follow_generation else 2
     except (ProjectRegistryError, RuntimeStateError, OSError) as error:
-        print(f"rt-wait-inbox: {error}", file=sys.stderr)
+        message = str(error)
+        if not message.startswith("rt-wait-inbox: "):
+            message = f"rt-wait-inbox: {message}"
+        print(message, file=sys.stderr)
         return 2
 
 

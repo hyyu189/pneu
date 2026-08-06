@@ -17,9 +17,11 @@ from _rtlib import (
     ProjectAddress,
     ProjectRegistryError,
     authenticate_fenced_sender,
+    derive_project_group,
     find_project_root,
     format_mail_envelope,
     load_agents_doc,
+    load_project_registry_strict,
     locked_project_mailbox,
     parse_mail_envelope,
     parse_message_id,
@@ -71,7 +73,9 @@ options:
   --verbose            print route and submit details
   -h, --help           show this help
 
-The legacy path is human-coordinated and fails independently with exit 3.
+The @project form may name the current project or a registered sibling in the
+same derived group. The legacy path is human-coordinated and fails
+independently with exit 3.
 """
     )
 
@@ -114,6 +118,7 @@ def configured_target(root, target, *, required=True, runtime=None):
         )
     exact_candidates = []
     base_candidates = []
+    valid_names = set()
     for base, config in agents.items():
         if not isinstance(base, str) or not AGENT_COMPONENT_RE.fullmatch(base):
             raise SystemExit(
@@ -121,6 +126,7 @@ def configured_target(root, target, *, required=True, runtime=None):
                 f"{base!r}"
             )
         base_name = base
+        valid_names.add(base_name)
         if not isinstance(config, dict):
             raise SystemExit(
                 "rt-say: invalid agents configuration for "
@@ -157,6 +163,7 @@ def configured_target(root, target, *, required=True, runtime=None):
                     f"{base_name}: invalid instance id {instance_name!r}"
                 )
             instance_names.append(instance_name)
+            valid_names.add(instance_name)
             if instance_name == target:
                 exact_candidates.append((base_name, instance_name))
         if base_name == target:
@@ -187,7 +194,10 @@ def configured_target(root, target, *, required=True, runtime=None):
         )
     if not required and target in ((runtime or {}).get("agents") or {}):
         return target, target
-    raise SystemExit(f"rt-say: unknown agent or instance: {target}")
+    rendered = ", ".join(sorted(valid_names)) or "none configured"
+    raise SystemExit(
+        f"rt-say: unknown agent or instance: {target}; use one of: {rendered}"
+    )
 
 
 def infer_sender_from_harness_env(root):
@@ -221,7 +231,104 @@ def infer_sender_from_harness_env(root):
 
 def validate_agent_component(value, label):
     if not AGENT_COMPONENT_RE.fullmatch(value):
-        raise SystemExit(f"rt-say: invalid {label} agent component: {value}")
+        raise SystemExit(
+            f"rt-say: invalid {label} agent component: {value}; "
+            "expected pattern [a-z0-9#_-]+"
+        )
+
+
+def _seat_was_claimed(runtime_module, root, target):
+    try:
+        paths = runtime_module.seat_paths(root, target)
+        paths.agent_dir.lstat()
+    except FileNotFoundError:
+        return False
+    except (OSError, runtime_module.RuntimeStateError):
+        return True
+    return True
+
+
+def _sibling_active_seat_hint(sender_root, sender_uuid, target, runtime_module):
+    if sender_root is None or sender_uuid is None:
+        return None
+    try:
+        entries, _warnings = load_project_registry_strict()
+        sender_group = derive_project_group(sender_root, sender_uuid)
+    except (OSError, ProjectRegistryError):
+        return None
+    if not str(sender_group).startswith("git:"):
+        return None
+
+    names = []
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or entry.get("status") != "active"
+            or not entry.get("available")
+            or entry.get("uuid") == sender_uuid
+        ):
+            continue
+        sibling_root = entry.get("root")
+        sibling_uuid = entry.get("uuid")
+        if not isinstance(sibling_root, Path) or not isinstance(sibling_uuid, str):
+            continue
+        try:
+            if derive_project_group(sibling_root, sibling_uuid) != sender_group:
+                continue
+            inspection = runtime_module.inspect_seat(sibling_root, target)
+        except (OSError, ProjectRegistryError, runtime_module.RuntimeStateError):
+            continue
+        if str(getattr(inspection, "status", "")).startswith("active_"):
+            name = entry.get("name")
+            if isinstance(name, str) and name:
+                names.append(name)
+    if not names:
+        return None
+    names = sorted(set(names))
+    if len(names) == 1:
+        return f"did you mean {target}@{names[0]}?"
+    options = ", ".join(f"{target}@{name}" for name in names)
+    return f"did you mean one of {options}?"
+
+
+def warn_if_target_not_active(root, target, sender_root=None, sender_uuid=None):
+    """Report a dead target after durable delivery without blocking delivery."""
+
+    try:
+        import _rtruntime as runtime_module
+
+        inspection = runtime_module.inspect_seat(root, target)
+    except (OSError, runtime_module.RuntimeStateError):
+        inspection = None
+    if inspection is None or not str(
+        getattr(inspection, "status", "")
+    ).startswith("active_"):
+        if inspection is not None and getattr(inspection, "status", "") == "vacant":
+            ever_claimed = _seat_was_claimed(runtime_module, root, target)
+        else:
+            ever_claimed = True
+        if ever_claimed:
+            note = (
+                f"note: no active seat observed for {target}; mail is durable and "
+                "will deliver when the seat resumes."
+            )
+        else:
+            note = (
+                f"note: no seat has ever been claimed for {target} in this "
+                "project; mail is durable and will deliver when the seat resumes."
+            )
+        suggestion = _sibling_active_seat_hint(
+            sender_root or ROOT,
+            sender_uuid,
+            target,
+            runtime_module,
+        )
+        if suggestion:
+            note = f"{note} {suggestion}"
+        print(
+            note,
+            file=sys.stderr,
+        )
 
 
 def parse_target_address(value):
@@ -837,7 +944,7 @@ def _main_locked(fenced_agent, legacy_context, address):
     args = sys.argv[1:]
     if "-h" in args or "--help" in args:
         print_help()
-        return None, None
+        return None, None, None
 
     reject_unsupported_message_options(args)
 
@@ -927,7 +1034,11 @@ def _main_locked(fenced_agent, legacy_context, address):
     else:
         is_self_send = sender in {target_agent, target_instance}
     if is_self_send and os.environ.get("RT_ALLOW_SELF_SEND", "0") != "1":
-        raise SystemExit(f"rt-say: refusing self-send from {sender} to {target}")
+        raise SystemExit(
+            f"rt-say: refusing self-send from {sender} to {target}; "
+            "self-send is disabled by default (set RT_ALLOW_SELF_SEND=1 "
+            "only for controlled tests)"
+        )
 
     # A base agent with exactly one configured instance is an address alias,
     # not a mailbox or ledger identity. Durable identity must use concrete
@@ -1015,8 +1126,23 @@ def _main_locked(fenced_agent, legacy_context, address):
                 f"to={durable_target} "
                 "delivery=maildir submit=none",
                 deferred_ledger,
+                (
+                    address.target_root,
+                    durable_target,
+                    address.origin_root,
+                    address.origin_uuid,
+                ),
             )
-        return f"sent maildir-only {msg_id}", deferred_ledger
+        return (
+            f"sent maildir-only {msg_id}",
+            deferred_ledger,
+            (
+                address.target_root,
+                durable_target,
+                address.origin_root,
+                address.origin_uuid,
+            ),
+        )
 
     # Everything below is the explicit, keyboard-only legacy path. It never
     # publishes maildir state; failures are therefore independent of delivery.
@@ -1033,7 +1159,11 @@ def _main_locked(fenced_agent, legacy_context, address):
         sender in {resolved_target_agent, resolved_target_instance}
         and os.environ.get("RT_ALLOW_SELF_SEND", "0") != "1"
     ):
-        raise SystemExit(f"rt-say: refusing self-send from {sender} to {target}")
+        raise SystemExit(
+            f"rt-say: refusing self-send from {sender} to {target}; "
+            "self-send is disabled by default (set RT_ALLOW_SELF_SEND=1 "
+            "only for controlled tests)"
+        )
     # Verify the resolved surface actually belongs to the target agent.
     # Multi-instance: rt-resolve reports agent=<base>, but runtime keys by
     # instance id (e.g. codex#1, codex-build). Accept both base and instance.
@@ -1165,8 +1295,9 @@ def _main_locked(fenced_agent, legacy_context, address):
             f"workspace={route['workspace']} surface={route['surface']} "
             f"submit={submit}",
             None,
+            None,
         )
-    return f"sent {msg_id}", None
+    return f"sent {msg_id}", None, None
 
 
 def main():
@@ -1222,7 +1353,7 @@ def main():
         MSG_DIR = mailbox.messages_dir
         INBOX_DIR = mailbox.inbox_dir
         LEDGER_LOCK = LOCK_DIR / "ledger.lock"
-        output, deferred_ledger = _main_locked(
+        output, deferred_ledger, activity_advisory = _main_locked(
             fenced_agent,
             legacy_context,
             address,
@@ -1256,6 +1387,9 @@ def main():
             )
     if output:
         print(output)
+        sys.stdout.flush()
+    if activity_advisory is not None:
+        warn_if_target_not_active(*activity_advisory)
 
 
 if __name__ == "__main__":
@@ -1281,7 +1415,12 @@ if __name__ == "__main__":
             detail = terminal_single_line(str(error)) or error.__class__.__name__
             print(f"rt-say: legacy nudge failed: {detail}", file=sys.stderr)
             raise SystemExit(LEGACY_FAILURE_EXIT) from None
-        raise SystemExit(f"rt-say: command failed: {error}") from None
+        mailbox_detail = (
+            f" while writing mailbox {INBOX_DIR}" if INBOX_DIR is not None else ""
+        )
+        raise SystemExit(
+            f"rt-say: command failed{mailbox_detail}: {error}"
+        ) from None
     except Exception as error:
         if not LEGACY_OPERATION_ACTIVE:
             raise

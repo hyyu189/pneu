@@ -1898,13 +1898,14 @@ def test_forward_reports_unknown_when_commit_probe_fails(
     with pytest.raises(
         _rtmigrate.MailMigrationCommitUnknownError,
         match="outcome is unknown",
-    ):
+    ) as captured:
         _rtmigrate.migrate_project(
             project,
             registry_path=registry,
             backup_root=backup_root,
         )
 
+    assert "do not assume success" in str(captured.value)
     assert _rtlib.resolve_project_mailbox_checked(
         project,
         registry_path=registry,
@@ -1939,7 +1940,7 @@ def test_rollback_reports_unknown_when_commit_probe_fails(
     with pytest.raises(
         _rtmigrate.MailMigrationCommitUnknownError,
         match="outcome is unknown",
-    ):
+    ) as captured:
         _rtmigrate.rollback_project(
             project,
             migrated["manifest"],
@@ -1947,6 +1948,7 @@ def test_rollback_reports_unknown_when_commit_probe_fails(
             backup_root=backup_root,
         )
 
+    assert "do not assume success" in str(captured.value)
     assert _rtlib.resolve_project_mailbox_checked(
         project,
         registry_path=registry,
@@ -2493,6 +2495,7 @@ def test_rt_projects_cli_exposes_only_project_scoped_migration(
         check=False,
     )
     assert result.returncode == 0, result.stderr
+    assert "migrated:" in result.stderr
     payload = json.loads(result.stdout)
     assert payload["operation"] == "migrate"
     assert payload["committed"] is True
@@ -2515,6 +2518,7 @@ def test_rt_projects_cli_exposes_only_project_scoped_migration(
         check=False,
     )
     assert rollback.returncode == 0, rollback.stderr
+    assert "rolled back:" in rollback.stderr
     assert json.loads(rollback.stdout)["operation"] == "rollback"
     help_result = subprocess.run(
         [sys.executable, str(BIN / "rt-projects"), "--help"],
