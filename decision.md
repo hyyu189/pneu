@@ -2,6 +2,16 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-08-05: Antigravity harness parked at T0, workstream closed (Ocean).
+  Hands-on validation of Antigravity CLI (`agy` 1.1.10) confirmed no
+  startup/resume hook and no external wake surface, so automatic wake is
+  not currently buildable and no support claim is made; T0
+  (durable mail + manual drain) is architecturally free but will not be
+  claimed publicly on its own. Gemini CLI was dropped entirely (no longer
+  actively maintained). Research and stage-1 evidence are archived in
+  handoff/antigravity-harness-research-2026-08-03.md and
+  handoff/antigravity-stage1-2026-08-04.md; revisit only if upstream
+  ships an early lifecycle hook or wake API.
 - 2026-07-30: Launcher-primed first turn for bare Codex launches (Ocean).
   Supersedes the earlier refusal to send a synthetic turn — the zero-turn
   upstream draft explicitly wanted binding "without sending a fake
