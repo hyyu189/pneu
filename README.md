@@ -152,10 +152,22 @@ rt-say AGENT[@PROJECT] KIND "MESSAGE"
                                   deliver durable local or sibling mail
 rt-inbox                          inspect waiting mail
 rt-ack ID                         acknowledge and archive a message
+roundtable worktree add NAME      create a registered sibling worktree
+roundtable worktree list          list sibling paths, branches, UUIDs, and seats
+roundtable worktree remove NAME   retire a sibling after its seats are idle
 roundtable projects migrate ROOT  move one local mailbox to central storage
 roundtable projects rollback ROOT --manifest PATH
                                   copy current central mail back to the project
 ```
+
+`roundtable worktree add` resolves the Git common directory so a command run
+from any sibling uses one derived group. It restates the repository, branch,
+target path, new `wt/<name>` branch, group key, and future `codex@<name>`
+address before acting. Use `--dry-run` to inspect the plan or `--yes` for a
+scripted invocation. `remove` refuses active or ambiguous seat leases, unbinds
+the Codex binding, tombstones the project registry entry, removes the linked
+worktree, and deletes its branch only when that branch is merged (unless
+`--keep-branch` is used).
 
 The bare `AGENT` syntax and its current-project target selection are unchanged;
 its durable wire bytes are not. Every newly emitted envelope, including bare

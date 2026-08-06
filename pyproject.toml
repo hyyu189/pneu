@@ -69,6 +69,7 @@ script-files = [
   "bin/rt-startup-advisory",
   "bin/rt-stop-gate",
   "bin/rt-wait-inbox",
+  "bin/rt-worktree",
 ]
 package-dir = { "" = "bin", "roundtable_packaging" = "roundtable_packaging" }
 

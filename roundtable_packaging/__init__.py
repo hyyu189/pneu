@@ -49,6 +49,7 @@ TOOLS = (
     "rt-startup-advisory",
     "rt-stop-gate",
     "rt-wait-inbox",
+    "rt-worktree",
 )
 
 LAUNCH_AGENT_LABELS = (

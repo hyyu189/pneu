@@ -87,11 +87,31 @@ roundtable-init new-git-project --git
 | `rt-projects resolve ROOT` | Diagnostic JSON view of the UUID-pinned mailbox selected by the registry. |
 | `rt-projects migrate ROOT` | Exclusively copy a local mailbox through a verified archive and durable recovery record into the central UUID store. |
 | `rt-projects rollback ROOT --manifest PATH` | Copy current central mail back to local; requires the exact active forward recovery record and preserves post-cutover mail. |
+| `roundtable worktree add NAME [options]` | Create a Git sibling worktree, bootstrap its Roundtable registry identity, and print its `codex@NAME` launch route. |
+| `roundtable worktree list` | List registered siblings in the current Git-derived group with branch, UUID, and seat status. |
+| `roundtable worktree remove NAME [--keep-branch]` | Refuse active/ambiguous seats, unbind Codex, tombstone the registry row, remove the worktree, and delete only a merged branch. |
 | `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit. |
 | `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: where does cmux think an agent sits. Not part of sending. |
 
 Run them from a project root (a dir with `.roundtable/agents.yaml`). Outside
 one, set `ROUNDTABLE_PROJECT_DIR` or `RT_FALLBACK_PROJECT`.
+
+## Worktree lifecycle
+
+`roundtable worktree add <name>` resolves the Git common directory from the
+current repository (or `--repo PATH`), so any sibling worktree shares one
+derived group key. The default target is `../<name>` beside the current repo
+root; `--path PATH` may select another path outside that worktree. Before any
+mutation the command restates the repository, current branch and commit,
+group key, target, new `wt/<name>` branch, and future `codex@<name>` address.
+`--dry-run` prints that restatement without changing anything; `--yes` is the
+scripted confirmation path.
+
+`roundtable worktree remove <name>` resolves exactly one active sibling in the
+same group. It refuses active, unhealthy-but-owned, or ambiguous seat state,
+then unbinds any Codex binding, tombstones the registry row, and removes the
+linked worktree. A branch is deleted only after it is merged; pass
+`--keep-branch` to retain it.
 
 Launch dedicated sessions with `rt-codex`, `rt-claude`, or `rt-hermes`. When
 called outside a project on a TTY they offer registered projects, project

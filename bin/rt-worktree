@@ -1,0 +1,762 @@
+#!/usr/bin/env python3
+"""Create, inspect, and safely retire Roundtable Git worktree projects."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import os
+import re
+import shlex
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from _rtcodex import RUNTIME_DIR as CODEX_RUNTIME_DIR
+from _rtlib import (
+    ProjectRegistryError,
+    _clean_git_environment,
+    _entry_with_revalidated_group,
+    _verify_registered_entry_identity,
+    active_project_entries,
+    emit_registry_warnings,
+    load_agents_doc,
+    load_project_registry_strict,
+    projects_registry_path,
+    resolve_project_mailbox_checked,
+    unregister_project,
+)
+from _rtruntime import (
+    RuntimeStateError,
+    harness_lease_records,
+    inspect_seat,
+)
+
+
+PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+PROMPT_ATTEMPTS = 3
+KNOWN_HARNESSES = ("claude", "codex", "hermes", "openclaw")
+
+
+class WorktreeError(RuntimeError):
+    """A worktree operation cannot proceed safely."""
+
+
+@dataclass(frozen=True)
+class Repository:
+    root: Path
+    common_dir: Path
+    group: str
+    branch: str
+    commit: str
+
+
+@dataclass(frozen=True)
+class SeatView:
+    harness: str
+    agent_id: str
+    status: str
+    detail: str = ""
+
+
+def _git_environment() -> dict[str, str]:
+    return _clean_git_environment()
+
+
+def _run_git_at(
+    path: Path,
+    arguments: list[str],
+    *,
+    check: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(path), *arguments],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            env=_git_environment(),
+        )
+    except OSError as error:
+        raise WorktreeError(f"cannot run Git: {error}") from error
+    if check and result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        rendered = " ".join(shlex.quote(item) for item in arguments)
+        raise WorktreeError(
+            f"git {rendered} failed with exit {result.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    return result
+
+
+def _git_output(path: Path, *arguments: str) -> str:
+    return _run_git_at(path, list(arguments)).stdout.strip()
+
+
+def _absolute_input(raw: str | Path, *, cwd: Path) -> Path:
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    return Path(os.path.abspath(os.fspath(candidate)))
+
+
+def _not_git_error(path: Path) -> WorktreeError:
+    return WorktreeError(
+        f"{path} is not inside a Git repository; pass --repo PATH as the "
+        "scripted override"
+    )
+
+
+def _repository(raw: str | Path, *, cwd: Path) -> Repository:
+    candidate = _absolute_input(raw, cwd=cwd)
+    if not candidate.exists() or not candidate.is_dir():
+        raise _not_git_error(candidate)
+    try:
+        common_raw = _git_output(candidate, "rev-parse", "--git-common-dir")
+        root_raw = _git_output(candidate, "rev-parse", "--show-toplevel")
+    except WorktreeError as error:
+        raise _not_git_error(candidate) from error
+
+    root = Path(root_raw).expanduser()
+    if not root.is_absolute():
+        root = candidate / root
+    try:
+        root = root.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise WorktreeError(f"Git repository root is not usable: {root}: {error}") from error
+
+    common = Path(common_raw).expanduser()
+    if not common.is_absolute():
+        common = root / common
+    try:
+        common = common.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise WorktreeError(f"Git common directory is not usable: {common}: {error}") from error
+    if not common.is_dir():
+        raise WorktreeError(f"Git common directory is not a directory: {common}")
+
+    try:
+        branch = _git_output(root, "rev-parse", "--abbrev-ref", "HEAD")
+        commit = _git_output(root, "rev-parse", "HEAD")
+    except WorktreeError as error:
+        raise WorktreeError(
+            f"cannot read the current branch and commit from {root}: {error}"
+        ) from error
+    if not branch or not commit:
+        raise WorktreeError(f"cannot read the current branch and commit from {root}")
+
+    group = "git:" + hashlib.sha256(os.fsencode(str(common))).hexdigest()
+    return Repository(root, common, group, branch, commit)
+
+
+def _validate_name(name: str) -> str:
+    if not PROJECT_NAME_RE.fullmatch(name):
+        raise WorktreeError(
+            "project name must match ^[A-Za-z0-9][A-Za-z0-9._-]*$; "
+            "no slashes or whitespace"
+        )
+    return name
+
+
+def _target_path(name: str, raw: str | Path | None, *, repo: Repository, cwd: Path) -> Path:
+    target = (
+        repo.root.parent / name
+        if raw is None
+        else _absolute_input(raw, cwd=cwd)
+    )
+    target = Path(os.path.abspath(os.fspath(target)))
+    if target.name != name:
+        raise WorktreeError(
+            f"target path must end with the registry name {name!r}: {target}"
+        )
+    if os.path.lexists(target):
+        raise WorktreeError(f"target directory already exists: {target}")
+    try:
+        resolved = target.resolve(strict=False)
+        resolved.relative_to(repo.root)
+    except ValueError:
+        pass
+    else:
+        raise WorktreeError(
+            f"target path must be a sibling outside the repository worktree: {target}"
+        )
+    if not target.parent.is_dir():
+        raise WorktreeError(f"target parent directory does not exist: {target.parent}")
+    return target
+
+
+def _validate_branch(repo: Repository, branch: str) -> None:
+    result = _run_git_at(repo.root, ["check-ref-format", "--branch", branch], check=False)
+    if result.returncode != 0:
+        raise WorktreeError(f"new branch name is invalid for Git: {branch}")
+    exists = _run_git_at(
+        repo.root,
+        ["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"],
+        check=False,
+    )
+    if exists.returncode == 0:
+        raise WorktreeError(f"branch already exists: {branch}")
+    if exists.returncode not in {1, 128}:
+        detail = exists.stderr.strip() or exists.stdout.strip()
+        raise WorktreeError(
+            f"cannot inspect whether branch exists: {branch}"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def _validate_from(repo: Repository, source: str | None) -> None:
+    if source is None:
+        return
+    result = _run_git_at(
+        repo.root,
+        ["rev-parse", "--verify", "--quiet", f"{source}^{{commit}}"],
+        check=False,
+    )
+    if result.returncode != 0:
+        raise WorktreeError(f"--from does not name a commit: {source}")
+
+
+def _registry_snapshot() -> tuple[list[dict], list[str]]:
+    try:
+        return load_project_registry_strict()
+    except ProjectRegistryError as error:
+        raise WorktreeError(f"cannot inspect the project registry: {error}") from error
+
+
+def _entry_group(entry: dict, *, fail_closed: bool = True) -> tuple[dict | None, str | None]:
+    try:
+        root = _verify_registered_entry_identity(entry)
+        effective = _entry_with_revalidated_group(entry, root)
+    except ProjectRegistryError as error:
+        if fail_closed:
+            raise WorktreeError(
+                f"cannot revalidate active project {entry.get('name')!r} "
+                f"at {entry.get('root')}: {error}"
+            ) from error
+        return None, str(error)
+    return effective, None
+
+
+def _check_name_collision(name: str, group: str, entries: list[dict]) -> None:
+    collisions = []
+    for entry in active_project_entries(entries, available_only=False):
+        if entry.get("name") != name:
+            continue
+        effective, error = _entry_group(entry, fail_closed=False)
+        if effective is None:
+            # An unavailable active row with the same stored group cannot be
+            # proven unrelated.  Keep the create operation fail-closed.
+            if entry.get("group") == group or not entry.get("available"):
+                raise WorktreeError(
+                    f"cannot prove that active registry name {name!r} is free: "
+                    f"{error or entry.get('root')}"
+                )
+            continue
+        if effective.get("group") == group:
+            collisions.append(effective)
+    if collisions:
+        detail = "; ".join(
+            f"uuid={entry['uuid']} path={entry['root']}"
+            for entry in collisions
+        )
+        raise WorktreeError(
+            f"active registry name {name!r} already exists in derived group "
+            f"{group}: {detail}"
+        )
+
+
+def _sibling_entry(name: str, group: str, entries: list[dict]) -> dict:
+    matches = []
+    for entry in active_project_entries(entries, available_only=False):
+        if entry.get("name") != name:
+            continue
+        effective, error = _entry_group(entry, fail_closed=False)
+        if effective is None:
+            if entry.get("group") == group or not entry.get("available"):
+                raise WorktreeError(
+                    f"cannot resolve sibling {name!r} safely: "
+                    f"{error or entry.get('root')}"
+                )
+            continue
+        if effective.get("group") == group:
+            matches.append(effective)
+    if not matches:
+        raise WorktreeError(
+            f"no active sibling project named {name!r} in derived group {group}"
+        )
+    if len(matches) != 1:
+        detail = "; ".join(
+            f"uuid={entry['uuid']} path={entry['root']}"
+            for entry in matches
+        )
+        raise WorktreeError(
+            f"sibling project name {name!r} is ambiguous in derived group "
+            f"{group}: {detail}"
+        )
+    return matches[0]
+
+
+def _read_yes_no(stdin, stderr, prompt: str) -> bool:
+    last_error = None
+    for attempt in range(PROMPT_ATTEMPTS):
+        print(prompt, end="", file=stderr, flush=True)
+        value = stdin.readline()
+        if value == "":
+            if last_error is not None:
+                raise last_error
+            raise WorktreeError("input closed during confirmation")
+        normalized = value.strip().lower()
+        if normalized in {"", "n", "no"}:
+            return False
+        if normalized in {"y", "yes"}:
+            return True
+        last_error = WorktreeError(
+            f"expected yes or no, got {normalized!r}"
+        )
+        if attempt + 1 < PROMPT_ATTEMPTS:
+            print(f"{last_error}; please try again.", file=stderr)
+    raise last_error
+
+
+def _require_confirmation(*, stdin, stderr, yes: bool) -> bool:
+    if yes:
+        return True
+    if not stdin.isatty():
+        raise WorktreeError(
+            "interactive confirmation requires a TTY; pass --yes for scripted use"
+        )
+    if _read_yes_no(stdin, stderr, "Proceed? [y/N]: "):
+        return True
+    print("cancelled; no changes made", file=stderr)
+    return False
+
+
+def _restatement(
+    operation: str,
+    repo: Repository,
+    *,
+    name: str,
+    target: Path,
+    branch: str,
+    uuid: str | None = None,
+    stdout,
+) -> None:
+    print(f"worktree {operation} restatement:", file=stdout)
+    print(f"  repo root: {repo.root}", file=stdout)
+    print(f"  current branch@commit: {repo.branch}@{repo.commit}", file=stdout)
+    print(f"  derived group key: {repo.group}", file=stdout)
+    print(f"  target path: {target}", file=stdout)
+    print(f"  {'new branch' if operation == 'add' else 'branch'}: {branch}", file=stdout)
+    print(f"  future address: codex@{name}", file=stdout)
+    if uuid is not None:
+        print(f"  project uuid: {uuid}", file=stdout)
+
+
+def _init_project(target: Path) -> str:
+    command = Path(__file__).resolve().with_name("roundtable-init")
+    if not command.is_file():
+        raise WorktreeError(f"roundtable-init is unavailable: {command}")
+    environment = _clean_git_environment()
+    environment["ROUNDTABLE_ONBOARDING_SUBPROCESS"] = "1"
+    try:
+        result = subprocess.run(
+            [str(command), "--here"],
+            cwd=target,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as error:
+        raise WorktreeError(f"cannot initialize Roundtable project at {target}: {error}") from error
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
+        raise WorktreeError(
+            f"roundtable-init failed for {target} with exit {result.returncode}"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        mailbox = resolve_project_mailbox_checked(target)
+    except (ProjectRegistryError, SystemExit) as error:
+        raise WorktreeError(
+            f"Roundtable project initialization did not produce a registered UUID at "
+            f"{target}: {error}"
+        ) from error
+    return mailbox.project_uuid
+
+
+def _worktree_add(args, *, cwd: Path, stdin, stdout, stderr) -> int:
+    name = _validate_name(args.name)
+    repo = _repository(args.repo or cwd, cwd=cwd)
+    target = _target_path(name, args.path, repo=repo, cwd=cwd)
+    branch = f"wt/{name}"
+    entries, warnings = _registry_snapshot()
+    emit_registry_warnings(warnings, stream=stderr, tool="rt-worktree")
+    _check_name_collision(name, repo.group, entries)
+    _validate_branch(repo, branch)
+    _validate_from(repo, args.from_branch)
+
+    _restatement(
+        "add",
+        repo,
+        name=name,
+        target=target,
+        branch=branch,
+        stdout=stdout,
+    )
+    if args.dry_run:
+        print("dry-run: no changes made", file=stdout)
+        return 0
+    if not _require_confirmation(stdin=stdin, stderr=stderr, yes=args.yes):
+        return 1
+
+    worktree_created = False
+    git_arguments = ["worktree", "add", str(target), "-b", branch]
+    if args.from_branch is not None:
+        git_arguments.append(args.from_branch)
+    try:
+        _run_git_at(repo.root, git_arguments)
+        worktree_created = True
+        project_uuid = _init_project(target)
+    except WorktreeError:
+        if worktree_created:
+            cleanup = _run_git_at(
+                repo.root,
+                ["worktree", "remove", "--force", str(target)],
+                check=False,
+            )
+            if cleanup.returncode != 0:
+                detail = cleanup.stderr.strip() or cleanup.stdout.strip()
+                raise WorktreeError(
+                    "worktree creation failed and automatic cleanup also failed; "
+                    f"inspect {target}"
+                    + (f": {detail}" if detail else "")
+                ) from None
+        raise
+
+    print("worktree added:", file=stdout)
+    print(f"  path: {target}", file=stdout)
+    print(f"  branch: {branch}", file=stdout)
+    print(f"  uuid: {project_uuid}", file=stdout)
+    print(f"  address: codex@{name}", file=stdout)
+    launch = f"cd {shlex.quote(str(target))} && roundtable codex"
+    print(f"  next: {launch}", file=stdout)
+    return 0
+
+
+def _configured_seats(project: Path) -> list[tuple[str, str]]:
+    document = load_agents_doc(project, "rt-worktree")
+    agents = document.get("agents") or {}
+    if not isinstance(agents, dict):
+        raise WorktreeError(f"invalid agents configuration for {project}")
+    result = []
+    for base, config in agents.items():
+        if not isinstance(base, str) or not isinstance(config, dict):
+            continue
+        raw_harness = config.get("harness")
+        if not isinstance(raw_harness, str) or not raw_harness:
+            continue
+        harness = {
+            "claude-code": "claude",
+            "claude": "claude",
+            "codex": "codex",
+            "hermes-agent": "hermes",
+            "hermes": "hermes",
+            "openclaw-gateway": "openclaw",
+            "openclaw": "openclaw",
+        }.get(raw_harness, raw_harness)
+        instances = config.get("instances")
+        if not isinstance(instances, list) or not instances:
+            instances = [{"id": base}]
+        for instance in instances:
+            agent_id = instance.get("id") if isinstance(instance, dict) else instance
+            if isinstance(agent_id, str) and agent_id:
+                pair = (harness, agent_id)
+                if pair not in result:
+                    result.append(pair)
+    return result
+
+
+def _seat_views(project: Path) -> list[SeatView]:
+    configured = _configured_seats(project)
+    harnesses = set(KNOWN_HARNESSES)
+    harnesses.update(harness for harness, _agent_id in configured)
+    views: list[SeatView] = []
+    seen = set()
+    for harness, agent_id in configured:
+        try:
+            inspection = inspect_seat(project, agent_id)
+            view = SeatView(harness, agent_id, inspection.status, inspection.detail)
+        except RuntimeStateError as error:
+            view = SeatView(harness, agent_id, "ambiguous", str(error))
+        views.append(view)
+        seen.add((harness, agent_id))
+    for harness in sorted(harnesses):
+        try:
+            records = harness_lease_records(project, harness)
+        except RuntimeStateError as error:
+            views.append(SeatView(harness, "<runtime>", "ambiguous", str(error)))
+            continue
+        for record in records:
+            agent_id = record.get("agentId")
+            if not isinstance(agent_id, str) or not agent_id:
+                views.append(SeatView(harness, "<invalid>", "ambiguous", "invalid agent id"))
+                continue
+            if (harness, agent_id) in seen:
+                continue
+            try:
+                inspection = inspect_seat(project, agent_id)
+                view = SeatView(harness, agent_id, inspection.status, inspection.detail)
+            except RuntimeStateError as error:
+                view = SeatView(harness, agent_id, "ambiguous", str(error))
+            views.append(view)
+            seen.add((harness, agent_id))
+    return sorted(views, key=lambda view: (view.harness, view.agent_id))
+
+
+def _blocking_seats(views: list[SeatView]) -> list[SeatView]:
+    return [
+        view
+        for view in views
+        if view.status in {"active_healthy", "active_unhealthy", "ambiguous"}
+    ]
+
+
+def _format_seats(views: list[SeatView]) -> str:
+    if not views:
+        return "none"
+    return ",".join(
+        f"{view.harness}/{view.agent_id}={view.status}" for view in views
+    )
+
+
+def _unbind_codex(project: Path) -> None:
+    state_file = CODEX_RUNTIME_DIR / "rt-codex-wake-state.json"
+    if not os.path.lexists(state_file):
+        return
+    command = Path(__file__).resolve().with_name("rt-codex-wake")
+    if not command.is_file():
+        raise WorktreeError(f"rt-codex-wake is unavailable: {command}")
+    try:
+        result = subprocess.run(
+            [str(command), "unbind", str(project)],
+            env=_clean_git_environment(),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as error:
+        raise WorktreeError(f"cannot unbind Codex for {project}: {error}") from error
+    if result.returncode == 0:
+        return
+    if result.returncode == 1 and "not bound" in (result.stdout + result.stderr).lower():
+        return
+    detail = (result.stderr or result.stdout).strip()
+    raise WorktreeError(
+        f"cannot unbind Codex for {project} with exit {result.returncode}"
+        + (f": {detail}" if detail else "")
+    )
+
+
+def _branch_is_merged(repo: Repository, branch: str) -> bool:
+    result = _git_output(repo.root, "branch", "--merged", repo.commit, "--format=%(refname:short)")
+    return branch in {line.strip() for line in result.splitlines() if line.strip()}
+
+
+def _worktree_remove(args, *, cwd: Path, stdin, stdout, stderr) -> int:
+    name = _validate_name(args.name)
+    repo = _repository(cwd, cwd=cwd)
+    entries, warnings = _registry_snapshot()
+    emit_registry_warnings(warnings, stream=stderr, tool="rt-worktree")
+    entry = _sibling_entry(name, repo.group, entries)
+    target = Path(entry["root"]).resolve()
+    if target == repo.root:
+        raise WorktreeError(
+            f"refusing to remove the current repository worktree: {target}"
+        )
+    target_repo = _repository(target, cwd=target)
+    if target_repo.group != repo.group:
+        raise WorktreeError(
+            f"target worktree is outside the invoking repository group: {target}"
+        )
+    target_branch = _git_output(target_repo.root, "rev-parse", "--abbrev-ref", "HEAD")
+    target_commit = _git_output(target_repo.root, "rev-parse", "HEAD")
+    del target_commit
+    views = _seat_views(target)
+    blockers = _blocking_seats(views)
+    if blockers:
+        detail = "; ".join(
+            f"{view.harness}/{view.agent_id}={view.status}"
+            + (f" ({view.detail})" if view.detail else "")
+            for view in blockers
+        )
+        raise WorktreeError(
+            f"refusing to remove {target} while seat lease(s) are active or "
+            f"ambiguous: {detail}"
+        )
+    if target_branch == repo.branch and target_branch != "HEAD":
+        raise WorktreeError(
+            f"refusing to delete branch {target_branch}: it is also the invoking "
+            "worktree branch"
+        )
+
+    _restatement(
+        "remove",
+        repo,
+        name=name,
+        target=target,
+        branch=target_branch,
+        uuid=entry["uuid"],
+        stdout=stdout,
+    )
+    if not _require_confirmation(stdin=stdin, stderr=stderr, yes=args.yes):
+        return 1
+
+    _unbind_codex(target)
+    try:
+        changed = unregister_project(target, path=projects_registry_path())
+    except SystemExit as error:
+        detail = error.code if isinstance(error.code, str) else str(error)
+        raise WorktreeError(detail) from error
+    if not changed:
+        raise WorktreeError(f"registry entry was already tombstoned: {target}")
+
+    removed = _run_git_at(
+        repo.root,
+        ["worktree", "remove", "--force", str(target)],
+        check=False,
+    )
+    if removed.returncode != 0:
+        detail = removed.stderr.strip() or removed.stdout.strip()
+        raise WorktreeError(
+            f"registry entry for {target} was tombstoned, but git worktree "
+            "remove failed"
+            + (f": {detail}" if detail else "")
+        )
+
+    branch_result = "detached; no branch to delete"
+    if target_branch == "HEAD":
+        pass
+    elif args.keep_branch:
+        branch_result = f"preserved (--keep-branch): {target_branch}"
+    elif _branch_is_merged(repo, target_branch):
+        deleted = _run_git_at(repo.root, ["branch", "-d", target_branch], check=False)
+        if deleted.returncode == 0:
+            branch_result = f"deleted (merged): {target_branch}"
+        else:
+            detail = deleted.stderr.strip() or deleted.stdout.strip()
+            branch_result = (
+                f"preserved (branch deletion failed): {target_branch}"
+                + (f" ({detail})" if detail else "")
+            )
+    else:
+        branch_result = f"preserved (not merged): {target_branch}"
+
+    print("worktree removed:", file=stdout)
+    print(f"  path: {target}", file=stdout)
+    print(f"  uuid: {entry['uuid']}", file=stdout)
+    print("  registry: tombstoned", file=stdout)
+    print(f"  branch: {branch_result}", file=stdout)
+    return 0
+
+
+def _worktree_list(args, *, cwd: Path, stdout, stderr) -> int:
+    del args
+    repo = _repository(cwd, cwd=cwd)
+    entries, warnings = _registry_snapshot()
+    emit_registry_warnings(warnings, stream=stderr, tool="rt-worktree")
+    siblings = []
+    for entry in active_project_entries(entries, available_only=False):
+        effective, error = _entry_group(entry, fail_closed=False)
+        if effective is None:
+            if entry.get("group") == repo.group or not entry.get("available"):
+                raise WorktreeError(
+                    f"cannot list active sibling {entry.get('name')!r}: "
+                    f"{error or entry.get('root')}"
+                )
+            continue
+        if effective.get("group") != repo.group:
+            continue
+        root = Path(effective["root"])
+        branch = _git_output(root, "rev-parse", "--abbrev-ref", "HEAD")
+        seats = _format_seats(_seat_views(root))
+        siblings.append((str(root), branch, effective["uuid"], seats))
+    print(f"derived group key: {repo.group}", file=stdout)
+    for root, branch, project_uuid, seats in sorted(siblings):
+        print(
+            f"{root} branch={branch} uuid={project_uuid} seats={seats}",
+            file=stdout,
+        )
+    if not siblings:
+        print("(no registered Roundtable siblings)", file=stdout)
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="roundtable worktree")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    add = subparsers.add_parser("add", help="create a registered sibling worktree")
+    add.add_argument("name")
+    add.add_argument("--from", dest="from_branch", metavar="BRANCH")
+    add.add_argument("--path", metavar="PATH")
+    add.add_argument("--repo", metavar="PATH")
+    add.add_argument("--dry-run", action="store_true")
+    add.add_argument("--yes", action="store_true")
+
+    remove = subparsers.add_parser("remove", help="retire a registered sibling worktree")
+    remove.add_argument("name")
+    remove.add_argument("--keep-branch", action="store_true")
+    remove.add_argument("--yes", action="store_true")
+
+    subparsers.add_parser("list", help="list registered sibling worktrees")
+    return parser
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    cwd: Path | None = None,
+    stdin=None,
+    stdout=None,
+    stderr=None,
+) -> int:
+    args = build_parser().parse_args(argv)
+    cwd = (cwd or Path.cwd()).expanduser().resolve()
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    try:
+        if args.command == "add":
+            return _worktree_add(
+                args,
+                cwd=cwd,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        if args.command == "remove":
+            return _worktree_remove(
+                args,
+                cwd=cwd,
+                stdin=stdin,
+                stdout=stdout,
+                stderr=stderr,
+            )
+        return _worktree_list(
+            args,
+            cwd=cwd,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except (WorktreeError, ProjectRegistryError, RuntimeStateError, OSError) as error:
+        print(f"rt-worktree: {error}", file=stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

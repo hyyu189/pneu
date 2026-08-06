@@ -43,6 +43,7 @@ ALIASES = {
     "send": "rt-say",
     "inbox": "rt-inbox",
     "ack": "rt-ack",
+    "worktree": "rt-worktree",
 }
 HARNESS_ORDER = ("claude", "codex", "hermes", "grok")
 PROMPT_ATTEMPTS = 3
@@ -68,6 +69,7 @@ commands:
   send       Send a durable message
   inbox      Read a durable inbox
   ack        Acknowledge a durable message
+  worktree   Add, list, or remove a registered Git worktree project
 """
 
 ASCII_GUIDE = """
