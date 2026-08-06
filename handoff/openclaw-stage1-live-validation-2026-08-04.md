@@ -102,7 +102,7 @@ path finalized successfully. The adapter must treat a missing terminal event
 as a failed turn and must not acknowledge Roundtable mail on that condition.
 
 One CLI probe made without the isolated `OPENCLAW_STATE_DIR` and
-`OPENCLAW_CONFIG_PATH` used `/Users/haiyangyu/.openclaw/openclaw.json` and
+`OPENCLAW_CONFIG_PATH` used `<user-home>/.openclaw/openclaw.json` and
 hit a device scope-upgrade-pending error. The client-side environment is as
 important as the server-side environment; `--url` alone is not an isolation
 boundary.

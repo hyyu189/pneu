@@ -56,12 +56,12 @@ The local OpenClaw 2026.5.4 CLI confirmed the provider id and command shape:
 `openclaw models auth login --provider openai-codex --set-default`. The
 isolated config is already set to `openai-codex/gpt-5.5`, and `models status
 --json` showed its config and auth store under
-`/private/tmp/rt-openclaw-oauth.gbDOdK/state`, with no auth profile yet.
+`/private/tmp/rt-openclaw-oauth-stage25/state`, with no auth profile yet.
 
 Ocean's one interactive command is:
 
 ```sh
-env HOME=/private/tmp/rt-openclaw-oauth.gbDOdK/home XDG_CONFIG_HOME=/private/tmp/rt-openclaw-oauth.gbDOdK/home/.config XDG_DATA_HOME=/private/tmp/rt-openclaw-oauth.gbDOdK/home/.local/share XDG_CACHE_HOME=/private/tmp/rt-openclaw-oauth.gbDOdK/home/.cache TMPDIR=/private/tmp/rt-openclaw-oauth.gbDOdK/tmp OPENCLAW_STATE_DIR=/private/tmp/rt-openclaw-oauth.gbDOdK/state OPENCLAW_CONFIG_PATH=/private/tmp/rt-openclaw-oauth.gbDOdK/state/openclaw.json OPENCLAW_GATEWAY_TOKEN=isolated-token OPENCLAW_AGENT_ID=main RT_OPENCLAW_ISOLATION_ROOT=/private/tmp/rt-openclaw-oauth.gbDOdK /private/tmp/rt-openclaw-stage2-live/node_modules/.bin/openclaw models auth login --provider openai-codex --set-default
+env HOME=/private/tmp/rt-openclaw-oauth-stage25/profile XDG_CONFIG_HOME=/private/tmp/rt-openclaw-oauth-stage25/profile/.config XDG_DATA_HOME=/private/tmp/rt-openclaw-oauth-stage25/profile/.local/share XDG_CACHE_HOME=/private/tmp/rt-openclaw-oauth-stage25/profile/.cache TMPDIR=/private/tmp/rt-openclaw-oauth-stage25/tmp OPENCLAW_STATE_DIR=/private/tmp/rt-openclaw-oauth-stage25/state OPENCLAW_CONFIG_PATH=/private/tmp/rt-openclaw-oauth-stage25/state/openclaw.json OPENCLAW_GATEWAY_TOKEN=isolated-token OPENCLAW_AGENT_ID=main RT_OPENCLAW_ISOLATION_ROOT=/private/tmp/rt-openclaw-oauth-stage25 /private/tmp/rt-openclaw-stage2-live/node_modules/.bin/openclaw models auth login --provider openai-codex --set-default
 ```
 
 The CLI's local flow opens the browser and uses localhost:1455; no browser
