@@ -54,8 +54,20 @@ class GatewayProtocolError(OpenClawError):
     """The Gateway did not speak the expected authenticated protocol."""
 
 
+class GatewayUnavailableError(GatewayProtocolError):
+    """The loopback Gateway could not be reached or disappeared."""
+
+
+class GatewayAuthenticationError(GatewayProtocolError):
+    """The Gateway rejected the isolated authentication token."""
+
+
 class GatewayRunError(OpenClawError):
     """An agent run ended without a successful terminal result."""
+
+
+class GatewayRunTimeout(GatewayRunError):
+    """An accepted agent run did not reach a terminal result in time."""
 
 
 def _as_path(value: str | Path) -> Path:
@@ -331,23 +343,41 @@ class _WebSocket:
     def connect(self) -> None:
         if self.sock is not None:
             return
-        sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
-        if self.scheme == "wss":
-            context = ssl.create_default_context()
-            sock = context.wrap_socket(sock, server_hostname=self.host)
-        key = base64.b64encode(os.urandom(16)).decode("ascii")
-        request = (
-            f"GET / HTTP/1.1\r\nHost: {self.host}:{self.port}\r\n"
-            "Upgrade: websocket\r\nConnection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
-        ).encode("ascii")
-        sock.sendall(request)
-        response = self._read_http_headers(sock)
-        if not response.startswith(b"HTTP/1.1 101") and not response.startswith(b"HTTP/1.0 101"):
-            sock.close()
-            raise GatewayProtocolError(f"Gateway WebSocket upgrade failed: {response[:120]!r}")
-        self.sock = sock
-        self._handshake()
+        sock: socket.socket | None = None
+        try:
+            sock = socket.create_connection((self.host, self.port), timeout=self.timeout)
+            if self.scheme == "wss":
+                context = ssl.create_default_context()
+                sock = context.wrap_socket(sock, server_hostname=self.host)
+            key = base64.b64encode(os.urandom(16)).decode("ascii")
+            request = (
+                f"GET / HTTP/1.1\r\nHost: {self.host}:{self.port}\r\n"
+                "Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+            ).encode("ascii")
+            sock.sendall(request)
+            response = self._read_http_headers(sock)
+            if not response.startswith(b"HTTP/1.1 101") and not response.startswith(b"HTTP/1.0 101"):
+                raise GatewayProtocolError(f"Gateway WebSocket upgrade failed: {response[:120]!r}")
+            self.sock = sock
+            sock = None
+            self._handshake()
+        except GatewayAuthenticationError:
+            self.close()
+            raise
+        except GatewayProtocolError:
+            self.close()
+            raise
+        except OSError as error:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self.close()
+            raise GatewayUnavailableError(
+                f"OpenClaw Gateway unavailable at {self.scheme}://{self.host}:{self.port}: {error}"
+            ) from error
 
     def _read_http_headers(self, sock: socket.socket) -> bytes:
         data = bytearray()
@@ -386,7 +416,29 @@ class _WebSocket:
         }
         response = self._request_raw("connect", params, deadline=time.monotonic() + self.timeout)
         if not response.get("ok"):
-            raise GatewayProtocolError(f"Gateway authentication failed: {response.get('error')}")
+            error = response.get("error") or {}
+            if isinstance(error, dict):
+                code = str(error.get("code") or "").upper()
+                retryable = bool(error.get("retryable"))
+            else:
+                code = ""
+                retryable = False
+            error_text = str(error).lower()
+            if retryable or code in {"UNAVAILABLE", "NOT_READY", "STARTING", "SERVICE_UNAVAILABLE"}:
+                raise GatewayUnavailableError(
+                    "OpenClaw Gateway is not ready; "
+                    f"retry after startup completes ({error})"
+                )
+            if (
+                code in {"AUTH", "AUTH_REQUIRED", "UNAUTHORIZED", "FORBIDDEN", "INVALID_TOKEN"}
+                or "auth" in code.lower()
+                or any(term in error_text for term in ("unauthorized", "invalid token", "authentication failed"))
+            ):
+                raise GatewayAuthenticationError(
+                    "OpenClaw Gateway authentication rejected; "
+                    f"check the isolated token ({error})"
+                )
+            raise GatewayProtocolError(f"OpenClaw Gateway connect failed: {error}")
         payload = response.get("payload") or {}
         if payload.get("type") != "hello-ok" or payload.get("protocol") != PROTOCOL_VERSION:
             raise GatewayProtocolError("Gateway hello-ok did not negotiate protocol 3")
@@ -702,18 +754,30 @@ class OpenClawAdapter:
         while self.monotonic() < deadline:
             if self.process is not None and self.process.poll() is not None:
                 raise OpenClawError(f"OpenClaw Gateway exited during startup with {self.process.returncode}")
-            client = self.gateway_factory(self.isolation.url, self.isolation.token)
+            client: Any | None = None
             try:
+                client = self.gateway_factory(self.isolation.url, self.isolation.token)
                 client.connect()
                 client.request("health", {}, timeout=min(5.0, max(0.1, deadline - self.monotonic())))
                 client.close()
                 return
-            except (Exception) as error:  # readiness must tolerate sidecar warmup
+            except GatewayAuthenticationError:
+                # An invalid/expired token is deterministic. Retrying it on a
+                # readiness loop creates a retry storm and hides the operator
+                # action required to repair the isolated config.
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+                raise
+            except Exception as error:  # readiness must tolerate sidecar warmup
                 last_error = error
-                try:
-                    client.close()
-                except Exception:
-                    pass
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
                 self.sleep(min(0.5, max(0.05, deadline - self.monotonic())))
         raise OpenClawError(f"OpenClaw Gateway did not become ready: {last_error}")
 
@@ -809,7 +873,9 @@ class OpenClawAdapter:
                     terminal = snapshot
                     break
             if terminal is None:
-                raise GatewayRunError(f"OpenClaw run {run_id} did not reach a terminal result")
+                raise GatewayRunTimeout(
+                    f"OpenClaw run {run_id} timed out after {timeout:.3f}s before a terminal result"
+                )
             status = str(terminal.get("status") or "").lower()
             if status not in TERMINAL_OK:
                 raise GatewayRunError(f"OpenClaw run {run_id} ended with {status}: {terminal.get('error')}")
@@ -921,8 +987,11 @@ def main(argv: list[str] | None = None) -> int:
 
 __all__ = [
     "GatewayRun",
+    "GatewayAuthenticationError",
     "GatewayProtocolError",
     "GatewayRunError",
+    "GatewayRunTimeout",
+    "GatewayUnavailableError",
     "OpenClawAdapter",
     "OpenClawError",
     "OpenClawGateway",

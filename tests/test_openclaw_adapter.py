@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 from pathlib import Path
 import sys
 
@@ -15,6 +16,7 @@ if str(BIN) not in sys.path:
 
 adapter = importlib.import_module("integrations.openclaw.roundtable")
 import _rtlauncher
+import _rtruntime
 
 
 class FakeGateway:
@@ -109,6 +111,209 @@ def test_adapter_waits_for_final_run_and_exact_mail_drain(tmp_path):
     assert [call[0] for call in fake.calls] == ["agent", "agent.wait", "agent.wait"]
     assert fake.calls[0][1]["idempotencyKey"] == "roundtable:message"
     assert updates[-1]["names"] == ("message.md",)
+
+
+def _adapter_for_gateway_test(tmp_path, gateway_factory, **kwargs):
+    project = tmp_path / "project"
+    project.mkdir(parents=True)
+    executable = tmp_path / "openclaw"
+    executable.write_text("#!/bin/sh\n")
+    executable.chmod(0o755)
+    isolation = adapter.create_isolation(project, runtime_root=tmp_path / "runtime")
+    return adapter.OpenClawAdapter(
+        project,
+        agent_id="openclaw",
+        session_id="session-1",
+        revision="1",
+        isolation=isolation,
+        executable=executable,
+        gateway_factory=gateway_factory,
+        **kwargs,
+    )
+
+
+def test_gateway_down_keeps_durable_generation_and_recovers_after_return(tmp_path):
+    attempts = []
+    clock = [0.0]
+
+    class Down:
+        def connect(self):
+            attempts.append("down")
+            raise adapter.GatewayUnavailableError(
+                "OpenClaw Gateway unavailable at ws://127.0.0.1:1: refused"
+            )
+
+        def close(self):
+            pass
+
+        def __enter__(self):
+            self.connect()
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    class Ready:
+        def connect(self):
+            attempts.append("ready")
+
+        def request(self, *_args, **_kwargs):
+            return {"ok": True}
+
+        def close(self):
+            pass
+
+    def factory(_url, _token):
+        return Down() if len(attempts) == 0 else Ready()
+
+    def monotonic():
+        value = clock[0]
+        clock[0] += 0.1
+        return value
+
+    instance = _adapter_for_gateway_test(
+        tmp_path,
+        factory,
+        monotonic=monotonic,
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    )
+    instance.process = type("Process", (), {"poll": lambda _self: None})()
+    instance.wait_ready(timeout=1)
+    assert attempts == ["down", "ready"]
+
+    durable = instance.project_root / "durable-message.md"
+    durable.write_text("still in the authoritative maildir\n", encoding="utf-8")
+    instance.gateway_factory = lambda _url, _token: Down()
+    with pytest.raises(adapter.GatewayUnavailableError, match="actionable|unavailable"):
+        instance.run_generation((durable.name,), timeout=1)
+    assert durable.is_file()
+
+
+def test_gateway_killed_mid_turn_does_not_ack_or_archive_generation(tmp_path):
+    class Killed(FakeGateway):
+        def request(self, method, params, *, timeout=None):
+            self.calls.append((method, params, timeout))
+            if method == "agent":
+                return {"runId": "run-killed", "status": "accepted"}
+            raise adapter.GatewayUnavailableError(
+                "OpenClaw Gateway unavailable at ws://127.0.0.1:1: process exited"
+            )
+
+    fake = Killed([])
+    instance = _adapter_for_gateway_test(tmp_path, lambda _url, _token: fake)
+    new_dir = tmp_path / "authoritative-maildir" / "new"
+    new_dir.mkdir(parents=True)
+    message = new_dir / "20260806T000000Z-claude-to-openclaw-deadbeef.md"
+    message.write_text("must remain durable\n", encoding="utf-8")
+    with pytest.raises(adapter.GatewayUnavailableError, match="process exited"):
+        instance.run_generation((message.name,), timeout=1)
+    assert message.is_file()
+    assert not list((new_dir.parent / "cur").glob("*")) if (new_dir.parent / "cur").exists() else True
+
+
+def test_gateway_auth_failure_is_immediate_and_has_no_retry_storm(tmp_path):
+    attempts = []
+    sleeps = []
+
+    class BadAuth:
+        def connect(self):
+            attempts.append(1)
+            raise adapter.GatewayAuthenticationError(
+                "OpenClaw Gateway authentication rejected; check the isolated token"
+            )
+
+        def close(self):
+            pass
+
+    instance = _adapter_for_gateway_test(
+        tmp_path,
+        lambda _url, _token: BadAuth(),
+        sleep=sleeps.append,
+    )
+    instance.process = type("Process", (), {"poll": lambda _self: None})()
+    with pytest.raises(adapter.GatewayAuthenticationError, match="isolated token"):
+        instance.wait_ready(timeout=30)
+    assert attempts == [1]
+    assert sleeps == []
+
+
+def test_run_timeout_is_bounded_and_terminal_error_is_not_swallowed(tmp_path):
+    class NeverTerminal(FakeGateway):
+        def request(self, method, params, *, timeout=None):
+            self.calls.append((method, params, timeout))
+            if method == "agent":
+                return {"runId": "run-never", "status": "accepted"}
+            return {"runId": "run-never", "status": "timeout"}
+
+    clock = [0.0]
+
+    def monotonic():
+        value = clock[0]
+        clock[0] += 0.4
+        return value
+
+    never = NeverTerminal([])
+    instance = _adapter_for_gateway_test(tmp_path, lambda _url, _token: never, monotonic=monotonic)
+    with pytest.raises(adapter.GatewayRunTimeout, match="timed out"):
+        instance.run_generation(("never.md",), timeout=1)
+
+    error = FakeGateway(
+        [
+            {"runId": "run-error", "status": "accepted"},
+            {"runId": "run-error", "status": "error", "error": "provider rejected request"},
+        ]
+    )
+    instance = _adapter_for_gateway_test(tmp_path / "error", lambda _url, _token: error)
+    with pytest.raises(adapter.GatewayRunError, match="provider rejected request"):
+        instance.run_generation(("error.md",), timeout=1)
+
+
+def test_rapid_duplicate_wakes_reuse_idempotency_key(tmp_path):
+    fake = FakeGateway(
+        [
+            {"runId": "run-once", "status": "accepted"},
+            {"runId": "run-once", "status": "ok", "endedAt": "one"},
+            {"runId": "run-once", "status": "accepted"},
+            {"runId": "run-once", "status": "ok", "endedAt": "two"},
+        ]
+    )
+    instance = _adapter_for_gateway_test(tmp_path, lambda _url, _token: fake)
+    instance._mail_generation = lambda: ()
+    first = instance.run_generation(("rapid.md",), timeout=1, drain_timeout=1)
+    second = instance.run_generation(("rapid.md",), timeout=1, drain_timeout=1)
+    agent_calls = [call for call in fake.calls if call[0] == "agent"]
+    assert first.run_id == second.run_id == "run-once"
+    assert agent_calls[0][1]["idempotencyKey"] == agent_calls[1][1]["idempotencyKey"]
+    assert agent_calls[0][1]["sessionKey"] == agent_calls[1][1]["sessionKey"]
+
+
+@pytest.mark.parametrize("bad_field", ["session_id", "agent_id"])
+def test_stale_or_wrong_identity_is_refused_before_gateway_start(tmp_path, monkeypatch, bad_field):
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    lease = _rtruntime.claim(project, "openclaw", "openclaw", owner_pid=os.getpid())
+    try:
+        executable = tmp_path / "openclaw"
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+        instance = adapter.OpenClawAdapter(
+            project,
+            agent_id="other" if bad_field == "agent_id" else "openclaw",
+            session_id="wrong-session" if bad_field == "session_id" else lease.session_id,
+            revision=str(lease.revision),
+            isolation=adapter.create_isolation(project, runtime_root=tmp_path / "openclaw-runtime"),
+            executable=executable,
+        )
+        started = []
+        monkeypatch.setattr(instance, "start_gateway", lambda: started.append(True))
+        with pytest.raises(_rtruntime.FenceRejected):
+            instance.run(once=True)
+        assert started == []
+    finally:
+        _rtruntime.release(lease)
 
 
 def test_adapter_rejects_non_loopback_gateway_url():
