@@ -39,11 +39,12 @@ ALIASES = {
     "hermes": "rt-hermes",
     "codex": "rt-codex",
     "openclaw": "rt-openclaw",
+    "grok": "rt-grok",
     "send": "rt-say",
     "inbox": "rt-inbox",
     "ack": "rt-ack",
 }
-HARNESS_ORDER = ("claude", "codex", "hermes")
+HARNESS_ORDER = ("claude", "codex", "hermes", "grok")
 PROMPT_ATTEMPTS = 3
 
 HELP = """usage: roundtable [command] [args...]
@@ -63,6 +64,7 @@ commands:
   hermes     Launch a Hermes seat
   codex      Launch a Codex seat
   openclaw   Launch an isolated OpenClaw Gateway seat
+  grok       Launch an isolated Grok ACP seat
   send       Send a durable message
   inbox      Read a durable inbox
   ack        Acknowledge a durable message
@@ -98,8 +100,8 @@ Wake-up paths in this release:
 Tripwire means "watch for mail and request a harness-native turn".
 It is not the mailbox and it is not keyboard injection.
 
-Grok Build, OpenClaw, and Antigravity are parallel research targets here;
-their wake paths are not claimed as supported until each is verified live.
+Grok Build and OpenClaw use isolated, fail-closed wake adapters; each remains
+subject to its own live credentialed E2E and release-artifact promotion gates.
 
 Tip: run `roundtable guide` any time to show this tutorial again.
 """.lstrip()
@@ -268,6 +270,11 @@ def ensure_harness_setup(
     setup_runner=subprocess.run,
 ) -> None:
     """Run the installed package's ownership-safe setup once per harness."""
+
+    if harness in {"grok", "openclaw"}:
+        # These adapters own their own isolated child state and do not install
+        # hooks, plugins, or LaunchAgents.
+        return
 
     configured_prefix = environ.get("ROUNDTABLE_INSTALL_PREFIX")
     if not configured_prefix:
@@ -619,7 +626,7 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
     if not seats:
         detail = " | ".join(f"{name}: {error}" for name, error in unavailable)
         raise OnboardingError(
-            f"roundtable: no launchable Claude, Codex, or Hermes seats in {root}"
+            f"roundtable: no launchable configured harness seats in {root}"
             + (f"; {detail}" if detail else "")
         )
 

@@ -149,7 +149,7 @@ def test_guide_command_renders_ascii_mailroom_and_wake_model(tmp_path):
     assert "Claude  SessionStart/Stop hooks" in rendered
     assert "Hermes  the session-start plugin" in rendered
     assert "Codex   the app-server and Unix-socket notification bridge" in rendered
-    assert "Grok Build, OpenClaw, and Antigravity" in rendered
+    assert "Grok Build and OpenClaw use isolated" in rendered
 
 
 def test_version_command_reports_manifest_prefix_and_current_target(

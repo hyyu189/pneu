@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "roundtable-messaging"
-version = "0.2.1"
+version = "0.3.0"
 description = "Durable local maildir coordination for coding agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -60,6 +60,8 @@ script-files = [
   "bin/rt-inbox",
   "bin/rt-openclaw",
   "bin/rt-openclaw-wake",
+  "bin/rt-grok",
+  "bin/rt-grok-wake",
   "bin/rt-projects",
   "bin/rt-refresh",
   "bin/rt-resolve",
@@ -86,6 +88,9 @@ package-dir = { "" = "bin", "roundtable_packaging" = "roundtable_packaging" }
 ]
 "share/roundtable/integrations/openclaw/roundtable" = [
   "integrations/openclaw/roundtable/__init__.py",
+]
+"share/roundtable/integrations/grok/roundtable" = [
+  "integrations/grok/roundtable/__init__.py",
 ]
 "share/roundtable/skills/shared/roundtable" = [
   "skills/shared/roundtable/SKILL.md",

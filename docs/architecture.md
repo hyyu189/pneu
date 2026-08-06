@@ -10,7 +10,7 @@ core.
 | Layer | Responsibility | Required for delivery |
 | --- | --- | --- |
 | Product core | Project config and identity, atomic maildir delivery, ledger, inbox, acknowledgement, and drain state | Yes |
-| Harness adapters | Codex app-server wake; Claude hooks; Hermes lifecycle plugin | Only for automatic wake; offline delivery still succeeds |
+| Harness adapters | Codex app-server wake; Claude hooks; Hermes lifecycle plugin; isolated Grok ACP supervisor; isolated OpenClaw Gateway supervisor | Only for automatic wake; offline delivery still succeeds |
 | Terminal integrations | Optional workspace topology, surface diagnostics, project navigation, and notifications | No |
 
 The data path is:
@@ -264,6 +264,17 @@ plugin keeps polling so a late acknowledgement still re-arms automatically.
 A later session reset re-arms after session-scoped failures, while fence
 supersession and invalid installations stay closed for the process.
 
+Grok Build uses a separate stdlib ACP supervisor rather than hooks or a shared
+leader. The launcher claims the logical `grok` seat first, then the wake bridge
+starts one `grok agent --no-leader stdio` child with a bounded `HOME`,
+`GROK_HOME`, XDG, temporary, log, registry, and project environment. The child
+receives only the current lease identity and an existing API credential; the
+adapter never copies or refreshes host auth state. ACP permission requests are
+default-deny and admit only the exact fenced Roundtable inbox and acknowledgement
+commands. A prompt is successful only after the exact filename generation has
+left `new/`; the adapter retains the generation on timeout, auth failure, or
+child death and may create one newly authenticated child for recovery.
+
 Heartbeat reports adapter health; it is not by itself permission to steal a
 seat. On the same host, owner PID plus a process-start fingerprint protects
 against PID reuse and is the primary liveness proof. An unexpired-looking
@@ -309,7 +320,8 @@ A terminal host is first-class when a clean installation can:
 
 `roundtable-smoke` automates the core portion in an isolated environment with
 no optional terminal adapter loaded. The remaining release gate is the real
-Claude, Hermes, and Codex wake/UX matrix in Terminal.app, iTerm2, and Ghostty.
+Claude, Hermes, Codex, and Grok wake/UX matrix in Terminal.app, iTerm2, and
+Ghostty.
 cmux must pass the same baseline and may additionally expose its optional
 workspace features.
 
@@ -322,9 +334,9 @@ is claimed; neither should fork the core transport.
 The release candidate now implements the host-local fenced lease, unified
 launcher selector, no-Git project initialization, dry-run-first harness setup,
 owned global skill links, Claude lifecycle hooks, the Hermes lifecycle plugin,
-Codex SessionStart auto-bind, and owned Codex service definitions. Automated
-tests exercise those config changes and their symmetric removal from an
-installed release artifact.
+the isolated Grok ACP supervisor, Codex SessionStart auto-bind, and owned
+Codex service definitions. Automated tests exercise those config changes and
+their symmetric removal from an installed release artifact.
 
 Codex setup writes but does not load service definitions. The unified launcher
 then performs a fail-closed preflight: cold services and a stopped wake bridge
@@ -342,9 +354,10 @@ The remaining P0 promotion work is:
    end-to-end gates before claiming support;
 3. pass real clean-account Claude and Hermes skill discovery, lifecycle, and
    wake acceptance;
-4. repeat the same harness acceptance in Terminal.app, iTerm2, Ghostty, and
+4. pass the Grok credentialed two-generation adapter E2E and artifact smoke;
+5. repeat the same harness acceptance in Terminal.app, iTerm2, Ghostty, and
    cmux;
-5. test cmux topology, navigation, and notifications separately as optional
+6. test cmux topology, navigation, and notifications separately as optional
    adapter behavior.
 
 Until the real gates pass, the core and onboarding mechanics are distributable

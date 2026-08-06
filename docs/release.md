@@ -115,8 +115,10 @@ validated CLI.
 
 The GitHub `release-artifact` workflow runs the full tests and safety gate,
 builds the same archive, verifies both checksum layers, installs the extracted
-payload into an isolated HOME and prefix, and selects all three harnesses using
-harmless fake executables. It proves that:
+payload into an isolated HOME and prefix, and selects the configured setup
+harnesses using harmless fake executables. Grok has no setup-owned hooks or
+LaunchAgents, so its artifact check additionally asserts the two Grok wrappers
+and integration module are present. The workflow proves that:
 
 - the default setup plan creates no manifest, config, runtime directory,
   harness skill link, plugin link, or plist;
@@ -167,10 +169,12 @@ Before tagging or attaching the archive to a public release:
    thread and the private runtime launch intent resolves to the same current
    fenced lease, then completes real send-to-wake-to-drain/ack acceptance;
 5. standalone Codex passes that same acceptance before support is claimed;
-6. the same harness acceptance passes in Terminal.app, iTerm2, and Ghostty;
-7. the five-minute judge path creates or adopts a non-Git directory, launches
+6. Grok Build passes the credentialed two-generation ACP adapter E2E and
+   extracted-artifact smoke;
+7. the same harness acceptance passes in Terminal.app, iTerm2, and Ghostty;
+8. the five-minute judge path creates or adopts a non-Git directory, launches
    a project-anchored harness, and completes one visible message round trip;
-8. `README.md`, `docs/compatibility.md`, provenance, and Devpost copy describe
+9. `README.md`, `docs/compatibility.md`, provenance, and Devpost copy describe
    only the gates that actually passed.
 
 At this release-candidate stage, RC5's npm live host cutover, cold start,
