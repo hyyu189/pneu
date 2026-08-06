@@ -37,6 +37,19 @@ Branch: `wt/openclaw`
 - The pre-existing full-suite skip remains:
   `tests/test_openclaw_lab.py:182: set RT_OPENCLAW_LAB_BIN to run the real OpenClaw lab`.
 
+## Release artifact evidence
+
+- Clean detached worktree source: `f8bb03c725c1c9710c89a425c401756093ba485b`.
+- Artifact: `/private/tmp/rt-openclaw-stage25-artifacts2/roundtable-messaging-0.2.1-macos.tar.gz`.
+- Artifact SHA-256: `4852cfd639ab400d3ef9b270da791825a0bfbd66f6e843a028a65618aca7041c`.
+- The outer archive checksum and every inner payload checksum passed. The
+  artifact installed offline from the locked eight-wheel matrix into a
+  disposable HOME/prefix; `roundtable-smoke` passed and the installed
+  `rt-openclaw-wake --help` imported the adapter from
+  `share/roundtable/integrations/openclaw`, not the source checkout.
+- The installed command and source surfaces are present: `rt-openclaw`,
+  `rt-openclaw-wake`, and the OpenClaw integration module.
+
 ## Isolated OAuth preparation
 
 The local OpenClaw 2026.5.4 CLI confirmed the provider id and command shape:
