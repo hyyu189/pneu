@@ -86,6 +86,7 @@ else
   done
   if [ -z "$bootstrap_python" ]; then
     echo "roundtable-install: CPython 3.11 through 3.14 is required; no supported interpreter was found on PATH" >&2
+    echo "install a supported CPython with Homebrew (for example, brew install python@3.12) or from python.org, then rerun this installer" >&2
     if [ "$build_from_source" = yes ]; then
       echo "a source install also needs setuptools in that interpreter; use a release --wheel-dir for an offline install without a build" >&2
     fi

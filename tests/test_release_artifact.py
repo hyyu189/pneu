@@ -81,6 +81,10 @@ def test_release_workflow_exercises_isolated_artifact_setup():
     assert 'export RT_CODEX_RUNTIME_DIR="$RT_RUNTIME_DIR"' in release_doc
     assert 'prefix="$HOME/.roundtable"' in release_doc
     assert 'link_dir="$HOME/.local/bin"' in release_doc
+    assert (
+        'export PATH="$HOME/.local/bin:$PATH"  # once per shell; '
+        "persist it in your shell profile"
+    ) in release_doc
     assert "/tmp/roundtable-release-smoke" not in release_doc
 
 

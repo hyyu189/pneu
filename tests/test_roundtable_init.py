@@ -52,6 +52,22 @@ def test_new_project_defaults_to_no_git(tmp_path):
     assert "git: not initialized (use --git to opt in)" in result.stdout
 
 
+def test_launcher_owned_init_suppresses_interactive_next_steps(tmp_path):
+    parent = tmp_path / "projects"
+    parent.mkdir()
+
+    result = run_init(
+        tmp_path,
+        "nested",
+        "--parent",
+        str(parent),
+        env_extra={"ROUNDTABLE_ONBOARDING_SUBPROCESS": "1"},
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "next:" not in result.stdout
+
+
 def test_new_project_initializes_git_only_with_explicit_flag(tmp_path):
     parent = tmp_path / "projects"
     parent.mkdir()

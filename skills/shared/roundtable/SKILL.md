@@ -120,9 +120,12 @@ layout migration. `sync-ack` files are named `new/ack-<msgid>.md`: quiet
 confirmations that never wake anyone and never block a stop; drain them
 whenever you are awake for another reason.
 
-The qualified `agent@project` form resolves exactly one active project name
-inside the sender's revalidated derived group, then validates the agent against
-that target project's own `agents.yaml`. Duplicate names and stale group or
+The uniform mental model is `agent@project`: every rendered sender and every
+explicit destination carries a project suffix. The bare agent form is shorthand
+for `agent@<own-project>`. The qualified form resolves exactly one active
+project name inside the sender's revalidated derived group, then validates the
+agent against that target project's own `agents.yaml`; the own-project name is
+also valid and resolves to local delivery. Duplicate names and stale group or
 identity claims fail closed. Every newly emitted envelope carries the origin
 project UUID, including bare local sends and quiet acknowledgements; `rt-ack`
 uses that exact UUID rather than a mutable path or project name when returning
@@ -206,8 +209,10 @@ state and must not be used as routing or liveness truth.
 ## Sending
 
 `rt-say <agent>[@<project>] <kind> "body"` from the project root. The bare
-form stays inside the current project; `@project` names one registered sibling
-worktree in the same derived group. That's the whole ritual
+form stays inside the current project; `@project` names one registered project
+in the same derived group, including the current project by its own name. A
+report to another project's seat must use the explicit `agent@project` form.
+That's the whole ritual
 — no refresh, no resolve, no liveness check. In a remote Codex app-server
 turn, sender inference uses `CODEX_THREAD_ID`; outside a harness set
 `RT_FROM`. During an automatically woken Claude turn, use the absolute

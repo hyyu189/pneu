@@ -37,6 +37,26 @@ def isolate_project_registry(tmp_path, monkeypatch):
     monkeypatch.setenv("RT_PROJECTS_FILE", str(tmp_path / "projects.yaml"))
 
 
+@pytest.fixture
+def process_table(monkeypatch):
+    starts: dict[int, str | None] = {
+        101: "start-owner-101",
+        102: "start-owner-102",
+    }
+
+    monkeypatch.setattr(
+        _rtruntime,
+        "process_start_fingerprint",
+        lambda pid: starts.get(pid),
+    )
+    monkeypatch.setattr(
+        _rtruntime,
+        "_pid_state",
+        lambda pid: "dead" if starts.get(pid) is None else "live",
+    )
+    return starts
+
+
 def write_project(path: Path, *, agent_id: str = "codex") -> Path:
     project = path.resolve()
     state = project / ".roundtable"
@@ -228,6 +248,44 @@ def test_successful_bridge_iteration_refreshes_only_current_seat(
         token.session_id,
         token.revision,
     )
+
+
+def test_bridge_adopts_same_thread_after_dead_lease_replacement(
+    tmp_path, monkeypatch, process_table
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    old = _rtruntime.claim(project, "codex", "codex", owner_pid=101)
+    state_path = tmp_path / "wake-state.json"
+    store = wake.StateStore(state_path)
+    store.bind(project, thread(project), lease=old)
+
+    process_table[101] = None
+    fresh = _rtruntime.claim(project, "codex", "codex", owner_pid=102)
+    events = []
+    monkeypatch.setattr(
+        wake,
+        "log_event",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    wake.heartbeat_bound_seats(
+        store,
+        [project],
+        [wake.ProjectResult(True, "empty")],
+        client=BridgeClient(thread(project)),
+    )
+
+    binding = wake.StateStore(state_path).bindings[str(project)]
+    assert binding["threadId"] == "thread-1"
+    assert binding["roundtableSessionId"] == fresh.session_id
+    assert binding["leaseRevision"] == fresh.revision
+    adopted = [fields for event, fields in events if event == "binding_adopted"]
+    assert len(adopted) == 1
+    assert adopted[0]["old_session_id"] == old.session_id
+    assert adopted[0]["new_session_id"] == fresh.session_id
 
 
 def test_bind_command_records_current_lease_and_native_thread(

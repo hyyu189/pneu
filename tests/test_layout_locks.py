@@ -550,7 +550,7 @@ def test_registry_lock_wait_is_bounded_inside_exclusive_layout_section(
         with pytest.raises(
             _rtlib.ProjectRegistryLockTimeout,
             match="timed out waiting for project registry lock",
-        ):
+        ) as captured:
             with _rtlib.locked_project_mailbox_checked(
                 project,
                 registry_path=registry,
@@ -562,6 +562,8 @@ def test_registry_lock_wait_is_bounded_inside_exclusive_layout_section(
                     registry,
                     lock_timeout=0.05,
                 )
+        assert "another Roundtable seat may hold" in str(captured.value)
+        assert "For rt-projects migrate/rollback" in str(captured.value)
         assert time.monotonic() - started < 1
     finally:
         fcntl.flock(held, fcntl.LOCK_UN)

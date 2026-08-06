@@ -2761,6 +2761,12 @@ def _render(result: dict[str, Any], *, as_json: bool) -> None:
         print(f"  {harness}: {detail['state']}")
         for action in detail.get("actions", []):
             print(f"    - {action}")
+    if result["command"] == "remove":
+        print(
+            "  preserved project registry, UUID layout locks, "
+            "registry-selected local/central mailboxes, bookmarks, "
+            "migration recovery records, and archival backups"
+        )
     if result["command"] == "plan":
         print("  dry run only; run `roundtable-setup apply` to make these changes")
     if result.get("restart_required"):

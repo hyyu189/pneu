@@ -143,6 +143,33 @@ def test_wait_requires_fenced_session_and_never_creates_project_markers(tmp_path
     assert not runtime.exists()
 
 
+def test_wait_not_project_error_has_one_tool_prefix(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "RT_PROJECTS_FILE": str(tmp_path / "projects.json"),
+            "RT_FROM": "claude",
+        }
+    )
+    environment.pop("RT_PROJECT_ROOT", None)
+    environment.pop("RT_SESSION_ID", None)
+    environment.pop("RT_LEASE_REVISION", None)
+
+    result = run_tool(
+        "rt-wait-inbox",
+        "claude",
+        "0",
+        cwd=outside,
+        env=environment,
+    )
+
+    assert result.returncode == 2
+    assert "rt-wait-inbox: not in a roundtable project" in result.stderr
+    assert "rt-wait-inbox: rt-wait-inbox:" not in result.stderr
+
+
 def test_stale_fence_fails_normal_wait_but_stops_follower_cleanly(
     tmp_path,
     monkeypatch,

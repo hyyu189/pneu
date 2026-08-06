@@ -112,6 +112,15 @@ class MailEnvelopeError(ValueError):
     """A mail file declares structured metadata that cannot be trusted."""
 
 
+def _lock_timeout_hint():
+    return (
+        "another Roundtable seat may hold this lock; retry safely. For "
+        "rt-projects migrate/rollback, use --layout-lock-timeout "
+        "<seconds> (registry waits also accept --registry-lock-timeout "
+        "<seconds>)"
+    )
+
+
 def _validated_lock_timeout(value, label):
     if value is None:
         return None
@@ -507,7 +516,7 @@ class _ProjectMailboxLock:
                 timeout_error=ProjectLayoutLockTimeout,
                 timeout_message=(
                     f"timed out waiting for {mode} layout lock "
-                    f"{self._lock_path}"
+                    f"{self._lock_path}; {_lock_timeout_hint()}"
                 ),
                 allow_initial_attempt=self.timeout == 0,
             )
@@ -518,7 +527,7 @@ class _ProjectMailboxLock:
             ):
                 raise ProjectLayoutLockTimeout(
                     f"timed out waiting for {mode} layout lock "
-                    f"{self._lock_path}"
+                    f"{self._lock_path}; {_lock_timeout_hint()}"
                 )
             self._gate_held = True
             self._acquired_at = _acquire_flock_before(
@@ -528,7 +537,7 @@ class _ProjectMailboxLock:
                 timeout_error=ProjectLayoutLockTimeout,
                 timeout_message=(
                     f"timed out waiting for {mode} layout lock "
-                    f"{self._lock_path}"
+                    f"{self._lock_path}; {_lock_timeout_hint()}"
                 ),
                 allow_initial_attempt=self.timeout == 0,
             )
@@ -539,7 +548,7 @@ class _ProjectMailboxLock:
             ):
                 raise ProjectLayoutLockTimeout(
                     f"timed out waiting for {mode} layout lock "
-                    f"{self._lock_path}"
+                    f"{self._lock_path}; {_lock_timeout_hint()}"
                 )
             _verify_layout_lock_entry(
                 self._lock_dir_fd,
@@ -674,6 +683,7 @@ def authenticate_fenced_sender(project, tool):
 
     from _rtruntime import RuntimeStateError, inspect_seat, load_validated_lease
 
+    fix = "\n  fix: run `rt-doctor` from the project, then relaunch the seat"
     canonical = Path(project).expanduser().resolve()
     values = {
         "RT_PROJECT_ROOT": os.environ.get("RT_PROJECT_ROOT", "").strip(),
@@ -686,16 +696,18 @@ def authenticate_fenced_sender(project, tool):
         raise SystemExit(
             f"{tool}: --fenced requires a Roundtable-launched seat; missing "
             + ", ".join(missing)
+            + fix
         )
     try:
         configured_root = Path(values["RT_PROJECT_ROOT"]).expanduser().resolve()
     except OSError as error:
         raise SystemExit(
-            f"{tool}: invalid RT_PROJECT_ROOT for --fenced: {error}"
+            f"{tool}: invalid RT_PROJECT_ROOT for --fenced: {error}{fix}"
         ) from None
     if configured_root != canonical:
         raise SystemExit(
             f"{tool}: fenced project {configured_root} does not match {canonical}"
+            f"{fix}"
         )
     agent = values["RT_FROM"]
     try:
@@ -707,17 +719,21 @@ def authenticate_fenced_sender(project, tool):
         )
         inspection = inspect_seat(canonical, agent)
     except (OSError, RuntimeStateError) as error:
-        raise SystemExit(f"{tool}: fenced seat validation failed: {error}") from None
+        raise SystemExit(
+            f"{tool}: fenced seat validation failed: {error}{fix}"
+        ) from None
     if not inspection.status.startswith("active_") or inspection.token is None:
         raise SystemExit(
             f"{tool}: fenced seat is not active: {inspection.status} "
-            f"({inspection.detail})"
+            f"({inspection.detail}){fix}"
         )
     if (
         inspection.token.session_id != token.session_id
         or inspection.token.revision != token.revision
     ):
-        raise SystemExit(f"{tool}: fenced seat changed during validation")
+        raise SystemExit(
+            f"{tool}: fenced seat changed during validation{fix}"
+        )
     return agent
 
 
@@ -1674,7 +1690,6 @@ def resolve_project_address(
             raw
             for raw in (document.get("projects") or [])
             if isinstance(raw, dict)
-            and raw.get("uuid") != origin_uuid
             and raw.get("name") == target_name
             and raw.get("status") != "tombstoned"
         ]
@@ -1682,7 +1697,6 @@ def resolve_project_address(
             entry
             for entry in entries
             if entry.get("status") == "active"
-            and entry.get("uuid") != origin_uuid
             and entry.get("name") == target_name
         ]
         candidate_uuids = {entry["uuid"] for entry in candidates}
@@ -2040,7 +2054,8 @@ def _update_project_registry(
             and time.monotonic() >= lock_deadline
         ):
             raise ProjectRegistryLockTimeout(
-                f"timed out waiting for project registry lock {path}"
+                f"timed out waiting for project registry lock {path}; "
+                f"{_lock_timeout_hint()}"
             )
 
     def update_guard():
@@ -2086,7 +2101,8 @@ def _update_project_registry(
                 deadline=deadline,
                 timeout_error=ProjectRegistryLockTimeout,
                 timeout_message=(
-                    f"timed out waiting for project registry lock {path}"
+                    f"timed out waiting for project registry lock {path}; "
+                    f"{_lock_timeout_hint()}"
                 ),
                 allow_initial_attempt=lock_timeout == 0,
             )
@@ -2096,7 +2112,8 @@ def _update_project_registry(
                 and time.monotonic() >= deadline
             ):
                 raise ProjectRegistryLockTimeout(
-                    f"timed out waiting for project registry lock {path}"
+                    f"timed out waiting for project registry lock {path}; "
+                    f"{_lock_timeout_hint()}"
                 )
             enforce_absolute_deadline()
             try:
@@ -2334,7 +2351,8 @@ def _active_location_conflict(entry, project_uuid, root):
         "live path has no matching identity marker. Refusing to tombstone or "
         f"move UUID {project_uuid} while an unverified old-path occupant is "
         f"present. Remove or rename the occupant at {old_root}, then retry "
-        f"from the verified project at {root}"
+        f"from the verified project at {root}; for an intentional move, use "
+        "rt-projects rm <old-root> followed by rt-projects add <new-root>"
     )
 
 
@@ -2387,7 +2405,9 @@ def _missing_project_identity_error(root, path):
             f"records UUID {claims} at {root}. Refusing to mint or inherit "
             "identity from the path. Restore the verified identity marker; "
             "for an intentional replacement, make the registered path "
-            "unavailable and explicitly tombstone it before rt-projects add"
+            "unavailable and explicitly tombstone it before rt-projects add "
+            "(for example: rt-projects rm <old-root>; "
+            "rt-projects add <new-root>)"
         )
     if unresolved:
         claims = ", ".join(
@@ -2399,7 +2419,8 @@ def _missing_project_identity_error(root, path):
             f"identity is not witness-confirmed ({claims}). This may be a "
             "moved project, so refusing to mint a new UUID. Restore the "
             "verified marker, or explicitly tombstone the old registration "
-            "before creating a distinct identity"
+            "before creating a distinct identity (for example: "
+            "rt-projects rm <old-root>; rt-projects add <new-root>)"
         )
     if inspection_error is not None:
         return ProjectRegistryError(
@@ -3046,7 +3067,8 @@ def register_project(root, path=None, registered_at=None):
                     f"is not witness-confirmed ({claims}); this may be a moved "
                     "project. Refusing to mint a new UUID. Restore the verified "
                     "marker, or explicitly tombstone the old registration "
-                    "before creating a distinct identity"
+                    "before creating a distinct identity (for example: "
+                    "rt-projects rm <old-root>; rt-projects add <new-root>)"
                 )
 
         replace_uuid = None

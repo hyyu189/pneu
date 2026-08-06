@@ -25,6 +25,7 @@ from _rtruntime import (
     SeatOccupied,
     arm_codex_launch_intent,
     claim,
+    inspect_seat,
     release,
     runtime_root,
 )
@@ -34,15 +35,20 @@ COMMANDS = {
     "claude": ["claude"],
     "codex": ["codex", "--remote", "unix://"],
     "hermes": ["hermes"],
+    # OpenClaw is launched through rt-openclaw-wake, not attached to a
+    # pre-existing native Gateway service.
+    "openclaw": ["openclaw"],
 }
 EXECUTABLE_OVERRIDES = {
     "claude": "RT_CLAUDE_BIN",
     "hermes": "RT_HERMES_BIN",
+    "openclaw": "RT_OPENCLAW_BIN",
 }
 CONFIG_HARNESSES = {
     "claude": frozenset({"claude", "claude-code"}),
     "codex": frozenset({"codex"}),
     "hermes": frozenset({"hermes", "hermes-agent"}),
+    "openclaw": frozenset({"openclaw", "openclaw-gateway"}),
 }
 CMUX_SHIM_PARTS = frozenset({"cmux-cli-shims"})
 CMUX_WRAPPER_NAMES = frozenset({"cmux-claude-wrapper", "cmux-codex-wrapper"})
@@ -210,8 +216,10 @@ def claim_launch_seat(root: Path | None, harness: str, agent_id: str | None):
             f"rt-{harness}: no configured {harness} instance in {root}; "
             "add one to .roundtable/agents.yaml or set RT_FROM"
         )
+    token = _same_process_lease(root, harness, agent_id)
     try:
-        token = claim(root, agent_id, harness)
+        if token is None:
+            token = claim(root, agent_id, harness)
     except SeatOccupied as error:
         status = error.inspection.status
         condition = "unhealthy" if status == "active_unhealthy" else "active"
@@ -247,6 +255,39 @@ def claim_launch_seat(root: Path | None, harness: str, agent_id: str | None):
     return token
 
 
+def _same_process_lease(
+    root: Path | None,
+    harness: str,
+    agent_id: str,
+):
+    """Return an active lease already owned by this launcher process.
+
+    A resume-shaped launcher can be re-entered by a harness lifecycle path
+    before the original process reaches ``exec``.  Claiming the logical seat a
+    second time is not safe: the lease file can advance while the child still
+    receives the first claim's environment.  Reusing only a lease whose
+    validated owner PID is this process makes that path idempotent while
+    preserving the normal fail-closed claim behavior for every other owner.
+    """
+
+    if root is None or not agent_id:
+        return None
+    try:
+        inspection = inspect_seat(root, agent_id)
+    except RuntimeStateError:
+        return None
+    token = inspection.token
+    if (
+        inspection.status not in {"active_healthy", "active_unhealthy"}
+        or token is None
+        or token.agent_id != agent_id
+        or token.harness != harness
+        or token.owner_pid != os.getpid()
+    ):
+        return None
+    return token
+
+
 def normalize_runtime_environment() -> Path:
     """Expose one absolute runtime root to launchers and remote tool processes."""
     try:
@@ -257,6 +298,18 @@ def normalize_runtime_environment() -> Path:
     os.environ["RT_RUNTIME_DIR"] = rendered
     os.environ["RT_CODEX_RUNTIME_DIR"] = rendered
     return selected
+
+
+def openclaw_adapter_bin() -> Path:
+    """Resolve the managed OpenClaw wake bridge beside this launcher."""
+
+    candidate = Path(__file__).resolve().parent / "rt-openclaw-wake"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return candidate
+    raise SelectionError(
+        "rt-openclaw: managed rt-openclaw-wake is unavailable; reinstall "
+        "Roundtable or use the source-tree launcher"
+    )
 
 
 def codex_seat_overrides() -> list[str]:
@@ -387,12 +440,15 @@ def _confirm_codex_reload(status, *, stdin=None, stderr=None) -> bool:
         "  This can disconnect Codex sessions attached to that service.",
         file=stderr,
     )
-    answer = _read_choice(stdin, stderr, "Reload now? [y/N]: ").lower()
-    if answer not in {"", "n", "no", "y", "yes"}:
-        raise SelectionError(
-            f"rt-codex: expected yes or no for service reload, got {answer!r}"
-        )
-    return answer in {"y", "yes"}
+    def parse(answer):
+        answer = answer.lower()
+        if answer not in {"", "n", "no", "y", "yes"}:
+            raise SelectionError(
+                f"rt-codex: expected yes or no for service reload, got {answer!r}"
+            )
+        return answer in {"y", "yes"}
+
+    return _read_choice(stdin, stderr, "Reload now? [y/N]: ", parse=parse)
 
 
 def preflight_codex_services(*, ready_action=None) -> None:
@@ -420,23 +476,62 @@ def project_at_or_above(start: Path) -> Path | None:
     return None
 
 
-def _read_choice(stdin, stderr, prompt: str) -> str:
-    print(prompt, end="", file=stderr, flush=True)
-    value = stdin.readline()
-    if value == "":
-        raise SelectionError("input closed while selecting a Roundtable project")
-    return value.strip()
+PROMPT_ATTEMPTS = 3
+ONBOARDING_SUBPROCESS_ENV = "ROUNDTABLE_ONBOARDING_SUBPROCESS"
+
+
+def _read_choice(stdin, stderr, prompt: str, *, parse=None):
+    """Read one menu value, giving invalid interactive input bounded retries."""
+
+    last_error = None
+    for attempt in range(PROMPT_ATTEMPTS):
+        print(prompt, end="", file=stderr, flush=True)
+        value = stdin.readline()
+        if value == "":
+            if last_error is not None:
+                raise last_error
+            raise SelectionError(
+                "input closed while selecting a Roundtable project"
+            )
+        value = value.strip()
+        if parse is None:
+            return value
+        try:
+            return parse(value)
+        except SelectionError as error:
+            last_error = error
+            if attempt + 1 == PROMPT_ATTEMPTS:
+                raise
+            print(f"{error}; please try again.", file=stderr)
+    raise last_error
+
+
+def run_onboarding_init(init_runner, command, **kwargs):
+    """Mark a launcher-owned init subprocess so it can omit its next steps."""
+
+    previous = os.environ.get(ONBOARDING_SUBPROCESS_ENV)
+    os.environ[ONBOARDING_SUBPROCESS_ENV] = "1"
+    try:
+        return init_runner(command, **kwargs)
+    finally:
+        if previous is None:
+            os.environ.pop(ONBOARDING_SUBPROCESS_ENV, None)
+        else:
+            os.environ[ONBOARDING_SUBPROCESS_ENV] = previous
 
 
 def _choose_git(stdin, stderr, harness: str) -> bool:
-    answer = _read_choice(
-        stdin, stderr, "Initialize Git too? [y/N]: "
-    ).lower()
-    if answer not in {"", "n", "no", "y", "yes"}:
-        raise SelectionError(
-            f"rt-{harness}: expected yes or no for Git, got {answer!r}"
-        )
-    return answer in {"y", "yes"}
+    def parse(answer):
+        answer = answer.lower()
+        if answer not in {"", "n", "no", "y", "yes"}:
+            raise SelectionError(
+                f"rt-{harness}: expected yes or no for Git, got {answer!r}"
+            )
+        return answer in {"y", "yes"}
+
+    return _read_choice(
+        stdin, stderr, "Initialize Git too? [y/N]: ", parse=parse
+    )
 
 
 def _preflight_launch_project(root: Path, harness: str) -> Path:
@@ -450,6 +545,13 @@ def _preflight_launch_project(root: Path, harness: str) -> Path:
             f"{root}: {error}"
         ) from error
     return mailbox.project_root
+
+
+def _project_ready_recovery(error, harness: str, root: Path) -> SelectionError:
+    return SelectionError(
+        f"{error}; project already created at {root}; run roundtable again "
+        "and choose it from the list"
+    )
 
 
 def choose_launch_cwd(
@@ -484,7 +586,9 @@ def choose_launch_cwd(
     can_setup_here = cwd not in {Path.home().resolve(), Path(cwd.anchor)}
     setup_here_index = len(roots) + 1 if can_setup_here else None
     create_index = len(roots) + 1 + int(can_setup_here)
-    unanchored_index = create_index + 1 if harness != "codex" else None
+    unanchored_index = (
+        create_index + 1 if harness not in {"codex", "openclaw"} else None
+    )
     if setup_here_index is not None:
         print(
             f"  {setup_here_index}) Set up this folder safely: {cwd}",
@@ -500,11 +604,22 @@ def choose_launch_cwd(
             file=stderr,
         )
 
-    raw = _read_choice(stdin, stderr, "Select: ")
-    try:
-        selected = int(raw)
-    except ValueError as error:
-        raise SelectionError(f"rt-{harness}: invalid selection: {raw!r}") from error
+    def parse_selection(raw):
+        try:
+            selected = int(raw)
+        except ValueError as error:
+            raise SelectionError(
+                f"rt-{harness}: invalid selection: {raw!r}"
+            ) from error
+        if not 1 <= selected <= create_index + int(unanchored_index is not None):
+            raise SelectionError(
+                f"rt-{harness}: selection out of range: {selected}"
+            )
+        return selected
+
+    selected = _read_choice(
+        stdin, stderr, "Select: ", parse=parse_selection
+    )
     if 1 <= selected <= len(roots):
         return _preflight_launch_project(roots[selected - 1], harness)
     if setup_here_index is not None and selected == setup_here_index:
@@ -512,8 +627,15 @@ def choose_launch_cwd(
         command = [str(init), "--here"]
         if _choose_git(stdin, stderr, harness):
             command.append("--git")
-        result = init_runner(command, cwd=cwd, check=False)
+        result = run_onboarding_init(
+            init_runner, command, cwd=cwd, check=False
+        )
         if result.returncode != 0:
+            if is_project_root(cwd):
+                raise SelectionError(
+                    f"rt-{harness}: project already created at {cwd}; run "
+                    "roundtable again and choose it from the list"
+                )
             raise SelectionError(
                 f"rt-{harness}: roundtable-init failed with exit {result.returncode}"
             )
@@ -521,26 +643,48 @@ def choose_launch_cwd(
             raise SelectionError(
                 f"rt-{harness}: roundtable-init did not configure {cwd}"
             )
-        return _preflight_launch_project(cwd, harness)
+        try:
+            return _preflight_launch_project(cwd, harness)
+        except SelectionError as error:
+            if is_project_root(cwd):
+                raise _project_ready_recovery(error, harness, cwd) from error
+            raise
     if selected == create_index:
-        name = _read_choice(stdin, stderr, "New project name: ")
-        if not name:
-            raise SelectionError(f"rt-{harness}: project name cannot be empty")
+        def parse_name(name):
+            if not name:
+                raise SelectionError(
+                    f"rt-{harness}: project name cannot be empty"
+                )
+            return name
+
+        name = _read_choice(
+            stdin, stderr, "New project name: ", parse=parse_name
+        )
         init = Path(__file__).resolve().parent / "roundtable-init"
         command = [str(init), name, "--parent", str(cwd)]
         if _choose_git(stdin, stderr, harness):
             command.append("--git")
-        result = init_runner(command, check=False)
+        root = (cwd / name).resolve()
+        result = run_onboarding_init(init_runner, command, check=False)
         if result.returncode != 0:
+            if is_project_root(root):
+                raise SelectionError(
+                    f"rt-{harness}: project already created at {root}; run "
+                    "roundtable again and choose it from the list"
+                )
             raise SelectionError(
                 f"rt-{harness}: roundtable-init failed with exit {result.returncode}"
             )
-        root = (cwd / name).resolve()
         if not is_project_root(root):
             raise SelectionError(
                 f"rt-{harness}: roundtable-init did not create {root}"
             )
-        return _preflight_launch_project(root, harness)
+        try:
+            return _preflight_launch_project(root, harness)
+        except SelectionError as error:
+            if is_project_root(root):
+                raise _project_ready_recovery(error, harness, root) from error
+            raise
     if unanchored_index is not None and selected == unanchored_index:
         print(
             f"rt-{harness}: advisory: starting without a Roundtable project anchor from {cwd}",
@@ -566,8 +710,14 @@ def launch(harness: str, argv: list[str]) -> int:
                 "so its host service lease and native-thread binding are safe; "
                 "choose or initialize a project, or run native `codex` directly"
             )
+        if harness == "openclaw":
+            raise SelectionError(
+                "rt-openclaw: Roundtable OpenClaw requires a Roundtable project "
+                "anchor so its Gateway lease and durable mailbox are safe; "
+                "choose or initialize a project, or run native `openclaw` directly"
+            )
     agent_id = set_launch_identity(root, harness)
-    if root is not None or harness == "codex":
+    if root is not None or harness in {"codex", "openclaw"}:
         normalize_runtime_environment()
     executable = harness_bin(harness)
     codex_argv = (
@@ -609,6 +759,15 @@ def launch(harness: str, argv: list[str]) -> int:
         preflight_codex_services(ready_action=claim_and_arm_codex)
     else:
         claim_launch_seat(root, harness, agent_id)
+    if harness == "openclaw":
+        # Transfer the already-claimed lease to the managed adapter in this
+        # same PID. The native OpenClaw CLI is never allowed to discover or
+        # attach to the user's personal Gateway.
+        os.environ["RT_OPENCLAW_BIN"] = str(executable)
+        adapter = openclaw_adapter_bin()
+        command = [str(adapter), "--gateway-bin", str(executable), *argv]
+        os.execv(command[0], command)
+        return 127
     command = [*COMMANDS[harness]]
     if harness == "claude" and root is not None and not argv:
         # A bare Claude launch may open the user's FleetView/Remote Control
@@ -635,3 +794,10 @@ def main(harness: str) -> int:
     except SelectionError as error:
         print(error, file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        print(
+            f"rt-{harness}: cancelled by user (Ctrl-C); "
+            "no agent session was launched.",
+            file=sys.stderr,
+        )
+        return 130

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import os
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from _rtlauncher import (
     configured_sender_ids,
     harness_bin,
     project_at_or_above,
+    run_onboarding_init,
 )
 from _rtlib import (
     ProjectRegistryError,
@@ -36,17 +38,21 @@ ALIASES = {
     "claude": "rt-claude",
     "hermes": "rt-hermes",
     "codex": "rt-codex",
+    "openclaw": "rt-openclaw",
     "send": "rt-say",
     "inbox": "rt-inbox",
     "ack": "rt-ack",
 }
 HARNESS_ORDER = ("claude", "codex", "hermes")
+PROMPT_ATTEMPTS = 3
 
 HELP = """usage: roundtable [command] [args...]
 
 Run without a command in a terminal for project-first onboarding.
 
 commands:
+  guide      Explain the local-mailroom and harness-wake model
+  version    Report the live version, install prefix, and current target
   init       Create or safely set up a Roundtable project
   setup      Preview or explicitly manage harness integration
   doctor     Diagnose the current Roundtable project
@@ -56,10 +62,47 @@ commands:
   claude     Launch a Claude seat
   hermes     Launch a Hermes seat
   codex      Launch a Codex seat
+  openclaw   Launch an isolated OpenClaw Gateway seat
   send       Send a durable message
   inbox      Read a durable inbox
   ack        Acknowledge a durable message
 """
+
+ASCII_GUIDE = """
++------------------------------------------------------------------+
+| Roundtable = a local mailroom for coding-agent seats             |
++------------------------------------------------------------------+
+| Claude       Codex       Hermes                                  |
+|    |           |            |                                    |
+|    +-----------+------------+                                    |
+|                |                                                 |
+|                v                                                 |
+|       project mailbox: new/  ->  cur/                            |
+|                |                                                 |
+|                v                                                 |
+|       the recipient agent works and acknowledges                 |
++------------------------------------------------------------------+
+
+Delivery and wake-up are separate:
+  1. rt-say writes a durable message file. That is delivery.
+  2. A live harness may notice the file and start a turn.
+  3. The agent acts, then rt-ack archives the message.
+  4. If the agent is offline, the message waits in new/.
+
+Wake-up paths in this release:
+  Claude  SessionStart/Stop hooks arm and re-arm the tripwire.
+  Hermes  the session-start plugin owns the tripwire lifecycle.
+  Codex   the app-server and Unix-socket notification bridge wake the seat;
+          the SessionStart hook binds the native thread to its lease.
+
+Tripwire means "watch for mail and request a harness-native turn".
+It is not the mailbox and it is not keyboard injection.
+
+Grok Build, OpenClaw, and Antigravity are parallel research targets here;
+their wake paths are not claimed as supported until each is verified live.
+
+Tip: run `roundtable guide` any time to show this tutorial again.
+""".lstrip()
 
 
 class OnboardingError(RuntimeError):
@@ -76,29 +119,93 @@ def sibling(name: str) -> Path:
     raise OnboardingError(f"roundtable: installed command is unavailable: {target}")
 
 
+def version_report() -> str:
+    """Describe the version and installation selected by this executable."""
+
+    configured_prefix = os.environ.get("ROUNDTABLE_INSTALL_PREFIX", "").strip()
+    prefix = Path(configured_prefix).expanduser().resolve() if configured_prefix else None
+    manifest = prefix / "install-manifest.json" if prefix is not None else None
+    manifest_data = {}
+    if manifest is not None:
+        try:
+            payload = json.loads(manifest.read_text())
+            if isinstance(payload, dict):
+                manifest_data = payload
+        except (OSError, ValueError):
+            manifest_data = {}
+
+    version = manifest_data.get("version")
+    if not isinstance(version, str) or not version:
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        try:
+            match = re.search(
+                r'^version\s*=\s*["\']([^"\']+)["\']',
+                pyproject.read_text(),
+                re.MULTILINE,
+            )
+        except OSError:
+            match = None
+        version = match.group(1) if match else "unknown"
+
+    if prefix is None:
+        prefix_line = "source checkout (not installed)"
+        target_line = "source tree (no current symlink)"
+    else:
+        prefix_line = str(prefix)
+        current = prefix / "current"
+        try:
+            target_line = os.readlink(current) if current.is_symlink() else "missing"
+        except OSError as error:
+            target_line = f"unreadable ({error})"
+    return (
+        f"version: {version}\n"
+        f"install prefix: {prefix_line}\n"
+        f"current target: {target_line}"
+    )
+
+
 def execute(name: str, args: list[str], exec_runner=os.execv) -> int:
     target = sibling(name)
     result = exec_runner(str(target), [str(target), *args])
     return 127 if result is None else int(result)
 
 
-def read_choice(stdin, stderr, prompt: str) -> str:
-    print(prompt, end="", file=stderr, flush=True)
-    value = stdin.readline()
-    if value == "":
-        raise OnboardingError("roundtable: input closed during onboarding")
-    return value.strip()
+def read_choice(stdin, stderr, prompt: str, *, parse=None):
+    """Read a prompt with bounded retries for invalid interactive input."""
+
+    last_error = None
+    for attempt in range(PROMPT_ATTEMPTS):
+        print(prompt, end="", file=stderr, flush=True)
+        value = stdin.readline()
+        if value == "":
+            if last_error is not None:
+                raise last_error
+            raise OnboardingError("roundtable: input closed during onboarding")
+        value = value.strip()
+        if parse is None:
+            return value
+        try:
+            return parse(value)
+        except OnboardingError as error:
+            last_error = error
+            if attempt + 1 == PROMPT_ATTEMPTS:
+                raise
+            print(f"{error}; please try again.", file=stderr)
+    raise last_error
 
 
 def read_yes_no(stdin, stderr, prompt: str) -> bool:
-    value = read_choice(stdin, stderr, prompt).lower()
-    if value in {"", "n", "no"}:
-        return False
-    if value in {"y", "yes"}:
-        return True
-    raise OnboardingError(
-        f"roundtable: expected yes or no, got {value!r}"
-    )
+    def parse(value):
+        value = value.lower()
+        if value in {"", "n", "no"}:
+            return False
+        if value in {"y", "yes"}:
+            return True
+        raise OnboardingError(
+            f"roundtable: expected yes or no, got {value!r}"
+        )
+
+    return read_choice(stdin, stderr, prompt, parse=parse)
 
 
 def _setup_json(
@@ -251,8 +358,15 @@ def run_init_here(
     command = [str(sibling("roundtable-init")), "--here"]
     if initialize_git:
         command.append("--git")
-    result = init_runner(command, cwd=root, check=False)
+    result = run_onboarding_init(
+        init_runner, command, cwd=root, check=False
+    )
     if result.returncode != 0:
+        if is_project_root(root):
+            raise OnboardingError(
+                f"roundtable: project already created at {root}; run "
+                "roundtable again and choose it from the list"
+            )
         raise OnboardingError(
             f"roundtable: project setup failed with exit {result.returncode}"
         )
@@ -271,11 +385,19 @@ def create_project(
     home: Path,
     init_runner=subprocess.run,
 ) -> Path:
-    raw_parent = read_choice(stdin, stderr, f"Parent folder [{cwd}]: ")
-    parent = canonical_existing_folder(raw_parent or str(cwd), cwd)
-    name = read_choice(stdin, stderr, "New folder name: ")
-    if not name:
-        raise OnboardingError("roundtable: new folder name cannot be empty")
+    def parse_parent(raw_parent):
+        return canonical_existing_folder(raw_parent or str(cwd), cwd)
+
+    parent = read_choice(
+        stdin, stderr, f"Parent folder [{cwd}]: ", parse=parse_parent
+    )
+
+    def parse_name(name):
+        if not name:
+            raise OnboardingError("roundtable: new folder name cannot be empty")
+        return name
+
+    name = read_choice(stdin, stderr, "New folder name: ", parse=parse_name)
     initialize_git = read_yes_no(
         stdin, stderr, "Initialize Git too? [y/N]: "
     )
@@ -292,8 +414,15 @@ def create_project(
     ]
     if initialize_git:
         command.append("--git")
-    result = init_runner(command, cwd=cwd, check=False)
+    result = run_onboarding_init(
+        init_runner, command, cwd=cwd, check=False
+    )
     if result.returncode != 0:
+        if is_project_root(target):
+            raise OnboardingError(
+                f"roundtable: project already created at {target}; run "
+                "roundtable again and choose it from the list"
+            )
         raise OnboardingError(
             f"roundtable: project creation failed with exit {result.returncode}"
         )
@@ -313,16 +442,22 @@ def choose_registered_project(
     print("Choose an existing Roundtable project:", file=stderr)
     for index, root in enumerate(roots, 1):
         print(f"  {index}) {root}", file=stderr)
-    raw = read_choice(stdin, stderr, "Select existing project: ")
-    try:
-        selected = int(raw)
+    def parse_selection(raw):
+        try:
+            selected = int(raw)
+        except ValueError as error:
+            raise OnboardingError(
+                f"roundtable: invalid existing project selection: {raw!r}"
+            ) from error
         if not 1 <= selected <= len(roots):
-            raise IndexError(selected)
+            raise OnboardingError(
+                f"roundtable: invalid existing project selection: {raw!r}"
+            )
         return roots[selected - 1]
-    except (ValueError, IndexError) as error:
-        raise OnboardingError(
-            f"roundtable: invalid existing project selection: {raw!r}"
-        ) from error
+
+    return read_choice(
+        stdin, stderr, "Select existing project: ", parse=parse_selection
+    )
 
 
 def preflight_project_selection(root: Path) -> Path:
@@ -395,16 +530,22 @@ def choose_project(
             label = "Create a new folder"
         print(f"  {index}) {label}", file=stderr)
 
-    raw = read_choice(stdin, stderr, "Select project: ")
-    try:
-        selected = int(raw)
+    def parse_selection(raw):
+        try:
+            selected = int(raw)
+        except ValueError as error:
+            raise OnboardingError(
+                f"roundtable: invalid project selection: {raw!r}"
+            ) from error
         if not 1 <= selected <= len(options):
-            raise IndexError(selected)
-        kind, value = options[selected - 1]
-    except (ValueError, IndexError) as error:
-        raise OnboardingError(
-            f"roundtable: invalid project selection: {raw!r}"
-        ) from error
+            raise OnboardingError(
+                f"roundtable: invalid project selection: {raw!r}"
+            )
+        return options[selected - 1]
+
+    kind, value = read_choice(
+        stdin, stderr, "Select project: ", parse=parse_selection
+    )
 
     if kind == "registered":
         return preflight_project_selection(
@@ -415,18 +556,27 @@ def choose_project(
             )
         )
     if kind == "create":
-        return preflight_project_selection(
-            create_project(
-                cwd,
-                stdin=stdin,
-                stderr=stderr,
-                home=home,
-                init_runner=init_runner,
-            )
+        root = create_project(
+            cwd,
+            stdin=stdin,
+            stderr=stderr,
+            home=home,
+            init_runner=init_runner,
         )
+        try:
+            return preflight_project_selection(root)
+        except OnboardingError as error:
+            raise OnboardingError(
+                f"{error}; project already created at {root}; run roundtable "
+                "again and choose it from the list"
+            ) from error
     if kind == "another":
-        raw_path = read_choice(stdin, stderr, "Existing folder path: ")
-        root = canonical_existing_folder(raw_path, cwd)
+        root = read_choice(
+            stdin,
+            stderr,
+            "Existing folder path: ",
+            parse=lambda raw: canonical_existing_folder(raw, cwd),
+        )
     else:
         root = cwd
     if forbidden_project_root(root, home):
@@ -436,13 +586,18 @@ def choose_project(
     initialize_git = read_yes_no(
         stdin, stderr, "Initialize Git too? [y/N]: "
     )
-    return preflight_project_selection(
-        run_init_here(
-            root,
-            initialize_git=initialize_git,
-            init_runner=init_runner,
-        )
+    root = run_init_here(
+        root,
+        initialize_git=initialize_git,
+        init_runner=init_runner,
     )
+    try:
+        return preflight_project_selection(root)
+    except OnboardingError as error:
+        raise OnboardingError(
+            f"{error}; project already created at {root}; run roundtable "
+            "again and choose it from the list"
+        ) from error
 
 
 def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
@@ -481,16 +636,29 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
         )
     for harness, detail in unavailable:
         print(f"  unavailable: {harness} — {detail}", file=stderr)
-    raw = read_choice(stdin, stderr, "Select harness: ")
-    try:
-        selected = int(raw)
+    def parse_selection(raw):
+        try:
+            selected = int(raw)
+        except ValueError as error:
+            raise OnboardingError(
+                f"roundtable: invalid harness selection: {raw!r}"
+            ) from error
         if not 1 <= selected <= len(seats):
-            raise IndexError(selected)
+            raise OnboardingError(
+                f"roundtable: invalid harness selection: {raw!r}"
+            )
         return seats[selected - 1]
-    except (ValueError, IndexError) as error:
-        raise OnboardingError(
-            f"roundtable: invalid harness selection: {raw!r}"
-        ) from error
+
+    return read_choice(
+        stdin, stderr, "Select harness: ", parse=parse_selection
+    )
+
+
+def project_ready_recovery(error, root: Path) -> OnboardingError:
+    return OnboardingError(
+        f"{error}; project already created at {root}; run roundtable again "
+        "and choose it from the list"
+    )
 
 
 def onboard(
@@ -505,25 +673,44 @@ def onboard(
     exec_runner=os.execv,
     chdir_runner=os.chdir,
 ) -> int:
-    root = choose_project(
-        cwd=cwd,
-        home=home,
-        stdin=stdin,
-        stderr=stderr,
-        init_runner=init_runner,
-    )
-    harness, agent_id = choose_seat(root, stdin=stdin, stderr=stderr)
-    ensure_harness_setup(
-        harness,
-        home=home,
-        stdin=stdin,
-        stderr=stderr,
-        environ=environ,
-        setup_runner=setup_runner,
-    )
-    environ["RT_FROM"] = agent_id
-    chdir_runner(root)
-    return execute(f"rt-{harness}", [], exec_runner=exec_runner)
+    print(ASCII_GUIDE, end="", file=stderr)
+    root = None
+    try:
+        root = choose_project(
+            cwd=cwd,
+            home=home,
+            stdin=stdin,
+            stderr=stderr,
+            init_runner=init_runner,
+        )
+        harness, agent_id = choose_seat(root, stdin=stdin, stderr=stderr)
+        ensure_harness_setup(
+            harness,
+            home=home,
+            stdin=stdin,
+            stderr=stderr,
+            environ=environ,
+            setup_runner=setup_runner,
+        )
+        environ["RT_FROM"] = agent_id
+        chdir_runner(root)
+        return execute(f"rt-{harness}", [], exec_runner=exec_runner)
+    except OnboardingError as error:
+        if root is not None and is_project_root(root):
+            raise project_ready_recovery(error, root) from error
+        raise
+    except KeyboardInterrupt:
+        print(
+            "roundtable: cancelled by user (Ctrl-C); no agent session was launched.",
+            file=stderr,
+        )
+        if root is not None and is_project_root(root):
+            print(
+                f"project already created at {root}; run roundtable again and "
+                "choose it from the list",
+                file=stderr,
+            )
+        return 130
 
 
 def main(
@@ -553,6 +740,12 @@ def main(
             command = argv[0]
             if command in {"help", "-h", "--help"}:
                 print(HELP, end="", file=stdout)
+                return 0
+            if command == "guide":
+                print(ASCII_GUIDE, end="", file=stdout)
+                return 0
+            if command == "version":
+                print(version_report(), file=stdout)
                 return 0
             target = ALIASES.get(command)
             if target is None:
@@ -595,6 +788,12 @@ def main(
     except OnboardingError as error:
         print(error, file=stderr)
         return 2
+    except KeyboardInterrupt:
+        print(
+            "roundtable: cancelled by user (Ctrl-C); no agent session was launched.",
+            file=stderr,
+        )
+        return 130
 
 
 if __name__ == "__main__":

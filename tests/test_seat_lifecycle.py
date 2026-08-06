@@ -19,6 +19,7 @@ sys.path.insert(0, str(BIN))
 import _rtlauncher
 import _rtcodex
 import _rtlib
+import _rtruntime
 
 
 def load_script(name: str, module_name: str):
@@ -30,9 +31,9 @@ def load_script(name: str, module_name: str):
     return module
 
 
-wake = load_script("rt-codex-wake", "rt_wp4_codex_wake")
-doctor = load_script("rt-doctor", "rt_wp4_doctor")
-advisory = load_script("rt-startup-advisory", "rt_wp4_startup_advisory")
+wake = load_script("rt-codex-wake", "seat_lifecycle_codex_wake")
+doctor = load_script("rt-doctor", "seat_lifecycle_doctor")
+advisory = load_script("rt-startup-advisory", "seat_lifecycle_startup_advisory")
 
 
 def run_tool(name: str, *args: str, cwd: Path | None = None, env=None):
@@ -317,6 +318,24 @@ def test_launcher_menu_selects_registered_project(tmp_path, monkeypatch):
 
     assert selected == project
     assert f"1) {project}" in stderr.getvalue()
+
+
+def test_launcher_menu_reprompts_after_invalid_numeric_input(tmp_path, monkeypatch):
+    project = write_project(tmp_path / "registered", codex=False)
+    registry = tmp_path / "projects.yaml"
+    _rtlib.register_project(project, registry)
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(registry))
+    stderr = io.StringIO()
+
+    selected = _rtlauncher.choose_launch_cwd(
+        "claude",
+        cwd=tmp_path / "outside",
+        stdin=TTYInput("0\n1\n"),
+        stderr=stderr,
+    )
+
+    assert selected == project
+    assert "please try again" in stderr.getvalue()
 
 
 def test_launcher_menu_creates_then_selects_project(tmp_path, monkeypatch):
@@ -717,6 +736,82 @@ def test_rt_codex_wake_unbind_removes_only_target_binding(tmp_path):
     assert str(first) not in persisted.bindings
     assert str(first) not in persisted.data["projects"]
     assert persisted.bindings[str(second)]["threadId"] == "thread-second"
+
+
+def test_rt_codex_wake_handoff_clears_only_stale_claim_and_prints_resume(
+    tmp_path, monkeypatch, capsys
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    state_path = tmp_path / "wake-state.json"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    old = _rtruntime.claim(project, "codex", "codex")
+    store = wake.StateStore(state_path)
+    store.bind(project, codex_thread(project), lease=old)
+    _rtruntime.arm_codex_launch_intent(old)
+
+    # A dead owner proves that the claim can be cleared; an active owner is
+    # refused by the same command before any state mutation.
+    monkeypatch.setattr(_rtruntime, "_pid_state", lambda _pid: "dead")
+    client = FakeClient(codex_thread(project))
+    client.close = lambda: None
+    monkeypatch.setattr(wake, "AppServerClient", lambda _socket: client)
+    monkeypatch.setattr(wake, "require_supported_version", lambda: None)
+    monkeypatch.setattr(wake, "require_supported_daemon", lambda _socket: None)
+
+    result = wake.handoff_command(
+        SimpleNamespace(
+            project=str(project),
+            thread_id="thread-1",
+            socket=tmp_path / "socket",
+            state_file=state_path,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "handoff prepared" in output
+    assert "rt-codex --resume thread-1" in output
+    assert not _rtruntime.seat_paths(project, "codex").project_dir.joinpath(
+        "codex-launch-intent.json"
+    ).exists()
+    persisted = wake.StateStore(state_path)
+    assert str(project) not in persisted.bindings
+
+
+def test_rt_codex_wake_handoff_refuses_a_live_seat_without_mutation(
+    tmp_path, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    state_path = tmp_path / "wake-state.json"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    token = _rtruntime.claim(project, "codex", "codex")
+    store = wake.StateStore(state_path)
+    store.bind(project, codex_thread(project), lease=token)
+    _rtruntime.arm_codex_launch_intent(token)
+    client = FakeClient(codex_thread(project))
+    client.close = lambda: None
+    monkeypatch.setattr(wake, "AppServerClient", lambda _socket: client)
+    monkeypatch.setattr(wake, "require_supported_version", lambda: None)
+    monkeypatch.setattr(wake, "require_supported_daemon", lambda _socket: None)
+
+    with pytest.raises(wake.IdentityError, match="active"):
+        wake.handoff_command(
+            SimpleNamespace(
+                project=str(project),
+                thread_id="thread-1",
+                socket=tmp_path / "socket",
+                state_file=state_path,
+            )
+        )
+
+    assert str(project) in wake.StateStore(state_path).bindings
+    assert _rtruntime.seat_paths(project, "codex").project_dir.joinpath(
+        "codex-launch-intent.json"
+    ).exists()
 
 
 def test_bridge_discovers_watch_roots_from_registry_only(

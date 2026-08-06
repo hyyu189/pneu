@@ -502,10 +502,11 @@ def main():
     else:
         print("git: not initialized (use --git to opt in)")
     print(f"registered {project_dir}")
-    print("next:")
-    print(f"  cd {project_dir}")
-    print("  roundtable  # choose and launch a configured harness seat")
-    print("  roundtable doctor")
+    if os.environ.get("ROUNDTABLE_ONBOARDING_SUBPROCESS") != "1":
+        print("next:")
+        print(f"  cd {project_dir}")
+        print("  roundtable  # choose and launch a configured harness seat")
+        print("  roundtable doctor")
 
 
 if __name__ == "__main__":
