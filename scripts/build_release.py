@@ -231,6 +231,7 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "rt-startup-advisory",
         "rt-stop-gate",
         "rt-wait-inbox",
+        "rt-worktree",
     }
 )
 
