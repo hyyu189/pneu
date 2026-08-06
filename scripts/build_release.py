@@ -364,6 +364,20 @@ def _safe_extract_git_archive(payload: bytes, destination: Path) -> None:
                 target.mkdir(parents=True, exist_ok=True)
                 os.chmod(target, member.mode & 0o777)
                 continue
+            if member.issym():
+                link = PurePosixPath(member.linkname)
+                if (
+                    link.is_absolute()
+                    or ".." in link.parts
+                    or any(part in FORBIDDEN_COMPONENTS for part in link.parts)
+                ):
+                    raise ReleaseError(
+                        f"unsafe symlink target in git archive: {member.name} -> "
+                        f"{member.linkname}"
+                    )
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(member.linkname)
+                continue
             if not member.isfile():
                 raise ReleaseError(
                     f"unsupported entry type in git archive: {member.name}"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -58,6 +59,26 @@ def test_outer_checksum_command_works_from_repo_root(tmp_path):
 
     assert process.returncode == 0, process.stderr
     assert f"{artifact.name}: OK" in process.stdout
+
+
+def test_git_archive_extractor_preserves_safe_compatibility_symlinks(tmp_path):
+    payload = io.BytesIO()
+    with tarfile.open(fileobj=payload, mode="w") as archive:
+        target = tarfile.TarInfo("bin/pneu")
+        target.mode = 0o755
+        target_data = b"#!/bin/sh\n"
+        target.size = len(target_data)
+        archive.addfile(target, io.BytesIO(target_data))
+        alias = tarfile.TarInfo("bin/roundtable")
+        alias.mode = 0o755
+        alias.type = tarfile.SYMTYPE
+        alias.linkname = "pneu"
+        archive.addfile(alias)
+
+    destination = tmp_path / "source"
+    build_release._safe_extract_git_archive(payload.getvalue(), destination)
+    assert (destination / "bin" / "roundtable").is_symlink()
+    assert (destination / "bin" / "roundtable").readlink() == Path("pneu")
 
 
 def test_release_workflow_exercises_isolated_artifact_setup():
