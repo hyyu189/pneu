@@ -18,3 +18,4 @@ ec6f1f5401d1c566783ffa7ce542e0d19a4d29cb	2026-07-16T23:14:30-07:00	build_week_v2
 0d7f78e9c45594559a981f7c5b8ee50808b15f5d	2026-07-16T23:37:30-07:00	build_week_v2	direct_docs_config	1f0ab6a45a238b155b34b4a2d7963fb097260237	replayed_sanitized	-
 0686cdef50c6db146d71efbe3d27690757354a0c	2026-07-17T00:15:58-07:00	build_week_v2	direct_docs_config	3fb28b4f97f2327e196c1877eaf1f981a96ed537	replayed_sanitized	-
 bbc67d8f42a238e4887d389cb6766dc57ae76e47	2026-07-17T00:35:01-07:00	build_week_v2	spec_only_no_review	5d74a74534667dd7a46360b6272321bea8287f51	replayed_sanitized	Implementation attributed to GPT-5.6 Codex.
+46f932722cdbb845e14de8374e79060cffc342b1	2026-08-05T19:21:28-07:00	product_0.3	direct_code	26bd0a068d95583ee041871ec570548b15c9c2cb	replayed_sanitized	Grok ACP adapter design and authenticated lab shape productized under explicit Claude directive; no credentials or runtime mailboxes included.
