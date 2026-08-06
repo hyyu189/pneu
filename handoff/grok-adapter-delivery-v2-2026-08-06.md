@@ -1,8 +1,11 @@
 # Grok ACP adapter delivery — 2026-08-06
 
-Status: implementation and focused verification complete; production support
-remains unclaimed because the current read-only credentialed adapter E2E was
-blocked by an expired host OAuth credential.
+Status: implementation, focused verification, and extracted-artifact smoke
+complete; production support remains unclaimed because the current read-only
+credentialed adapter E2E was blocked by an expired host OAuth credential.
+
+Commits: `26bd0a068d95583ee041871ec570548b15c9c2cb` (implementation) and
+`3962b7d788d95e7109d0d465a6eadfef8bbadd09` (provenance).
 
 ## Delivered
 
@@ -39,6 +42,12 @@ The earlier isolated Stage 2 lab remains the evidence for one valid
 credentialed ACP mail-to-wake-to-drain/ack generation. It is explicitly lab
 evidence, not public support.
 
+The complete repository suite passed **922 passed, 1 skipped**. `compileall`
+and the public-safety scan passed. An extracted `0.3.0` artifact built from
+the commits above passed both checksum layers, contained all three Grok wheel
+surfaces, installed into a disposable HOME, and passed `roundtable-smoke`.
+Artifact SHA-256: `f8e80b4516530c315c21c1d8f753f072c3787230a459fabd8aab1c9563ace875`.
+
 ## Credentialed adapter E2E boundary
 
 The new adapter lab was attempted read-only with two generations and optional
@@ -61,6 +70,5 @@ Therefore the current tier claim is:
 ## Remaining release evidence
 
 Run the adapter lab again with a fresh valid credential under the same
-read-only boundary. Then run the extracted `0.3.0` artifact install/smoke and
-record the artifact surface checks. No public `main` push or release asset
-mutation is authorized.
+read-only boundary to prove two generations and recovery. No public `main`
+push or release asset mutation is authorized.
