@@ -38,6 +38,7 @@ ALIASES = {
     "claude": "rt-claude",
     "hermes": "rt-hermes",
     "codex": "rt-codex",
+    "openclaw": "rt-openclaw",
     "send": "rt-say",
     "inbox": "rt-inbox",
     "ack": "rt-ack",
@@ -61,6 +62,7 @@ commands:
   claude     Launch a Claude seat
   hermes     Launch a Hermes seat
   codex      Launch a Codex seat
+  openclaw   Launch an isolated OpenClaw Gateway seat
   send       Send a durable message
   inbox      Read a durable inbox
   ack        Acknowledge a durable message

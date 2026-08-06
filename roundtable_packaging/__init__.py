@@ -18,6 +18,7 @@ MANAGED_HELPERS = (
 MANAGED_ASSETS = (
     "share/roundtable/integrations/hermes/roundtable/__init__.py",
     "share/roundtable/integrations/hermes/roundtable/plugin.yaml",
+    "share/roundtable/integrations/openclaw/roundtable/__init__.py",
     "share/roundtable/skills/shared/roundtable/SKILL.md",
 )
 
@@ -36,6 +37,8 @@ TOOLS = (
     "rt-doctor",
     "rt-hermes",
     "rt-inbox",
+    "rt-openclaw",
+    "rt-openclaw-wake",
     "rt-projects",
     "rt-refresh",
     "rt-resolve",
