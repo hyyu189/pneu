@@ -22,8 +22,8 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(BIN))
 
 from _rtlib import resolve_project_mailbox
-from roundtable_packaging import MANAGED_ASSETS, MANAGED_HELPERS, VERSION
-from roundtable_packaging import cli as packaging_cli
+from pneu_packaging import MANAGED_ASSETS, MANAGED_HELPERS, VERSION
+from pneu_packaging import cli as packaging_cli
 
 
 def packaging_env(home: Path) -> dict[str, str]:
@@ -190,7 +190,7 @@ def built_wheel(tmp_path_factory):
     assert process.returncode == 0, process.stderr
     # Derived, not literal: a test that builds the real wheel must not break
     # on every version bump for a reason that has nothing to do with it.
-    matches = list(wheel_dir.glob(f"roundtable_messaging-{VERSION}-*.whl"))
+    matches = list(wheel_dir.glob(f"pneu-{VERSION}-*.whl"))
     assert len(matches) == 1
     return matches[0]
 
@@ -206,14 +206,14 @@ def test_wheel_contains_commands_helpers_templates_and_uninstaller(built_wheel):
             name
             for name in names
             if name.endswith(
-                ".data/data/share/roundtable/skills/shared/roundtable/SKILL.md"
+                ".data/data/share/pneu/skills/shared/pneu/SKILL.md"
             )
         )
         skill = archive.read(skill_name).decode("utf-8")
 
-    assert "roundtable_packaging/cli.py" in names
-    assert "roundtable_packaging/setup.py" in names
-    assert "roundtable_packaging/migrate.py" not in names
+    assert "pneu_packaging/cli.py" in names
+    assert "pneu_packaging/setup.py" in names
+    assert "pneu_packaging/migrate.py" not in names
     assert "_rtruntime.py" in names
     assert any(name.endswith(".data/scripts/roundtable") for name in names)
     assert any(name.endswith(".data/scripts/rt-say") for name in names)
@@ -224,20 +224,20 @@ def test_wheel_contains_commands_helpers_templates_and_uninstaller(built_wheel):
     assert any(name.endswith(".data/scripts/_rtmigrate.py") for name in names)
     assert any(name.endswith(".data/scripts/_rtruntime.py") for name in names)
     assert any(
-        name.endswith(".data/data/share/roundtable/templates/agents.yaml.tmpl")
+        name.endswith(".data/data/share/pneu/templates/agents.yaml.tmpl")
         for name in names
     )
     assert any(
         name.endswith(
-            ".data/data/share/roundtable/integrations/hermes/"
-            "roundtable/plugin.yaml"
+            ".data/data/share/pneu/integrations/hermes/"
+            "pneu/plugin.yaml"
         )
         for name in names
     )
     assert any(
         name.endswith(
-            ".data/data/share/roundtable/integrations/hermes/"
-            "roundtable/__init__.py"
+            ".data/data/share/pneu/integrations/hermes/"
+            "pneu/__init__.py"
         )
         for name in names
     )
@@ -251,7 +251,7 @@ def test_wheel_contains_commands_helpers_templates_and_uninstaller(built_wheel):
 def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
 
     first = run_script(
@@ -263,7 +263,22 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
         home=home,
     )
     assert first.returncode == 0, first.stderr
-    assert f"run now: {link_dir / 'roundtable'}" in first.stdout
+    assert f"run now: {link_dir / 'pneu'}" in first.stdout
+    assert (link_dir / "roundtable").is_symlink()
+    assert os.readlink(prefix / "current" / "bin" / "roundtable") == "pneu"
+    help_outputs = []
+    for command in ("pneu", "roundtable"):
+        help_result = subprocess.run(
+            [str(link_dir / command), "--help"],
+            env=packaging_env(home),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        assert help_result.returncode == 0, help_result.stderr
+        help_outputs.append(help_result.stdout)
+    assert help_outputs[0] == help_outputs[1]
 
     manifest_path = prefix / "install-manifest.json"
     manifest = json.loads(manifest_path.read_text())
@@ -483,10 +498,248 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
     assert "already uninstalled" in again.stdout
 
 
+def test_default_install_migrates_legacy_prefix_state_and_command_links(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".roundtable"
+    prefix = home / ".pneu"
+    link_dir = home / ".local" / "bin"
+    old_install = run_script(
+        INSTALL,
+        "--prefix",
+        str(legacy),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert old_install.returncode == 0, old_install.stderr
+
+    old_skill_target = (
+        legacy
+        / "current"
+        / "share"
+        / "roundtable"
+        / "skills"
+        / "shared"
+        / "roundtable"
+    )
+    old_skill_target.mkdir(parents=True)
+    new_skill_link = legacy / "skills" / "shared" / "pneu"
+    new_skill_link.unlink()
+    old_skill_link = legacy / "skills" / "shared" / "roundtable"
+    old_skill_link.symlink_to(old_skill_target)
+    manifest_path = legacy / "install-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    new_skill_key = str(legacy / "skills" / "shared" / "pneu")
+    old_skill_key = str(old_skill_link)
+    assert manifest["links"].pop(new_skill_key)
+    manifest["links"][old_skill_key] = str(old_skill_target)
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+
+    for relative, payload in (
+        ("projects.yaml", "schema: roundtable.projects.v2\n"),
+        ("mail/state", "durable\n"),
+        ("migration-records/record.json", "{}\n"),
+        ("layout-locks/lock", "locked\n"),
+        ("backups/keep", "backup\n"),
+        (".runtime/state.json", "{}\n"),
+    ):
+        target = legacy / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(payload)
+
+    migrated = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert migrated.returncode == 0, migrated.stderr
+    assert legacy.is_symlink()
+    assert os.readlink(legacy) == str(prefix)
+    assert prefix.is_dir()
+    assert (prefix / "mail" / "state").read_text() == "durable\n"
+    assert (prefix / "migration-records" / "record.json").read_text() == "{}\n"
+    assert (prefix / "layout-locks" / "lock").read_text() == "locked\n"
+    assert (prefix / "backups" / "keep").read_text() == "backup\n"
+    assert (prefix / ".runtime" / "state.json").read_text() == "{}\n"
+    assert os.readlink(link_dir / "pneu") == str(prefix / "bin" / "pneu")
+    assert os.readlink(link_dir / "roundtable") == str(prefix / "bin" / "roundtable")
+    assert os.readlink(prefix / "skills" / "shared" / "pneu") == str(
+        prefix / "current" / "share" / "pneu" / "skills" / "shared" / "pneu"
+    )
+    assert not (prefix / "skills" / "shared" / "roundtable").exists()
+    migration_path = prefix / "prefix-migration.json"
+    migration = json.loads(migration_path.read_text())
+    assert migration["schema"] == "pneu.prefix-migration.v1"
+    assert migration["source"] == str(legacy)
+    assert migration["target"] == str(prefix)
+    assert migration["status"] == "complete"
+
+    migration_before = migration_path.read_bytes()
+    repeated = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert repeated.returncode == 0, repeated.stderr
+    assert migration_path.read_bytes() == migration_before
+
+
+def test_prefix_migration_refuses_two_independent_install_roots(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".roundtable"
+    prefix = home / ".pneu"
+    old_install = run_script(
+        INSTALL,
+        "--prefix",
+        str(legacy),
+        "--link-dir",
+        str(home / ".local" / "bin"),
+        home=home,
+    )
+    assert old_install.returncode == 0, old_install.stderr
+    prefix.mkdir()
+    sentinel = prefix / "do-not-touch"
+    sentinel.write_text("keep\n")
+
+    refused = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(home / ".local" / "bin"),
+        home=home,
+    )
+    assert refused.returncode == 1
+    assert "both legacy and new install prefixes exist" in refused.stderr
+    assert legacy.is_dir() and not legacy.is_symlink()
+    assert sentinel.read_text() == "keep\n"
+
+
+def test_prefix_migration_rewrites_owned_hermes_setup_artifacts(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    legacy = home / ".roundtable"
+    prefix = home / ".pneu"
+    link_dir = home / ".local" / "bin"
+    installed = run_script(
+        INSTALL,
+        "--prefix",
+        str(legacy),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert installed.returncode == 0, installed.stderr
+
+    setup = subprocess.run(
+        [
+            str(link_dir / "roundtable-setup"),
+            "apply",
+            "--home",
+            str(home),
+            "--prefix",
+            str(legacy),
+            "--harness",
+            "hermes",
+            "--json",
+        ],
+        env=packaging_env(home),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert setup.returncode == 0, setup.stderr
+
+    old_plugin_target = (
+        legacy
+        / "current"
+        / "share"
+        / "roundtable"
+        / "integrations"
+        / "hermes"
+        / "roundtable"
+    )
+    old_skill_target = (
+        legacy
+        / "skills"
+        / "shared"
+        / "roundtable"
+    )
+    old_plugin_target.mkdir(parents=True)
+    old_skill_target.mkdir(parents=True)
+    plugin_link = home / ".hermes" / "plugins" / "pneu"
+    skill_link = home / ".hermes" / "skills" / "pneu"
+    plugin_link.unlink()
+    skill_link.unlink()
+    (home / ".hermes" / "plugins" / "roundtable").symlink_to(old_plugin_target)
+    (home / ".hermes" / "skills" / "roundtable").symlink_to(old_skill_target)
+    config_path = home / ".hermes" / "config.yaml"
+    config_path.write_text(config_path.read_text().replace("pneu", "roundtable"))
+    setup_manifest_path = legacy / "harness-setup.json"
+    setup_manifest_path.write_text(
+        setup_manifest_path.read_text().replace("pneu", "roundtable")
+    )
+
+    migrated = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert migrated.returncode == 0, migrated.stderr
+    assert not (home / ".hermes" / "plugins" / "roundtable").exists()
+    assert not (home / ".hermes" / "skills" / "roundtable").exists()
+    assert os.readlink(home / ".hermes" / "plugins" / "pneu") == str(
+        prefix / "current" / "share" / "pneu" / "integrations" / "hermes" / "pneu"
+    )
+    assert os.readlink(home / ".hermes" / "skills" / "pneu") == str(
+        prefix / "skills" / "shared" / "pneu"
+    )
+    assert "- pneu" in config_path.read_text()
+    migrated_setup = json.loads((prefix / "harness-setup.json").read_text())
+    assert migrated_setup["prefix"] == str(prefix)
+    assert migrated_setup["migrated_from"] == str(legacy)
+    assert migrated_setup["harnesses"]["hermes"]["plugin"]["path"].endswith(
+        ".hermes/plugins/pneu"
+    )
+
+    status = subprocess.run(
+        [
+            str(link_dir / "roundtable-setup"),
+            "status",
+            "--home",
+            str(home),
+            "--prefix",
+            str(prefix),
+            "--harness",
+            "hermes",
+            "--json",
+        ],
+        env=packaging_env(home),
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+    assert status.returncode == 0, status.stderr
+    assert json.loads(status.stdout)["harnesses"]["hermes"]["state"] == "configured"
+
+
 def test_install_conflict_fails_before_creating_version(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     link_dir.mkdir(parents=True)
     conflict = link_dir / "rt-say"
@@ -511,7 +764,7 @@ def test_install_conflict_fails_before_creating_version(tmp_path):
 def test_modified_wrapper_makes_uninstall_fail_closed(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     installed = run_script(
         INSTALL,
@@ -546,7 +799,7 @@ def test_uninstall_refuses_to_leave_managed_harness_config_broken(
 ):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     installed = run_script(
         INSTALL,
@@ -591,7 +844,7 @@ def test_uninstall_refuses_to_leave_managed_harness_config_broken(
         ("rt-say", "managed tool is missing or modified: rt-say"),
         ("_rtruntime.py", "managed helper is missing or modified: _rtruntime.py"),
         (
-            "../share/roundtable/integrations/hermes/roundtable/plugin.yaml",
+            "../share/pneu/integrations/hermes/pneu/plugin.yaml",
             "managed onboarding asset is missing or modified",
         ),
     ],
@@ -603,7 +856,7 @@ def test_same_version_reinstall_rejects_modified_installed_runtime(
 ):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     installed = run_script(
         INSTALL,
@@ -634,7 +887,7 @@ def test_same_version_reinstall_rejects_modified_installed_runtime(
 def test_same_version_source_reinstall_rejects_different_input_tree(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     installed = run_script(
         INSTALL,
@@ -686,10 +939,10 @@ def test_same_version_source_reinstall_rejects_different_input_tree(tmp_path):
 
 
 def test_install_030_beside_pre_migration_019_runtime(tmp_path):
-    assert VERSION == "0.3.0"
+    assert VERSION == "1.0.0"
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     installed = run_script(
         INSTALL,
@@ -738,12 +991,12 @@ def test_install_030_beside_pre_migration_019_runtime(tmp_path):
     )
 
     assert upgraded.returncode == 0, upgraded.stderr
-    assert os.readlink(current) == "versions/0.3.0"
+    assert os.readlink(current) == "versions/1.0.0"
     assert not (old_dir / "bin" / "_rtmigrate.py").exists()
-    assert (prefix / "versions" / "0.3.0" / "bin" / "_rtmigrate.py").is_file()
+    assert (prefix / "versions" / "1.0.0" / "bin" / "_rtmigrate.py").is_file()
     upgraded_manifest = json.loads(manifest_path.read_text())
     assert upgraded_manifest["versions"] == sorted(
-        [str(old_dir), str(prefix / "versions" / "0.3.0")]
+        [str(old_dir), str(prefix / "versions" / "1.0.0")]
     )
 
 
@@ -754,7 +1007,7 @@ def test_install_shell_rejects_unsupported_bootstrap_python(tmp_path):
     process = run_script(
         INSTALL,
         "--prefix",
-        str(home / ".roundtable"),
+        str(home / ".pneu"),
         "--link-dir",
         str(home / ".local" / "bin"),
         home=home,
@@ -763,7 +1016,7 @@ def test_install_shell_rejects_unsupported_bootstrap_python(tmp_path):
 
     assert process.returncode == 1
     assert "must be CPython 3.11 through 3.14" in process.stderr
-    assert not (home / ".roundtable").exists()
+    assert not (home / ".pneu").exists()
 
 
 def test_install_and_uninstall_find_versioned_python_after_unsupported_python3(
@@ -789,7 +1042,7 @@ def test_install_and_uninstall_find_versioned_python_after_unsupported_python3(
         [
             str(INSTALL),
             "--prefix",
-            str(home / ".roundtable"),
+            str(home / ".pneu"),
             "--link-dir",
             str(home / ".local" / "bin"),
         ],
@@ -802,13 +1055,13 @@ def test_install_and_uninstall_find_versioned_python_after_unsupported_python3(
     )
 
     assert process.returncode == 0, process.stderr
-    assert (home / ".roundtable" / "current").is_symlink()
+    assert (home / ".pneu" / "current").is_symlink()
 
     removed = subprocess.run(
         [
             str(UNINSTALL),
             "--prefix",
-            str(home / ".roundtable"),
+            str(home / ".pneu"),
         ],
         cwd=ROOT,
         env=environment,
@@ -819,13 +1072,13 @@ def test_install_and_uninstall_find_versioned_python_after_unsupported_python3(
     )
 
     assert removed.returncode == 0, removed.stderr
-    assert not (home / ".roundtable" / "current").exists()
+    assert not (home / ".pneu" / "current").exists()
 
 
 def test_tampered_manifest_cannot_delete_outside_prefix(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     installed = run_script(
         INSTALL,
@@ -864,7 +1117,7 @@ def test_owned_launch_agents_are_booted_out_but_foreign_plist_is_preserved(
 ):
     home = tmp_path / "home"
     home.mkdir()
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     link_dir = home / ".local" / "bin"
     launch_agents = tmp_path / "LaunchAgents"
     launch_agents.mkdir()
@@ -1011,7 +1264,7 @@ def test_install_prefers_activated_env_over_higher_version_name(
     process = run_installer(
         INSTALL,
         "--prefix",
-        str(home / ".roundtable"),
+        str(home / ".pneu"),
         "--link-dir",
         str(home / ".local" / "bin"),
         env=env,
@@ -1046,7 +1299,7 @@ def test_uninstall_prefers_activated_env_over_higher_version_name(tmp_path):
     process = run_installer(
         UNINSTALL,
         "--prefix",
-        str(home / ".roundtable"),
+        str(home / ".pneu"),
         env=env,
     )
 
@@ -1079,7 +1332,7 @@ def test_install_source_mode_skips_candidate_without_setuptools(tmp_path):
     process = run_installer(
         INSTALL,
         "--prefix",
-        str(home / ".roundtable"),
+        str(home / ".pneu"),
         "--link-dir",
         str(home / ".local" / "bin"),
         env=env,
@@ -1107,7 +1360,7 @@ def test_install_explicit_python_fails_closed_when_cannot_build(tmp_path):
     process = run_installer(
         INSTALL,
         "--prefix",
-        str(home / ".roundtable"),
+        str(home / ".pneu"),
         "--link-dir",
         str(home / ".local" / "bin"),
         env=env,
@@ -1117,7 +1370,7 @@ def test_install_explicit_python_fails_closed_when_cannot_build(tmp_path):
     assert "cannot build from source" in process.stderr
     assert "setuptools unavailable" in process.stderr
     assert not trace.exists()
-    assert not (home / ".roundtable").exists()
+    assert not (home / ".pneu").exists()
 
 
 def test_install_wheel_mode_accepts_python_without_setuptools(tmp_path):
@@ -1139,7 +1392,7 @@ def test_install_wheel_mode_accepts_python_without_setuptools(tmp_path):
         "--wheel-dir",
         str(wheel_dir),
         "--prefix",
-        str(home / ".roundtable"),
+        str(home / ".pneu"),
         "--link-dir",
         str(home / ".local" / "bin"),
         env=env,

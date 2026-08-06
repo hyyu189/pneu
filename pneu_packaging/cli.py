@@ -35,6 +35,10 @@ from . import (
 SUPPORTED_PYTHON_MIN = (3, 11)
 SUPPORTED_PYTHON_MAX = (3, 14)
 SOURCE_BUILD_EPOCH = "946684800"
+LEGACY_PREFIX_NAME = ".roundtable"
+CURRENT_PREFIX_NAME = ".pneu"
+PREFIX_MIGRATION_SCHEMA = "pneu.prefix-migration.v1"
+PREFIX_MIGRATION_FILENAME = "prefix-migration.json"
 
 
 class InstallError(RuntimeError):
@@ -47,7 +51,7 @@ def _absolute(path: str | Path) -> Path:
 
 def _prefix_default() -> Path:
     configured = os.environ.get("ROUNDTABLE_INSTALL_PREFIX")
-    return _absolute(configured) if configured else Path.home() / ".roundtable"
+    return _absolute(configured) if configured else Path.home() / CURRENT_PREFIX_NAME
 
 
 def _link_dir_default() -> Path:
@@ -171,6 +175,430 @@ def _atomic_symlink(path: Path, target: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _replace_prefix(value: object, old: Path, new: Path) -> object:
+    """Rewrite only absolute paths rooted at an old managed prefix."""
+
+    old_text = str(old)
+    new_text = str(new)
+    if isinstance(value, str):
+        if value == old_text:
+            return new_text
+        if value.startswith(old_text + os.sep):
+            return new_text + value[len(old_text) :]
+        return value
+    if isinstance(value, list):
+        return [_replace_prefix(item, old, new) for item in value]
+    if isinstance(value, dict):
+        return {
+            _replace_prefix(key, old, new): _replace_prefix(item, old, new)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _rewrite_migrated_json(path: Path, old: Path, new: Path) -> None:
+    if not path.is_file():
+        return
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise InstallError(f"cannot migrate managed JSON state {path}: {error}") from error
+    _atomic_write(path, _json_bytes(_replace_prefix(value, old, new)), 0o600)
+
+
+def _migrate_identity(value: object, old: Path, new: Path) -> object:
+    """Rewrite owned path spellings while retaining protocol identifiers."""
+
+    if isinstance(value, str):
+        value = _replace_prefix(value, old, new)
+        replacements = (
+            ("/current/share/roundtable", "/current/share/pneu"),
+            ("/skills/shared/roundtable", "/skills/shared/pneu"),
+            ("/integrations/hermes/roundtable", "/integrations/hermes/pneu"),
+            ("/plugins/roundtable", "/plugins/pneu"),
+            ("/skills/roundtable", "/skills/pneu"),
+        )
+        for source, target in replacements:
+            value = value.replace(source, target)
+        return value
+    if isinstance(value, list):
+        return [_migrate_identity(item, old, new) for item in value]
+    if isinstance(value, dict):
+        return {
+            _migrate_identity(key, old, new): _migrate_identity(item, old, new)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _migrate_harness_setup_manifest(prefix: Path, legacy: Path) -> None:
+    """Migrate setup-owned links/configuration without touching user choices."""
+
+    path = _harness_setup_manifest_path(prefix)
+    if not path.is_file():
+        return
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise InstallError(f"cannot migrate harness setup state {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise InstallError(f"refusing invalid harness setup manifest at {path}")
+    if value.get("schema") != "roundtable.harness-setup.v1":
+        raise InstallError(f"refusing unknown harness setup manifest at {path}")
+    recorded = value.get("prefix")
+    if recorded == str(prefix):
+        return
+    if recorded != str(legacy):
+        raise InstallError(
+            f"managed harness setup prefix mismatch during migration: {recorded!r}"
+        )
+
+    home = prefix.parent
+    harnesses = value.get("harnesses")
+    if not isinstance(harnesses, dict):
+        raise InstallError(f"invalid harness setup entries at {path}")
+
+    migrated_links: list[tuple[Path, str]] = []
+
+    def migrate_link(link: dict) -> None:
+        raw_path = link.get("path")
+        raw_target = link.get("target")
+        if not isinstance(raw_path, str) or not isinstance(raw_target, str):
+            return
+        old_path = Path(raw_path)
+        if not (
+            old_path == home / ".hermes" / "plugins" / "roundtable"
+            or any(
+                old_path == home / f".{harness}" / "skills" / "roundtable"
+                for harness in ("claude", "hermes", "codex")
+            )
+        ):
+            return
+        if old_path.parent.name == "plugins":
+            expected_target = (
+                legacy
+                / "current"
+                / "share"
+                / "roundtable"
+                / "integrations"
+                / "hermes"
+                / "roundtable"
+            )
+        else:
+            expected_target = (
+                legacy
+                / "skills"
+                / "shared"
+                / "roundtable"
+            )
+        if raw_target != str(expected_target):
+            raise InstallError(
+                f"managed legacy harness link has an unexpected target: {old_path}"
+            )
+        if not _lexists(old_path):
+            if link.get("added"):
+                raise InstallError(f"managed legacy harness link is missing: {old_path}")
+        else:
+            info = old_path.lstat()
+            if info.st_uid != os.getuid() or not old_path.is_symlink():
+                raise InstallError(f"managed legacy harness link was modified: {old_path}")
+            if os.readlink(old_path) != raw_target:
+                raise InstallError(f"managed legacy harness link was modified: {old_path}")
+            old_path.unlink()
+        new_path = Path(_migrate_identity(raw_path, legacy, prefix))
+        new_target = str(_migrate_identity(raw_target, legacy, prefix))
+        link["path"] = str(new_path)
+        link["target"] = new_target
+        migrated_links.append((new_path, new_target))
+
+    def walk_links(node: object) -> None:
+        if isinstance(node, dict):
+            if "path" in node and "target" in node:
+                migrate_link(node)
+            for item in node.values():
+                walk_links(item)
+        elif isinstance(node, list):
+            for item in node:
+                walk_links(item)
+
+    for record in harnesses.values():
+        if not isinstance(record, dict):
+            raise InstallError(f"invalid harness setup ownership entry at {path}")
+        config = record.get("config")
+        if isinstance(config, dict):
+            raw_config_path = config.get("path")
+            if isinstance(raw_config_path, str):
+                config_path = Path(raw_config_path)
+                if _lexists(config_path):
+                    if config_path.is_symlink() or not config_path.is_file():
+                        raise InstallError(
+                            f"managed harness configuration is not a regular file: "
+                            f"{config_path}"
+                        )
+                    config_info = config_path.lstat()
+                    if config_info.st_uid != os.getuid():
+                        raise InstallError(
+                            f"refusing foreign-owned managed harness configuration: "
+                            f"{config_path}"
+                        )
+                    try:
+                        before = config_path.read_bytes()
+                    except OSError as error:
+                        raise InstallError(
+                            f"cannot read managed harness configuration {config_path}: {error}"
+                        ) from error
+                    after = before.replace(str(legacy).encode(), str(prefix).encode())
+                    fragment = config.get("managed_fragment")
+                    if isinstance(fragment, str):
+                        migrated_fragment = fragment.replace("roundtable", "pneu")
+                        after = after.replace(
+                            fragment.encode("utf-8"),
+                            migrated_fragment.encode("utf-8"),
+                        )
+                        config["managed_fragment"] = migrated_fragment
+                    if after != before:
+                        try:
+                            _atomic_write(
+                                config_path,
+                                after,
+                                stat.S_IMODE(config_info.st_mode),
+                            )
+                        except OSError as error:
+                            raise InstallError(
+                                f"cannot rewrite managed harness configuration "
+                                f"{config_path}: {error}"
+                            ) from error
+
+        plists = record.get("plists")
+        if isinstance(plists, list):
+            for item in plists:
+                if not isinstance(item, dict) or not item.get("added"):
+                    continue
+                raw_plist_path = item.get("path")
+                if not isinstance(raw_plist_path, str):
+                    raise InstallError(f"invalid managed Codex plist entry at {path}")
+                plist_path = Path(raw_plist_path)
+                if not plist_path.is_file() or plist_path.is_symlink():
+                    raise InstallError(f"managed Codex plist is missing: {plist_path}")
+                before = plist_path.read_bytes()
+                after = before.replace(str(legacy).encode(), str(prefix).encode())
+                if after != before:
+                    try:
+                        _atomic_write(plist_path, after, 0o600)
+                    except OSError as error:
+                        raise InstallError(
+                            f"cannot rewrite managed Codex plist {plist_path}: {error}"
+                        ) from error
+                item["digest"] = _sha256_bytes(after)
+
+        walk_links(record)
+
+    value = _migrate_identity(value, legacy, prefix)
+    if not isinstance(value, dict):
+        raise InstallError("managed harness setup migration produced invalid state")
+    value["prefix"] = str(prefix)
+    value["migrated_from"] = str(legacy)
+    _atomic_write(path, _json_bytes(value), 0o600)
+
+    # Keep a migrated owned link usable immediately after the new version is
+    # installed.  The targets are deliberately limited to the harness assets.
+    value["_migrated_links"] = [
+        {"path": str(link_path), "target": target}
+        for link_path, target in migrated_links
+    ]
+    _atomic_write(path, _json_bytes(value), 0o600)
+
+
+def _ensure_migrated_harness_links(prefix: Path) -> None:
+    path = _harness_setup_manifest_path(prefix)
+    if not path.is_file():
+        return
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise InstallError(f"cannot read migrated harness setup state {path}: {error}") from error
+    links = value.pop("_migrated_links", []) if isinstance(value, dict) else []
+    if not isinstance(links, list):
+        raise InstallError(f"invalid migrated harness links at {path}")
+    for item in links:
+        if not isinstance(item, dict):
+            raise InstallError(f"invalid migrated harness link at {path}")
+        link_path = Path(item.get("path", ""))
+        target = item.get("target")
+        if not isinstance(target, str) or not link_path.is_absolute():
+            raise InstallError(f"invalid migrated harness link at {path}")
+        if _lexists(link_path):
+            if not link_path.is_symlink() or os.readlink(link_path) != target:
+                raise InstallError(f"migrated harness link collides at {link_path}")
+            continue
+        link_path.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_symlink(link_path, target)
+    if isinstance(value, dict):
+        _atomic_write(path, _json_bytes(value), 0o600)
+
+
+def _migrate_install_manifest(prefix: Path, legacy: Path) -> None:
+    """Move the installer manifest's owned paths without touching user data."""
+
+    path = _manifest_path(prefix)
+    if not path.is_file():
+        return
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise InstallError(f"cannot migrate install manifest {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise InstallError(f"refusing invalid install manifest at {path}")
+    recorded = value.get("prefix")
+    if recorded == str(prefix):
+        return
+    if recorded != str(legacy):
+        raise InstallError(
+            f"managed manifest prefix mismatch during migration: {recorded!r}"
+        )
+
+    links = value.get("links")
+    if isinstance(links, dict):
+        for raw_path, raw_target in list(links.items()):
+            if not isinstance(raw_path, str) or not isinstance(raw_target, str):
+                raise InstallError("managed install manifest has an invalid link entry")
+            link_path = Path(raw_path)
+            new_target = _replace_prefix(raw_target, legacy, prefix)
+            if new_target == raw_target or link_path == legacy / "skills" / "shared" / "roundtable":
+                continue
+            if _lexists(link_path):
+                info = link_path.lstat()
+                if info.st_uid != os.getuid() or not link_path.is_symlink():
+                    raise InstallError(f"managed legacy command link was modified: {link_path}")
+                if os.readlink(link_path) != raw_target:
+                    raise InstallError(f"managed legacy command link was modified: {link_path}")
+                _atomic_symlink(link_path, new_target)
+        old_skill = legacy / "skills" / "shared" / "roundtable"
+        expected_old_target = str(
+            legacy
+            / "current"
+            / "share"
+            / "roundtable"
+            / "skills"
+            / "shared"
+            / "roundtable"
+        )
+        raw_target = links.pop(str(old_skill), None)
+        moved_skill = prefix / "skills" / "shared" / "roundtable"
+        if raw_target is not None:
+            if raw_target != expected_old_target:
+                raise InstallError(
+                    f"managed legacy skill link has an unexpected target: {raw_target}"
+                )
+            if _lexists(moved_skill):
+                if not moved_skill.is_symlink() or os.readlink(moved_skill) != raw_target:
+                    raise InstallError(
+                        f"managed legacy skill link was modified: {moved_skill}"
+                    )
+                moved_skill.unlink()
+
+    value = _replace_prefix(value, legacy, prefix)
+    if not isinstance(value, dict):
+        raise InstallError("managed install manifest migration produced invalid state")
+    value["prefix"] = str(prefix)
+    value["migrated_from"] = str(legacy)
+    _atomic_write(path, _json_bytes(value), 0o600)
+
+
+def _prefix_migration_manifest(prefix: Path) -> Path:
+    return prefix / PREFIX_MIGRATION_FILENAME
+
+
+def _validate_prefix_migration(prefix: Path, legacy: Path) -> None:
+    path = _prefix_migration_manifest(prefix)
+    if not path.exists():
+        return
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise InstallError(f"cannot read prefix migration manifest {path}: {error}") from error
+    if (
+        not isinstance(value, dict)
+        or value.get("schema") != PREFIX_MIGRATION_SCHEMA
+        or value.get("source") != str(legacy)
+        or value.get("target") != str(prefix)
+        or value.get("status") != "complete"
+    ):
+        raise InstallError(f"refusing invalid prefix migration manifest at {path}")
+
+
+def _migrate_legacy_prefix(prefix: Path) -> bool:
+    """Move a legacy default install once, then preserve its old spelling."""
+
+    if prefix.name != CURRENT_PREFIX_NAME:
+        return False
+    legacy = prefix.parent / LEGACY_PREFIX_NAME
+    if _lexists(legacy):
+        if legacy.is_symlink():
+            try:
+                target = (legacy.parent / os.readlink(legacy)).resolve(strict=False)
+            except OSError as error:
+                raise InstallError(f"cannot inspect legacy prefix link {legacy}: {error}") from error
+            if target != prefix:
+                raise InstallError(
+                    f"refusing legacy prefix symlink that does not target {prefix}: {legacy}"
+                )
+            if not _lexists(prefix):
+                raise InstallError(
+                    f"legacy prefix link is dangling; refusing to recreate {prefix}"
+                )
+        else:
+            if _lexists(prefix):
+                raise InstallError(
+                    f"both legacy and new install prefixes exist; refusing to merge: "
+                    f"{legacy} and {prefix}"
+                )
+            if legacy.stat().st_uid != os.getuid():
+                raise InstallError(f"refusing foreign-owned legacy install prefix: {legacy}")
+            try:
+                legacy.rename(prefix)
+            except OSError as error:
+                raise InstallError(
+                    f"cannot move legacy install prefix {legacy} to {prefix}: {error}"
+                ) from error
+            _atomic_symlink(legacy, str(prefix))
+    elif not _lexists(prefix):
+        return False
+
+    _validate_prefix_migration(prefix, legacy)
+    _migrate_install_manifest(prefix, legacy)
+    _migrate_harness_setup_manifest(prefix, legacy)
+    _rewrite_migrated_json(
+        prefix / ".runtime" / "codex-app-server-reload-required.json",
+        legacy,
+        prefix,
+    )
+    migration = _prefix_migration_manifest(prefix)
+    if not migration.exists():
+        _atomic_write(
+            migration,
+            _json_bytes(
+                {
+                    "schema": PREFIX_MIGRATION_SCHEMA,
+                    "source": str(legacy),
+                    "target": str(prefix),
+                    "status": "complete",
+                    "moved": [
+                        "versions",
+                        "projects.yaml",
+                        "mail",
+                        ".runtime",
+                        "backups",
+                        "migration-records",
+                        "layout-locks",
+                    ],
+                }
+            ),
+            0o600,
+        )
+    return True
+
+
 def _load_manifest(prefix: Path) -> dict | None:
     path = _manifest_path(prefix)
     if not path.exists():
@@ -212,7 +640,7 @@ def _validate_manifest_paths(prefix: Path, manifest: dict) -> None:
         if path.parent != prefix / "bin" or path.name not in TOOLS:
             raise InstallError(f"managed manifest file escapes owned paths: {path}")
 
-    skill_link = prefix / "skills" / "shared" / "roundtable"
+    skill_link = prefix / "skills" / "shared" / "pneu"
     for raw_path, target in links.items():
         if not isinstance(raw_path, str) or not isinstance(target, str):
             raise InstallError("managed manifest has an invalid link entry")
@@ -222,10 +650,10 @@ def _validate_manifest_paths(prefix: Path, manifest: dict) -> None:
                 prefix
                 / "current"
                 / "share"
-                / "roundtable"
+                / "pneu"
                 / "skills"
                 / "shared"
-                / "roundtable"
+                / "pneu"
             )
             if target != expected:
                 raise InstallError(
@@ -271,14 +699,14 @@ def _wrapper_payload(prefix: Path, tool: str) -> bytes:
         'legacy_runtime=${RT_CODEX_RUNTIME_DIR:-}\n'
         'if [ -n "$generic_runtime" ] && [ -n "$legacy_runtime" ] '
         '&& [ "$generic_runtime" != "$legacy_runtime" ]; then\n'
-        '  echo "roundtable: RT_RUNTIME_DIR and RT_CODEX_RUNTIME_DIR '
+        '  echo "pneu: RT_RUNTIME_DIR and RT_CODEX_RUNTIME_DIR '
         'must resolve to one runtime root" >&2\n'
         "  exit 2\n"
         "fi\n"
         'runtime_dir=${generic_runtime:-${legacy_runtime:-$prefix/.runtime}}\n'
         'case "$runtime_dir" in\n'
         "  /*) ;;\n"
-        '  *) echo "roundtable: runtime directory must be absolute: '
+        '  *) echo "pneu: runtime directory must be absolute: '
         '$runtime_dir" >&2; exit 2 ;;\n'
         "esac\n"
         'export RT_RUNTIME_DIR="$runtime_dir"\n'
@@ -301,14 +729,14 @@ def _expected_links(prefix: Path, link_dir: Path) -> dict[Path, str]:
         link_dir / tool: str(prefix / "bin" / tool)
         for tool in TOOLS
     }
-    links[prefix / "skills" / "shared" / "roundtable"] = str(
+    links[prefix / "skills" / "shared" / "pneu"] = str(
         prefix
         / "current"
         / "share"
-        / "roundtable"
+        / "pneu"
         / "skills"
         / "shared"
-        / "roundtable"
+        / "pneu"
     )
     return links
 
@@ -437,20 +865,20 @@ def _build_source_wheel(
         ],
         env=build_environment,
     )
-    matches = sorted(wheel_dir.glob(f"roundtable_messaging-{VERSION}-*.whl"))
+    matches = sorted(wheel_dir.glob(f"pneu-{VERSION}-*.whl"))
     if len(matches) != 1:
         raise InstallError(
-            f"source build produced {len(matches)} Roundtable wheels, expected one"
+            f"source build produced {len(matches)} pneu wheels, expected one"
         )
     return matches[0]
 
 
 def _release_wheel(wheel_dir: Path) -> Path:
-    matches = sorted(wheel_dir.glob(f"roundtable_messaging-{VERSION}-*.whl"))
+    matches = sorted(wheel_dir.glob(f"pneu-{VERSION}-*.whl"))
     if len(matches) != 1:
         raise InstallError(
             f"{wheel_dir} must contain exactly one "
-            f"roundtable_messaging-{VERSION} wheel"
+            f"pneu-{VERSION} wheel"
         )
     return matches[0]
 
@@ -468,6 +896,20 @@ def _bootstrap_has_yaml(bootstrap_python: Path) -> None:
             "source install requires PyYAML in the bootstrap Python; "
             "use a release --wheel-dir for an isolated offline install"
         )
+
+
+def _ensure_roundtable_compatibility_alias(destination: Path) -> None:
+    """Keep the legacy command as a quiet link to the pneu dispatcher."""
+
+    primary = destination / "bin" / "pneu"
+    alias = destination / "bin" / "roundtable"
+    if not primary.is_file():
+        raise InstallError(f"installed wheel is missing the primary command: {primary}")
+    if _lexists(alias):
+        if alias.is_symlink() and os.readlink(alias) == "pneu":
+            return
+        alias.unlink()
+    alias.symlink_to("pneu")
 
 
 def _create_version(
@@ -519,9 +961,10 @@ def _create_version(
                     "--only-binary=:all:",
                     "--find-links",
                     str(wheel_dir),
-                    f"roundtable-messaging=={VERSION}",
+                    f"pneu=={VERSION}",
                 ]
             )
+        _ensure_roundtable_compatibility_alias(destination)
         _run(
             [
                 str(installed_python),
@@ -550,7 +993,7 @@ def _create_version(
                 + "\n".join(f"  - {path}" for path in missing_helpers)
             )
 
-        templates = destination / "share" / "roundtable" / "templates"
+        templates = destination / "share" / "pneu" / "templates"
         if not templates.is_dir():
             raise InstallError(f"installed wheel is missing templates: {templates}")
         missing_assets = [
@@ -672,7 +1115,7 @@ def _validate_version_dir(
                 f"modified: {relative}"
             )
     templates = destination / "templates"
-    expected_templates = destination / "share" / "roundtable" / "templates"
+    expected_templates = destination / "share" / "pneu" / "templates"
     if (
         not templates.is_symlink()
         or templates.resolve(strict=False) != expected_templates.resolve(strict=False)
@@ -684,8 +1127,8 @@ def _validate_version_dir(
 
 def _install_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="roundtable-install",
-        description="Install Roundtable into a versioned private virtual environment.",
+        prog="pneu-install",
+        description="Install pneu into a versioned private virtual environment.",
     )
     parser.add_argument("--prefix", type=Path, default=_prefix_default())
     parser.add_argument("--link-dir", type=Path, default=_link_dir_default())
@@ -710,15 +1153,16 @@ def install_main(argv: list[str] | None = None) -> int:
         if bool(source_root) == bool(wheel_dir_arg):
             raise InstallError("choose exactly one of --source-root or --wheel-dir")
         if source_root and not (source_root / "pyproject.toml").is_file():
-            raise InstallError(f"not a Roundtable source root: {source_root}")
+            raise InstallError(f"not a pneu source root: {source_root}")
         if wheel_dir_arg and not wheel_dir_arg.is_dir():
             raise InstallError(f"wheel directory does not exist: {wheel_dir_arg}")
 
+        migrated_prefix = _migrate_legacy_prefix(prefix)
         prefix_existed = prefix.exists()
         previous = _load_manifest(prefix)
         wrappers, links = _preflight_install(prefix, link_dir, previous)
 
-        with tempfile.TemporaryDirectory(prefix="roundtable-install-") as temporary:
+        with tempfile.TemporaryDirectory(prefix="pneu-install-") as temporary:
             temporary_root = Path(temporary)
             if source_root:
                 _bootstrap_has_yaml(bootstrap_python)
@@ -743,6 +1187,8 @@ def install_main(argv: list[str] | None = None) -> int:
                 wheel_dir=dependency_wheels,
                 source_mode=source_mode,
             )
+            if migrated_prefix:
+                _ensure_migrated_harness_links(prefix)
 
         prefix.mkdir(parents=True, exist_ok=True)
         if not prefix_existed:
@@ -784,9 +1230,9 @@ def install_main(argv: list[str] | None = None) -> int:
             ],
         }
         _atomic_write(_manifest_path(prefix), _json_bytes(manifest), 0o600)
-        print(f"installed Roundtable {VERSION} at {prefix}")
+        print(f"installed pneu {VERSION} at {prefix}")
         print(f"commands linked in {link_dir}")
-        print(f"run now: {link_dir / 'roundtable'}")
+        print(f"run now: {link_dir / 'pneu'}")
         if str(link_dir) not in os.environ.get("PATH", "").split(os.pathsep):
             print(
                 "add to PATH once per shell (persist it in your shell profile): "
@@ -794,7 +1240,7 @@ def install_main(argv: list[str] | None = None) -> int:
             )
         return 0
     except (InstallError, OSError) as error:
-        print(f"roundtable-install: {error}", file=sys.stderr)
+        print(f"pneu-install: {error}", file=sys.stderr)
         return 1
 
 
@@ -902,7 +1348,7 @@ def _remove_launch_agent(label: str, path: Path) -> None:
 def _uninstall_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="roundtable-uninstall",
-        description="Remove only files owned by the Roundtable install manifest.",
+        description="Remove only files owned by the pneu install manifest.",
     )
     parser.add_argument("--prefix", type=Path, default=_prefix_default())
     parser.add_argument(
@@ -913,13 +1359,25 @@ def _uninstall_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _remove_legacy_prefix_link(prefix: Path) -> None:
+    legacy = prefix.parent / LEGACY_PREFIX_NAME
+    if not legacy.is_symlink():
+        return
+    try:
+        target = (legacy.parent / os.readlink(legacy)).resolve(strict=False)
+    except OSError:
+        return
+    if target == prefix:
+        legacy.unlink()
+
+
 def uninstall_main(argv: list[str] | None = None) -> int:
     args = _uninstall_parser().parse_args(argv)
     try:
         prefix = _absolute(args.prefix)
         manifest = _load_manifest(prefix)
         if manifest is None:
-            print(f"Roundtable is already uninstalled from {prefix}")
+            print(f"pneu is already uninstalled from {prefix}")
             return 0
         setup_manifest = _harness_setup_manifest_path(prefix)
         if _lexists(setup_manifest):
@@ -972,6 +1430,10 @@ def uninstall_main(argv: list[str] | None = None) -> int:
                 shutil.rmtree(runtime)
 
         _manifest_path(prefix).unlink(missing_ok=True)
+        migration_manifest = _prefix_migration_manifest(prefix)
+        if migration_manifest.is_file():
+            migration_manifest.unlink()
+            _remove_legacy_prefix_link(prefix)
         for directory in (
             prefix / "skills" / "shared",
             prefix / "skills",
@@ -982,7 +1444,7 @@ def uninstall_main(argv: list[str] | None = None) -> int:
                 directory.rmdir()
             except OSError:
                 pass
-        print(f"uninstalled Roundtable from {prefix}")
+        print(f"uninstalled pneu from {prefix}")
         print(
             "preserved project registry, UUID layout locks, "
             "registry-selected local/central mailboxes, bookmarks, "
