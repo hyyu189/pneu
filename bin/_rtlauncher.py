@@ -34,15 +34,20 @@ COMMANDS = {
     "claude": ["claude"],
     "codex": ["codex", "--remote", "unix://"],
     "hermes": ["hermes"],
+    # OpenClaw is launched through rt-openclaw-wake, not attached to a
+    # pre-existing native Gateway service.
+    "openclaw": ["openclaw"],
 }
 EXECUTABLE_OVERRIDES = {
     "claude": "RT_CLAUDE_BIN",
     "hermes": "RT_HERMES_BIN",
+    "openclaw": "RT_OPENCLAW_BIN",
 }
 CONFIG_HARNESSES = {
     "claude": frozenset({"claude", "claude-code"}),
     "codex": frozenset({"codex"}),
     "hermes": frozenset({"hermes", "hermes-agent"}),
+    "openclaw": frozenset({"openclaw", "openclaw-gateway"}),
 }
 CMUX_SHIM_PARTS = frozenset({"cmux-cli-shims"})
 CMUX_WRAPPER_NAMES = frozenset({"cmux-claude-wrapper", "cmux-codex-wrapper"})
@@ -257,6 +262,18 @@ def normalize_runtime_environment() -> Path:
     os.environ["RT_RUNTIME_DIR"] = rendered
     os.environ["RT_CODEX_RUNTIME_DIR"] = rendered
     return selected
+
+
+def openclaw_adapter_bin() -> Path:
+    """Resolve the managed OpenClaw wake bridge beside this launcher."""
+
+    candidate = Path(__file__).resolve().parent / "rt-openclaw-wake"
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return candidate
+    raise SelectionError(
+        "rt-openclaw: managed rt-openclaw-wake is unavailable; reinstall "
+        "Roundtable or use the source-tree launcher"
+    )
 
 
 def codex_seat_overrides() -> list[str]:
@@ -484,7 +501,9 @@ def choose_launch_cwd(
     can_setup_here = cwd not in {Path.home().resolve(), Path(cwd.anchor)}
     setup_here_index = len(roots) + 1 if can_setup_here else None
     create_index = len(roots) + 1 + int(can_setup_here)
-    unanchored_index = create_index + 1 if harness != "codex" else None
+    unanchored_index = (
+        create_index + 1 if harness not in {"codex", "openclaw"} else None
+    )
     if setup_here_index is not None:
         print(
             f"  {setup_here_index}) Set up this folder safely: {cwd}",
@@ -566,8 +585,14 @@ def launch(harness: str, argv: list[str]) -> int:
                 "so its host service lease and native-thread binding are safe; "
                 "choose or initialize a project, or run native `codex` directly"
             )
+        if harness == "openclaw":
+            raise SelectionError(
+                "rt-openclaw: Roundtable OpenClaw requires a Roundtable project "
+                "anchor so its Gateway lease and durable mailbox are safe; "
+                "choose or initialize a project, or run native `openclaw` directly"
+            )
     agent_id = set_launch_identity(root, harness)
-    if root is not None or harness == "codex":
+    if root is not None or harness in {"codex", "openclaw"}:
         normalize_runtime_environment()
     executable = harness_bin(harness)
     codex_argv = (
@@ -609,6 +634,15 @@ def launch(harness: str, argv: list[str]) -> int:
         preflight_codex_services(ready_action=claim_and_arm_codex)
     else:
         claim_launch_seat(root, harness, agent_id)
+    if harness == "openclaw":
+        # Transfer the already-claimed lease to the managed adapter in this
+        # same PID. The native OpenClaw CLI is never allowed to discover or
+        # attach to the user's personal Gateway.
+        os.environ["RT_OPENCLAW_BIN"] = str(executable)
+        adapter = openclaw_adapter_bin()
+        command = [str(adapter), "--gateway-bin", str(executable), *argv]
+        os.execv(command[0], command)
+        return 127
     command = [*COMMANDS[harness]]
     if harness == "claude" and root is not None and not argv:
         # A bare Claude launch may open the user's FleetView/Remote Control

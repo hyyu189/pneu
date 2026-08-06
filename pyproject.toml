@@ -58,6 +58,8 @@ script-files = [
   "bin/rt-doctor",
   "bin/rt-hermes",
   "bin/rt-inbox",
+  "bin/rt-openclaw",
+  "bin/rt-openclaw-wake",
   "bin/rt-projects",
   "bin/rt-refresh",
   "bin/rt-resolve",
@@ -83,6 +85,9 @@ package-dir = { "" = "bin", "roundtable_packaging" = "roundtable_packaging" }
   "integrations/hermes/roundtable/__init__.py",
   "integrations/hermes/roundtable/plugin.yaml",
 ]
+"share/roundtable/integrations/openclaw/roundtable" = [
+  "integrations/openclaw/roundtable/__init__.py",
+]
 "share/roundtable/skills/shared/roundtable" = [
   "skills/shared/roundtable/SKILL.md",
 ]
@@ -101,3 +106,6 @@ package-dir = { "" = "bin", "roundtable_packaging" = "roundtable_packaging" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+  "integration: opt-in live harness or Gateway integration test",
+]
