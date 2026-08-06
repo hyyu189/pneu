@@ -109,6 +109,7 @@ class ACPClient:
         self._received: queue.Queue[dict[str, Any]] = queue.Queue()
         self._next_id = 1
         self._threads: list[threading.Thread] = []
+        self.permission_decisions: list[dict[str, Any]] = []
         self.process = subprocess.Popen(
             command,
             cwd=cwd,
@@ -160,6 +161,63 @@ class ACPClient:
                     event["json_error"] = True
             self._record(event)
 
+    @staticmethod
+    def _allowed_lab_command(command: str) -> bool:
+        if command == "rt-inbox -f json":
+            return True
+        if not command.startswith("RT_FROM=grok rt-ack "):
+            return False
+        # Keep the lab approval narrow: one direct ack command, no shell
+        # operators, substitutions, redirects, or backgrounding.
+        if any(
+            token in command
+            for token in (";", "&", "|", ">", "<", "`", "$", "(", ")")
+        ):
+            return False
+        return bool(
+            re.fullmatch(
+                r"RT_FROM=grok rt-ack [A-Za-z0-9_-]+(?: [^\r\n]*)?", command
+            )
+        )
+
+    def _answer_permission(self, message: dict[str, Any]) -> None:
+        params = message.get("params") or {}
+        tool_call = params.get("toolCall") or {}
+        raw_input = tool_call.get("rawInput") or {}
+        command = str(raw_input.get("command") or "")
+        allowed = self._allowed_lab_command(command)
+        option_id = "allow-once" if allowed else "reject-once"
+        response = {
+            "jsonrpc": "2.0",
+            "id": message.get("id"),
+            "result": {
+                "outcome": {
+                    "outcome": "selected",
+                    "optionId": option_id,
+                }
+            },
+        }
+        if self.process.stdin is None:
+            raise RuntimeError("ACP stdin is unavailable")
+        self.process.stdin.write(encode(response) + "\n")
+        self.process.stdin.flush()
+        decision = {
+            "at": utc_now(),
+            "command": command,
+            "allowed": allowed,
+            "option_id": option_id,
+            "request_id": message.get("id"),
+        }
+        self.permission_decisions.append(decision)
+        self._record(
+            {
+                "at": decision["at"],
+                "kind": "permission_response",
+                "json": response,
+                "decision": decision,
+            }
+        )
+
     def request(
         self,
         method: str,
@@ -194,6 +252,13 @@ class ACPClient:
                 continue
             message = event["json"]
             if not isinstance(message, dict):
+                continue
+            if (
+                message.get("method") == "session/request_permission"
+                and message.get("id") is not None
+            ):
+                self._answer_permission(message)
+                notifications.append(message)
                 continue
             if message.get("id") == request_id:
                 return message, {
@@ -541,6 +606,7 @@ def main() -> int:
                 "meta": second_meta,
             }
         result["mail_after_prompt"] = list_lab_inbox(environment, project)
+        result["primary"]["permission_decisions"] = primary.permission_decisions
         result["primary"]["alive_before_close"] = primary.process.poll() is None
     finally:
         if primary is not None:

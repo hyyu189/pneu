@@ -8,8 +8,9 @@ was installed in the dedicated user-level prefix
 `GROK_HOME`; no system daemon, LaunchAgent, live Roundtable runtime wiring, or
 Roundtable product implementation was performed. The original live
 `~/.grok/hooks` files were preserved, and the npm postinstall artifacts it
-created in live `~/.grok` were removed after capture. The Stage 2 ACP lab is
-complete; valid authentication and end-to-end delivery remain gated.
+created in live `~/.grok` were removed after capture. The authenticated Stage 2
+ACP lab now completes one isolated mail-to-wake-to-drain-to-ack generation;
+product support remains gated on the adapter lifecycle and release criteria.
 
 ## Executive conclusion
 
@@ -20,24 +21,24 @@ JSON-RPC stdio.
 
 The safe current recommendation is:
 
-1. Keep durable Roundtable mail plus manual drain as an internal fallback, but
-   do not claim even T0 publicly until automatic wake is proven end to end.
+1. Keep durable Roundtable mail plus manual drain as the T0 fallback. The
+   authenticated ACP run below is a bounded T2 lab result, not a public
+   production-support claim.
 2. Do not claim T1 support yet. Session hooks are documented, but the public
    contract does not document a way for a hook to inject a new user turn into
    an already-running interactive TUI.
-3. Investigate an ACP subprocess or current local agent-service adapter as the
-   likely automatic-wake path. Stage 1 verified the protocol and local service
-   surfaces, but not authentication, a real prompt, reconnect/recovery, or
-   safe config isolation; it remains a research candidate and is not T2
-   support.
+3. Productize only the explicit ACP subprocess design documented below. The
+   lab proves authentication, prompt delivery, permission negotiation, and one
+   mail-to-wake-to-drain/ack generation, but not session resume after death,
+   duplicate-seat fencing under contention, or two-generation recovery.
 
 The Stage 1 update below supersedes the initial “not exposed in the public
 CLI” conclusions where the installed `0.2.118` binary provides stronger
 evidence, while retaining the support and safety gates.
 
-Stage 2 below is the current status: the ACP transport is responsive, but the
-authenticated prompt and mail-to-wake-to-drain/ack loop did not complete.
-Grok remains unclaimed.
+The unauthenticated Stage 2 baseline below records the original blocker. The
+authenticated rerun at the end supersedes its claim status: Grok is now
+**T2-lab-verified / production-unclaimed**.
 
 ## Observed official surface
 
@@ -287,7 +288,7 @@ its two pre-existing hook files are unrelated user state.
 | ACP stdio is a resident subprocess surface | Verified, auth-gated | `grok agent stdio` answered ACP `initialize`, stayed alive with stdin held, returned `Authentication required` for `session/new`, and exited cleanly on EOF. No authenticated session or real prompt was run. |
 | No local service/socket surface exists | Refuted for the current binary | `agent serve` exposed a local WebSocket at `127.0.0.1:2420` with a server key, and `agent leader` opened a custom Unix socket. The ACP handshake worked over WebSocket; `leader list` did not find a candidate, so leader discovery remains unresolved. |
 | The process can be lease-owned | Process-level candidate verified | The lab observed a dedicated leader PID and socket, and the ACP stdio process remained resident until stopped. Lease fencing, duplicate ownership, crash recovery, and reconnect are still untested. |
-| Authentication works headlessly | Not verified | ACP advertised the `grok.com` auth method; `session/new` without auth failed, and the fake API key produced HTTP 400. No browser/device-auth or valid API-key test was authorized in this run. |
+| Authentication works headlessly | Verified in bounded lab | A read-only key extracted from the existing live login state authenticated ACP `session/new` and two `session/prompt` calls in the scratch environment; the intentional fake-key probe still returned HTTP 400. The key value was never logged or persisted by the lab. |
 
 ### Adapter design revisions
 
@@ -316,7 +317,7 @@ its two pre-existing hook files are unrelated user state.
   `agent serve`/`leader` surfaces are viable integration candidates, but auth,
   isolation, prompt delivery, reconnect, and end-to-end delivery are open.
 
-## Stage 2 ACP subprocess experiment — 2026-08-05
+## Stage 2 ACP subprocess experiment — 2026-08-05 (unauthenticated baseline)
 
 The committed lab runner is
 [`scripts/grok_acp_stage2_lab.py`](../scripts/grok_acp_stage2_lab.py). It is
@@ -373,21 +374,16 @@ No second physical delivery was present.
 
 ### Conclusion and upstream ask
 
-The ACP path is **protocol-viable but delivery-unproven**. This run does not
-disprove that a valid authenticated Grok account could complete the loop, but
-it does prove that an adapter cannot treat `initialize` or `session/new` as a
-successful wake. With the available isolated credentials, the exact blocker
-is authenticated `session/prompt`; consequently Grok is parked at **unclaimed**
-and no T0/T1/T2 support claim is made publicly.
+The ACP path was **protocol-viable but delivery-unproven in this baseline**.
+This run did not disprove that a valid authenticated Grok account could
+complete the loop; it proved that an adapter cannot treat `initialize` or
+`session/new` as a successful wake. The authenticated rerun below resolves the
+credential blocker while retaining the remaining lifecycle gates.
 
-The upstream ask is an explicit, documented headless ACP auth contract that
-works in a scratch `HOME` without opening a browser, reports auth expiry as a
-stable machine-readable error, and supports a fresh authenticated
-`session/new` followed by `session/prompt`. The contract should also document
-whether a new stdio child can load an existing session after process death, or
-provide a stable reconnect/resume mechanism. Roundtable should not productize
-an adapter until that auth/reconnect contract and a real mail-to-wake-to-drain/
-ack run are demonstrated.
+The remaining upstream ask is a documented auth-expiry contract and a
+session-resume/reconnect contract. The authenticated rerun demonstrates the
+fresh-child path and one real mail-to-wake-to-drain/ack run, but not resume of
+an existing session after process death.
 
 ### Stage 2 adapter position
 
@@ -398,6 +394,99 @@ ack run are demonstrated.
   revision as authoritative health evidence.
 - Do not add Grok launcher/runtime wiring, hooks, daemon jobs, or LaunchAgents
   from this experiment.
+
+## Authenticated Stage 2 ACP rerun — 2026-08-05
+
+This rerun supersedes the unauthenticated baseline above. It used the
+previously recorded user-level `0.2.118` launcher and a fresh lab root:
+
+```text
+mamba run -n general python scripts/grok_acp_stage2_lab.py \
+  --lab-root /private/tmp/rt-grok-stage2-auth3.j6RZdj
+```
+
+The existing live login state was read only to obtain the credential for the
+child environment. Its value was never printed, stored in the lab, committed,
+or included in this handoff. A pre/post metadata check showed the live auth
+file unchanged (`1711` bytes and the same modification time). The lab kept
+the project, registry, `HOME`, `GROK_HOME`, XDG roots, and Roundtable mailbox
+under the scratch root; the existing general environment's PyYAML path was
+passed through explicitly so `rt-inbox` could run without an install.
+
+### Verified evidence
+
+- **Authenticated ACP session:** `initialize`, `session/new`, and two
+  `session/prompt` requests succeeded. The primary session used model
+  `grok-4.20-0309-non-reasoning`; both prompts returned `stopReason: end_turn`
+  while the child remained alive.
+- **Process/session reuse:** both prompts used session
+  `019fd4d1-bfe4-7342-9372-a72776c98a14` in one resident primary ACP child;
+  the child remained alive before the lab closed it.
+- **Permission protocol:** the runner handled ACP
+  `session/request_permission` with a fail-closed lab policy. It allowed
+  exactly `rt-inbox -f json`, the exact `RT_FROM=grok rt-ack <message-id>`,
+  and the final `rt-inbox -f json`; an attempted `pip install PyYAML` in the
+  earlier rerun was rejected. No product runtime or live environment was
+  granted these lab decisions.
+- **Mail-to-wake-to-drain-to-ack:** the lab delivered
+  `20260806T020547Z-codex-to-grok-88428`. ACP Grok ran `rt-inbox`, then
+  acknowledged that exact id once; the final `rt-inbox -f json` returned `[]`.
+  The lab ended with zero physical files in `grok/new/` and one archived file
+  in `grok/cur/`. The two initial records were the expected maildir and
+  pending-ledger views of one logical message.
+- **Invalid-auth guard:** the intentional fake-key probe returned the
+  machine-visible ACP error `-32603` with HTTP 400 `Incorrect API key
+  provided`, without weakening the authenticated path.
+- **Death/restart:** a child died with SIGKILL (`-9`), and a fresh child
+  initialized successfully with the same stable agent id and a new process/
+  instance identity. Existing-session resume was not attempted; ACP recovery
+  currently means a new child and a new authenticated session.
+
+### Productization adapter design
+
+1. **Seat supervisor and fencing.** Start one user-owned `grok agent
+   --no-leader stdio` child per fenced Roundtable seat. Persist only a
+   non-secret PID/lease record, require the current lease revision for every
+   send/drain/ack action, and refuse duplicate or ambiguous ownership. Do not
+   add a daemon, LaunchAgent, or live Roundtable wiring in this phase.
+2. **Hermetic preflight.** Construct a declared child environment with the
+   project cwd, `HOME`, `GROK_HOME`, XDG roots, Roundtable registry, `RT_FROM`,
+   and the installed Roundtable/PyYAML runtime. Run an inspection gate and
+   fail closed if live Claude config, MCP servers, hooks, or plugins leak
+   into the child. The lab's explicit PyYAML path is a packaging requirement,
+   not permission to install dependencies at runtime.
+3. **Auth gate.** Read existing auth material only through an approved
+   credential boundary; never echo, persist, or put it in logs or handoffs.
+   Require successful ACP `initialize` plus authenticated `session/new`
+   before sending a wake prompt. Map expiry/invalid credentials to a stable
+   blocked state and retain the manual T0 drain.
+4. **Wake and permission bridge.** Convert one inbound Roundtable wake into
+   one `session/prompt`, keep the prompt tiny and explicit, and service ACP
+   `session/request_permission` requests through an operator/policy callback.
+   Default deny; never use the lab's command allowlist as a production
+   blanket approval policy. Only acknowledge mail after the agent reports a
+   successful drain/ack and the supervisor verifies the mailbox state.
+5. **Lifecycle and recovery.** Record structured `session/update`, stop
+   reason, stdout/stderr, PID, agent id/instance id, duration, and lease
+   revision evidence. Keep the child for subsequent prompts, detect EOF,
+   timeout, SIGTERM/SIGKILL, and stale leases, then start a new child and
+   explicitly create or load a session. Resume behavior remains a release
+   gate because this lab only verified new-child initialization.
+6. **Release gates.** Before a public support claim, run two independent
+   send-to-wake-to-drain-to-ack generations, a permission-denial path, lease
+   contention, process death, recovery, auth expiry, and a release-artifact
+   install smoke test. Preserve the maildir as fact source and prove both
+   logical inbox emptiness and physical `new/` emptiness after each drain.
+
+### Current tier claim
+
+- **T0 — claimable:** durable Roundtable mail plus manual drain.
+- **T1 — unverified:** lifecycle hooks are real, but hook-to-new-turn
+  injection is not established.
+- **T2 — lab-verified / production-unclaimed:** authenticated ACP wake and
+  one complete mail-to-wake-to-drain-to-ack generation are verified in a
+  scratch lab. Public support still requires the lifecycle, recovery,
+  packaging, and two-generation gates above.
 
 ## Boundary and safety notes
 
