@@ -1,0 +1,809 @@
+#!/usr/bin/env python3
+"""Unified project-first entry point for pneu."""
+
+from __future__ import annotations
+
+import os
+import json
+import re
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+from _rtlauncher import (
+    SelectionError,
+    configured_sender_ids,
+    harness_bin,
+    project_at_or_above,
+    run_onboarding_init,
+)
+from _rtlib import (
+    ProjectRegistryError,
+    active_project_entries,
+    emit_registry_warnings,
+    is_project_root,
+    load_project_registry,
+    resolve_project_mailbox_checked,
+)
+
+
+ALIASES = {
+    "init": "roundtable-init",
+    "setup": "roundtable-setup",
+    "doctor": "rt-doctor",
+    "projects": "rt-projects",
+    "smoke": "roundtable-smoke",
+    "uninstall": "roundtable-uninstall",
+    "claude": "rt-claude",
+    "hermes": "rt-hermes",
+    "codex": "rt-codex",
+    "openclaw": "rt-openclaw",
+    "grok": "rt-grok",
+    "send": "rt-say",
+    "inbox": "rt-inbox",
+    "ack": "rt-ack",
+    "worktree": "rt-worktree",
+}
+HARNESS_ORDER = ("claude", "codex", "hermes", "grok")
+PROMPT_ATTEMPTS = 3
+
+HELP = """usage: pneu [command] [args...]
+
+Run without a command in a terminal for project-first onboarding.
+
+commands:
+  guide      Explain the local-mailroom and harness-wake model
+  version    Report the live version, install prefix, and current target
+  init       Create or safely set up a pneu project
+  setup      Preview or explicitly manage harness integration
+  doctor     Diagnose the current pneu project
+  projects   List or manage registered projects
+  smoke      Test the installed package
+  uninstall  Remove the managed pneu package
+  claude     Launch a Claude seat
+  hermes     Launch a Hermes seat
+  codex      Launch a Codex seat
+  openclaw   Launch an isolated OpenClaw Gateway seat
+  grok       Launch an isolated Grok ACP seat
+  send       Send a durable message
+  inbox      Read a durable inbox
+  ack        Acknowledge a durable message
+  worktree   Add, list, or remove a registered Git worktree project
+"""
+
+ASCII_GUIDE = """
++------------------------------------------------------------------+
+| pneu = a local mailroom for coding-agent seats             |
++------------------------------------------------------------------+
+| Claude       Codex       Hermes                                  |
+|    |           |            |                                    |
+|    +-----------+------------+                                    |
+|                |                                                 |
+|                v                                                 |
+|       project mailbox: new/  ->  cur/                            |
+|                |                                                 |
+|                v                                                 |
+|       the recipient agent works and acknowledges                 |
++------------------------------------------------------------------+
+
+Delivery and wake-up are separate:
+  1. rt-say writes a durable message file. That is delivery.
+  2. A live harness may notice the file and start a turn.
+  3. The agent acts, then rt-ack archives the message.
+  4. If the agent is offline, the message waits in new/.
+
+Wake-up paths in this release:
+  Claude  SessionStart/Stop hooks arm and re-arm the tripwire.
+  Hermes  the session-start plugin owns the tripwire lifecycle.
+  Codex   the app-server and Unix-socket notification bridge wake the seat;
+          the SessionStart hook binds the native thread to its lease.
+
+Tripwire means "watch for mail and request a harness-native turn".
+It is not the mailbox and it is not keyboard injection.
+
+Grok Build and OpenClaw use isolated, fail-closed wake adapters; each remains
+subject to its own live credentialed E2E and release-artifact promotion gates.
+
+Tip: run `pneu guide` any time to show this tutorial again.
+""".lstrip()
+
+
+class OnboardingError(RuntimeError):
+    pass
+
+
+def sibling(name: str) -> Path:
+    target = Path(__file__).resolve().parent / name
+    if target.is_file() and os.access(target, os.X_OK):
+        return target
+    fallback = shutil.which(name)
+    if fallback:
+        return Path(fallback).resolve()
+    raise OnboardingError(f"pneu: installed command is unavailable: {target}")
+
+
+def version_report() -> str:
+    """Describe the version and installation selected by this executable."""
+
+    configured_prefix = os.environ.get("ROUNDTABLE_INSTALL_PREFIX", "").strip()
+    prefix = Path(configured_prefix).expanduser().resolve() if configured_prefix else None
+    manifest = prefix / "install-manifest.json" if prefix is not None else None
+    manifest_data = {}
+    if manifest is not None:
+        try:
+            payload = json.loads(manifest.read_text())
+            if isinstance(payload, dict):
+                manifest_data = payload
+        except (OSError, ValueError):
+            manifest_data = {}
+
+    version = manifest_data.get("version")
+    if not isinstance(version, str) or not version:
+        pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
+        try:
+            match = re.search(
+                r'^version\s*=\s*["\']([^"\']+)["\']',
+                pyproject.read_text(),
+                re.MULTILINE,
+            )
+        except OSError:
+            match = None
+        version = match.group(1) if match else "unknown"
+
+    if prefix is None:
+        prefix_line = "source checkout (not installed)"
+        target_line = "source tree (no current symlink)"
+    else:
+        prefix_line = str(prefix)
+        current = prefix / "current"
+        try:
+            target_line = os.readlink(current) if current.is_symlink() else "missing"
+        except OSError as error:
+            target_line = f"unreadable ({error})"
+    return (
+        f"version: {version}\n"
+        f"install prefix: {prefix_line}\n"
+        f"current target: {target_line}"
+    )
+
+
+def execute(name: str, args: list[str], exec_runner=os.execv) -> int:
+    target = sibling(name)
+    result = exec_runner(str(target), [str(target), *args])
+    return 127 if result is None else int(result)
+
+
+def read_choice(stdin, stderr, prompt: str, *, parse=None):
+    """Read a prompt with bounded retries for invalid interactive input."""
+
+    last_error = None
+    for attempt in range(PROMPT_ATTEMPTS):
+        print(prompt, end="", file=stderr, flush=True)
+        value = stdin.readline()
+        if value == "":
+            if last_error is not None:
+                raise last_error
+            raise OnboardingError("pneu: input closed during onboarding")
+        value = value.strip()
+        if parse is None:
+            return value
+        try:
+            return parse(value)
+        except OnboardingError as error:
+            last_error = error
+            if attempt + 1 == PROMPT_ATTEMPTS:
+                raise
+            print(f"{error}; please try again.", file=stderr)
+    raise last_error
+
+
+def read_yes_no(stdin, stderr, prompt: str) -> bool:
+    def parse(value):
+        value = value.lower()
+        if value in {"", "n", "no"}:
+            return False
+        if value in {"y", "yes"}:
+            return True
+        raise OnboardingError(
+            f"pneu: expected yes or no, got {value!r}"
+        )
+
+    return read_choice(stdin, stderr, prompt, parse=parse)
+
+
+def _setup_json(
+    command: str,
+    harness: str,
+    *,
+    home: Path,
+    prefix: Path,
+    environ,
+    setup_runner=subprocess.run,
+) -> dict:
+    invocation = [
+        str(sibling("roundtable-setup")),
+        command,
+        "--harness",
+        harness,
+        "--home",
+        str(home),
+        "--prefix",
+        str(prefix),
+        "--json",
+    ]
+    process_environment = dict(os.environ)
+    process_environment.update(environ)
+    try:
+        result = setup_runner(
+            invocation,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            env=process_environment,
+        )
+    except OSError as error:
+        raise OnboardingError(
+            f"pneu: cannot run one-time {harness} setup: {error}"
+        ) from error
+    try:
+        payload = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError) as error:
+        detail = (result.stderr or result.stdout or "invalid setup output").strip()
+        raise OnboardingError(
+            f"pneu: cannot inspect one-time {harness} setup: {detail}"
+        ) from error
+    if result.returncode != 0 or payload.get("ok") is not True:
+        detail = payload.get("error") or result.stderr.strip() or f"exit {result.returncode}"
+        raise OnboardingError(
+            f"pneu: {harness} integration is not ready: {detail}"
+        )
+    return payload
+
+
+def ensure_harness_setup(
+    harness: str,
+    *,
+    home: Path,
+    stdin,
+    stderr,
+    environ,
+    setup_runner=subprocess.run,
+) -> None:
+    """Run the installed package's ownership-safe setup once per harness."""
+
+    if harness in {"grok", "openclaw"}:
+        # These adapters own their own isolated child state and do not install
+        # hooks, plugins, or LaunchAgents.
+        return
+
+    configured_prefix = environ.get("ROUNDTABLE_INSTALL_PREFIX")
+    if not configured_prefix:
+        # Source-tree/developer invocations intentionally keep setup explicit.
+        return
+    prefix = Path(configured_prefix).expanduser().resolve()
+    status = _setup_json(
+        "status",
+        harness,
+        home=home,
+        prefix=prefix,
+        environ=environ,
+        setup_runner=setup_runner,
+    )
+    detail = status.get("harnesses", {}).get(harness, {})
+    if detail.get("state") == "configured":
+        return
+
+    plan = _setup_json(
+        "plan",
+        harness,
+        home=home,
+        prefix=prefix,
+        environ=environ,
+        setup_runner=setup_runner,
+    )
+    planned = plan.get("harnesses", {}).get(harness, {})
+    print(f"One-time {harness} integration setup:", file=stderr)
+    for action in planned.get("actions", []):
+        print(f"  - {action}", file=stderr)
+    if not read_yes_no(stdin, stderr, "Apply these managed changes? [y/N]: "):
+        raise OnboardingError(
+            f"pneu: {harness} setup was not applied; nothing was launched"
+        )
+    _setup_json(
+        "apply",
+        harness,
+        home=home,
+        prefix=prefix,
+        environ=environ,
+        setup_runner=setup_runner,
+    )
+    if harness == "codex":
+        print(
+            "Codex may ask once to review the pneu SessionStart hook. "
+            "Approve it with /hooks; pneu never bypasses hook trust.",
+            file=stderr,
+        )
+
+
+def canonical_existing_folder(raw: str, cwd: Path) -> Path:
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = cwd / candidate
+    if candidate.is_symlink():
+        raise OnboardingError(
+            f"pneu: refusing symbolic-link project folder: {candidate}"
+        )
+    try:
+        # ``Path.resolve()`` changed its non-strict symlink-loop behavior in
+        # Python 3.13.  A project anchor must already exist, so resolve it
+        # strictly and reject loops/missing components consistently on every
+        # supported interpreter.
+        resolved = candidate.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise OnboardingError(
+            f"pneu: cannot resolve project folder {candidate}: {error}"
+        ) from error
+    if not resolved.is_dir():
+        raise OnboardingError(
+            f"pneu: project folder does not exist: {resolved}"
+        )
+    return resolved
+
+
+def forbidden_project_root(root: Path, home: Path) -> bool:
+    resolved = root.expanduser().resolve()
+    filesystem_root = Path(resolved.anchor)
+    return resolved in {home.expanduser().resolve(), filesystem_root}
+
+
+def run_init_here(
+    root: Path,
+    *,
+    initialize_git: bool,
+    init_runner=subprocess.run,
+) -> Path:
+    command = [str(sibling("roundtable-init")), "--here"]
+    if initialize_git:
+        command.append("--git")
+    result = run_onboarding_init(
+        init_runner, command, cwd=root, check=False
+    )
+    if result.returncode != 0:
+        if is_project_root(root):
+            raise OnboardingError(
+                f"pneu: project already created at {root}; run "
+                "pneu again and choose it from the list"
+            )
+        raise OnboardingError(
+            f"pneu: project setup failed with exit {result.returncode}"
+        )
+    if not is_project_root(root):
+        raise OnboardingError(
+            f"pneu: setup completed without creating a project at {root}"
+        )
+    return root
+
+
+def create_project(
+    cwd: Path,
+    *,
+    stdin,
+    stderr,
+    home: Path,
+    init_runner=subprocess.run,
+) -> Path:
+    def parse_parent(raw_parent):
+        return canonical_existing_folder(raw_parent or str(cwd), cwd)
+
+    parent = read_choice(
+        stdin, stderr, f"Parent folder [{cwd}]: ", parse=parse_parent
+    )
+
+    def parse_name(name):
+        if not name:
+            raise OnboardingError("pneu: new folder name cannot be empty")
+        return name
+
+    name = read_choice(stdin, stderr, "New folder name: ", parse=parse_name)
+    initialize_git = read_yes_no(
+        stdin, stderr, "Initialize Git too? [y/N]: "
+    )
+    target = (parent / name).resolve()
+    if forbidden_project_root(target, home):
+        raise OnboardingError(
+            "pneu: refusing to use the home or filesystem root as a project"
+        )
+    command = [
+        str(sibling("roundtable-init")),
+        name,
+        "--parent",
+        str(parent),
+    ]
+    if initialize_git:
+        command.append("--git")
+    result = run_onboarding_init(
+        init_runner, command, cwd=cwd, check=False
+    )
+    if result.returncode != 0:
+        if is_project_root(target):
+            raise OnboardingError(
+                f"pneu: project already created at {target}; run "
+                "pneu again and choose it from the list"
+            )
+        raise OnboardingError(
+            f"pneu: project creation failed with exit {result.returncode}"
+        )
+    if not is_project_root(target):
+        raise OnboardingError(
+            f"pneu: creation completed without a project at {target}"
+        )
+    return target
+
+
+def choose_registered_project(
+    roots: list[Path],
+    *,
+    stdin,
+    stderr,
+) -> Path:
+    print("Choose an existing pneu project:", file=stderr)
+    for index, root in enumerate(roots, 1):
+        print(f"  {index}) {root}", file=stderr)
+    def parse_selection(raw):
+        try:
+            selected = int(raw)
+        except ValueError as error:
+            raise OnboardingError(
+                f"pneu: invalid existing project selection: {raw!r}"
+            ) from error
+        if not 1 <= selected <= len(roots):
+            raise OnboardingError(
+                f"pneu: invalid existing project selection: {raw!r}"
+            )
+        return roots[selected - 1]
+
+    return read_choice(
+        stdin, stderr, "Select existing project: ", parse=parse_selection
+    )
+
+
+def preflight_project_selection(root: Path) -> Path:
+    """Validate durable identity and layout before onboarding a seat."""
+
+    try:
+        mailbox = resolve_project_mailbox_checked(root)
+    except ProjectRegistryError as error:
+        raise OnboardingError(
+            f"pneu: project registration preflight failed for "
+            f"{root}: {error}"
+        ) from error
+    return mailbox.project_root
+
+
+def choose_project(
+    *,
+    cwd: Path,
+    home: Path,
+    stdin,
+    stderr,
+    init_runner=subprocess.run,
+) -> Path:
+    anchored = project_at_or_above(cwd)
+    if anchored is not None and not forbidden_project_root(anchored, home):
+        print(f"pneu project: {anchored}", file=stderr)
+        return preflight_project_selection(anchored)
+
+    if anchored is None:
+        print(
+            f"This folder is not a pneu project yet: {cwd}",
+            file=stderr,
+        )
+
+    entries, warnings = load_project_registry()
+    emit_registry_warnings(warnings, stream=stderr, tool="pneu")
+    registered_roots = [
+        entry["root"]
+        for entry in active_project_entries(entries, available_only=True)
+        if not forbidden_project_root(entry["root"], home)
+    ]
+    if not registered_roots:
+        print(
+            "\n"
+            "  [project folder]\n"
+            "         |\n"
+            "  [durable mailboxes]\n"
+            "     /    |    \\\n"
+            " Claude  Codex  Hermes\n"
+            "\n"
+            "A pneu project can be any folder; Git is optional.\n",
+            file=stderr,
+        )
+    options = []
+    if registered_roots:
+        options.append(("registered", None))
+    if not forbidden_project_root(cwd, home):
+        options.append(("here", cwd))
+    options.extend((("another", None), ("create", None)))
+
+    print("Choose a pneu project:", file=stderr)
+    for index, (kind, value) in enumerate(options, 1):
+        if kind == "registered":
+            label = "Choose an existing project"
+        elif kind == "here":
+            label = f"Set up this folder safely: {cwd}"
+        elif kind == "another":
+            label = "Set up another existing folder"
+        else:
+            label = "Create a new folder"
+        print(f"  {index}) {label}", file=stderr)
+
+    def parse_selection(raw):
+        try:
+            selected = int(raw)
+        except ValueError as error:
+            raise OnboardingError(
+                f"pneu: invalid project selection: {raw!r}"
+            ) from error
+        if not 1 <= selected <= len(options):
+            raise OnboardingError(
+                f"pneu: invalid project selection: {raw!r}"
+            )
+        return options[selected - 1]
+
+    kind, value = read_choice(
+        stdin, stderr, "Select project: ", parse=parse_selection
+    )
+
+    if kind == "registered":
+        return preflight_project_selection(
+            choose_registered_project(
+                registered_roots,
+                stdin=stdin,
+                stderr=stderr,
+            )
+        )
+    if kind == "create":
+        root = create_project(
+            cwd,
+            stdin=stdin,
+            stderr=stderr,
+            home=home,
+            init_runner=init_runner,
+        )
+        try:
+            return preflight_project_selection(root)
+        except OnboardingError as error:
+            raise OnboardingError(
+                f"{error}; project already created at {root}; run pneu "
+                "again and choose it from the list"
+            ) from error
+    if kind == "another":
+        root = read_choice(
+            stdin,
+            stderr,
+            "Existing folder path: ",
+            parse=lambda raw: canonical_existing_folder(raw, cwd),
+        )
+    else:
+        root = cwd
+    if forbidden_project_root(root, home):
+        raise OnboardingError(
+            "pneu: refusing to use the home or filesystem root as a project"
+        )
+    initialize_git = read_yes_no(
+        stdin, stderr, "Initialize Git too? [y/N]: "
+    )
+    root = run_init_here(
+        root,
+        initialize_git=initialize_git,
+        init_runner=init_runner,
+    )
+    try:
+        return preflight_project_selection(root)
+    except OnboardingError as error:
+        raise OnboardingError(
+            f"{error}; project already created at {root}; run pneu "
+            "again and choose it from the list"
+        ) from error
+
+
+def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
+    seats = []
+    unavailable: list[tuple[str, str]] = []
+    for harness in HARNESS_ORDER:
+        try:
+            ids = configured_sender_ids(root, harness)
+        except SelectionError as error:
+            raise OnboardingError(f"pneu: {error}") from error
+        if not ids:
+            continue
+        try:
+            harness_bin(harness)
+        except SelectionError as error:
+            unavailable.append((harness, str(error)))
+            continue
+        seats.extend((harness, agent_id) for agent_id in ids)
+    if not seats:
+        detail = " | ".join(f"{name}: {error}" for name, error in unavailable)
+        raise OnboardingError(
+            f"pneu: no launchable configured harness seats in {root}"
+            + (f"; {detail}" if detail else "")
+        )
+
+    print("Choose a harness seat:", file=stderr)
+    for index, (harness, agent_id) in enumerate(seats, 1):
+        activation_hint = (
+            " (starts with a visible automatic pneu activation turn)"
+            if harness == "codex"
+            else ""
+        )
+        print(
+            f"  {index}) {harness} — {agent_id}{activation_hint}",
+            file=stderr,
+        )
+    for harness, detail in unavailable:
+        print(f"  unavailable: {harness} — {detail}", file=stderr)
+    def parse_selection(raw):
+        try:
+            selected = int(raw)
+        except ValueError as error:
+            raise OnboardingError(
+                f"pneu: invalid harness selection: {raw!r}"
+            ) from error
+        if not 1 <= selected <= len(seats):
+            raise OnboardingError(
+                f"pneu: invalid harness selection: {raw!r}"
+            )
+        return seats[selected - 1]
+
+    return read_choice(
+        stdin, stderr, "Select harness: ", parse=parse_selection
+    )
+
+
+def project_ready_recovery(error, root: Path) -> OnboardingError:
+    return OnboardingError(
+        f"{error}; project already created at {root}; run pneu again "
+        "and choose it from the list"
+    )
+
+
+def onboard(
+    *,
+    cwd: Path,
+    home: Path,
+    stdin,
+    stderr,
+    environ,
+    init_runner=subprocess.run,
+    setup_runner=subprocess.run,
+    exec_runner=os.execv,
+    chdir_runner=os.chdir,
+) -> int:
+    print(ASCII_GUIDE, end="", file=stderr)
+    root = None
+    try:
+        root = choose_project(
+            cwd=cwd,
+            home=home,
+            stdin=stdin,
+            stderr=stderr,
+            init_runner=init_runner,
+        )
+        harness, agent_id = choose_seat(root, stdin=stdin, stderr=stderr)
+        ensure_harness_setup(
+            harness,
+            home=home,
+            stdin=stdin,
+            stderr=stderr,
+            environ=environ,
+            setup_runner=setup_runner,
+        )
+        environ["RT_FROM"] = agent_id
+        chdir_runner(root)
+        return execute(f"rt-{harness}", [], exec_runner=exec_runner)
+    except OnboardingError as error:
+        if root is not None and is_project_root(root):
+            raise project_ready_recovery(error, root) from error
+        raise
+    except KeyboardInterrupt:
+        print(
+            "pneu: cancelled by user (Ctrl-C); no agent session was launched.",
+            file=stderr,
+        )
+        if root is not None and is_project_root(root):
+            print(
+                f"project already created at {root}; run pneu again and "
+                "choose it from the list",
+                file=stderr,
+            )
+        return 130
+
+
+def main(
+    argv: list[str] | None = None,
+    *,
+    cwd: Path | None = None,
+    home: Path | None = None,
+    stdin=None,
+    stdout=None,
+    stderr=None,
+    environ=None,
+    init_runner=subprocess.run,
+    setup_runner=subprocess.run,
+    exec_runner=os.execv,
+    chdir_runner=os.chdir,
+) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    cwd = (cwd or Path.cwd()).expanduser().resolve()
+    home = (home or Path.home()).expanduser().resolve()
+    stdin = sys.stdin if stdin is None else stdin
+    stdout = sys.stdout if stdout is None else stdout
+    stderr = sys.stderr if stderr is None else stderr
+    environ = os.environ if environ is None else environ
+
+    try:
+        if argv:
+            command = argv[0]
+            if command in {"help", "-h", "--help"}:
+                print(HELP, end="", file=stdout)
+                return 0
+            if command == "guide":
+                print(ASCII_GUIDE, end="", file=stdout)
+                return 0
+            if command == "version":
+                print(version_report(), file=stdout)
+                return 0
+            target = ALIASES.get(command)
+            if target is None:
+                print(f"pneu: unknown command: {command}", file=stderr)
+                print(HELP, end="", file=stderr)
+                return 2
+            if command in HARNESS_ORDER:
+                try:
+                    harness_bin(command)
+                except SelectionError as error:
+                    raise OnboardingError(f"pneu: {error}") from error
+                ensure_harness_setup(
+                    command,
+                    home=home,
+                    stdin=stdin,
+                    stderr=stderr,
+                    environ=environ,
+                    setup_runner=setup_runner,
+                )
+            return execute(target, argv[1:], exec_runner=exec_runner)
+
+        if not stdin.isatty():
+            print(
+                "pneu: no command given and stdin is not a TTY",
+                file=stderr,
+            )
+            print(HELP, end="", file=stderr)
+            return 2
+        return onboard(
+            cwd=cwd,
+            home=home,
+            stdin=stdin,
+            stderr=stderr,
+            environ=environ,
+            init_runner=init_runner,
+            setup_runner=setup_runner,
+            exec_runner=exec_runner,
+            chdir_runner=chdir_runner,
+        )
+    except OnboardingError as error:
+        print(error, file=stderr)
+        return 2
+    except KeyboardInterrupt:
+        print(
+            "pneu: cancelled by user (Ctrl-C); no agent session was launched.",
+            file=stderr,
+        )
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

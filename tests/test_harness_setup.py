@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "bin"))
 
-from roundtable_packaging import setup as harness_setup
+from pneu_packaging import setup as harness_setup
 
 
 def _write_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
@@ -27,18 +27,18 @@ def _write_executable(path: Path, body: str = "#!/bin/sh\nexit 0\n") -> None:
 @pytest.fixture
 def installation(tmp_path: Path) -> tuple[Path, Path]:
     home = tmp_path / "home"
-    prefix = home / ".roundtable"
+    prefix = home / ".pneu"
     home.mkdir()
     (prefix / "bin").mkdir(parents=True)
-    (prefix / "skills" / "shared" / "roundtable").mkdir(parents=True)
+    (prefix / "skills" / "shared" / "pneu").mkdir(parents=True)
     (
         prefix
         / "current"
         / "share"
-        / "roundtable"
+        / "pneu"
         / "integrations"
         / "hermes"
-        / "roundtable"
+        / "pneu"
     ).mkdir(parents=True)
     for command in (
         "rt-wait-inbox",
@@ -149,7 +149,7 @@ def test_codex_setup_honors_one_static_codex_home_and_runtime_override(
 
     assert code == 0, result
     assert (codex_home / "hooks.json").is_file()
-    assert (codex_home / "skills" / "roundtable").is_symlink()
+    assert (codex_home / "skills" / "pneu").is_symlink()
     assert not (home / ".codex").exists()
     assert runtime.is_dir()
     for label in harness_setup.CODEX_LABELS:
@@ -209,16 +209,16 @@ def test_clean_apply_status_idempotence_and_remove(
     )
 
     hermes = yaml.safe_load((home / ".hermes" / "config.yaml").read_text())
-    assert hermes["plugins"]["enabled"] == ["roundtable"]
+    assert hermes["plugins"]["enabled"] == ["pneu"]
     assert (
-        os.readlink(home / ".hermes" / "plugins" / "roundtable")
+        os.readlink(home / ".hermes" / "plugins" / "pneu")
         == str(harness_setup._hermes_plugin_target(prefix))
     )
 
     for harness in harness_setup.HARNESSES:
-        skill = home / f".{harness}" / "skills" / "roundtable"
+        skill = home / f".{harness}" / "skills" / "pneu"
         assert skill.is_symlink()
-        assert os.readlink(skill) == str(prefix / "skills" / "shared" / "roundtable")
+        assert os.readlink(skill) == str(prefix / "skills" / "shared" / "pneu")
 
     for label in harness_setup.CODEX_LABELS:
         path = home / "Library" / "LaunchAgents" / f"{label}.plist"
@@ -307,8 +307,8 @@ def test_clean_apply_status_idempotence_and_remove(
     assert not (home / ".codex" / "hooks.json").exists()
     assert not marker_path.exists()
     for harness in harness_setup.HARNESSES:
-        assert not (home / f".{harness}" / "skills" / "roundtable").exists()
-    assert not (home / ".hermes" / "plugins" / "roundtable").exists()
+        assert not (home / f".{harness}" / "skills" / "pneu").exists()
+    assert not (home / ".hermes" / "plugins" / "pneu").exists()
     for label in harness_setup.CODEX_LABELS:
         assert not (
             home / "Library" / "LaunchAgents" / f"{label}.plist"
@@ -374,10 +374,10 @@ def test_existing_configuration_is_backed_up_and_preserved_exactly(
     hermes_path.write_bytes(hermes_raw)
 
     # Correct pre-existing links are observed, never claimed.
-    claude_skill = home / ".claude" / "skills" / "roundtable"
+    claude_skill = home / ".claude" / "skills" / "pneu"
     claude_skill.parent.mkdir(parents=True)
     claude_skill.symlink_to(str(harness_setup._skill_target(prefix)))
-    hermes_plugin = home / ".hermes" / "plugins" / "roundtable"
+    hermes_plugin = home / ".hermes" / "plugins" / "pneu"
     hermes_plugin.parent.mkdir(parents=True)
     hermes_plugin.symlink_to(str(harness_setup._hermes_plugin_target(prefix)))
 
@@ -717,7 +717,7 @@ def test_drift_fails_closed_without_partial_removal(
     settings = json.loads(settings_path.read_text())
     settings["hooks"]["Stop"][0]["hooks"][0]["command"] = "/tmp/replaced"
     settings_path.write_text(json.dumps(settings))
-    plugin_link = home / ".hermes" / "plugins" / "roundtable"
+    plugin_link = home / ".hermes" / "plugins" / "pneu"
     assert plugin_link.is_symlink()
 
     code, result = _run(
@@ -759,7 +759,7 @@ def test_symlinked_config_and_colliding_managed_link_fail_closed(
     assert _tree_snapshot(home) == before
 
     (claude_dir / "settings.json").unlink()
-    skill = claude_dir / "skills" / "roundtable"
+    skill = claude_dir / "skills" / "pneu"
     skill.parent.mkdir()
     skill.write_text("user data")
     code, result = _run(
@@ -778,7 +778,7 @@ def test_hermes_explicit_disable_is_respected_without_writes(
     home, prefix = installation
     config = home / ".hermes" / "config.yaml"
     config.parent.mkdir()
-    config.write_text("plugins:\n  disabled:\n    - roundtable\n")
+    config.write_text("plugins:\n  disabled:\n    - pneu\n")
     before = _tree_snapshot(home)
 
     code, result = _run(
@@ -808,14 +808,14 @@ def test_duplicate_preexisting_fragments_are_rejected_without_writes(
     )
 
     assert code == 2
-    assert "duplicate Roundtable fragments" in result["error"]
+    assert "duplicate pneu fragments" in result["error"]
     assert _tree_snapshot(home) == before
 
     claude.unlink()
     hermes = home / ".hermes" / "config.yaml"
     hermes.parent.mkdir()
     hermes.write_text(
-        "plugins:\n  enabled:\n    - roundtable\n    - roundtable\n"
+        "plugins:\n  enabled:\n    - pneu\n    - pneu\n"
     )
     before = _tree_snapshot(home)
 
@@ -824,7 +824,7 @@ def test_duplicate_preexisting_fragments_are_rejected_without_writes(
     )
 
     assert code == 2
-    assert "duplicate 'roundtable'" in result["error"]
+    assert "duplicate 'pneu'" in result["error"]
     assert _tree_snapshot(home) == before
 
 
@@ -1520,8 +1520,8 @@ def test_apply_failure_rolls_back_configs_links_plists_backups_and_manifest(
     backup_root = prefix / "backups" / "harness-setup"
     assert not backup_root.exists() or not any(backup_root.iterdir())
     for harness in harness_setup.HARNESSES:
-        assert not (home / f".{harness}" / "skills" / "roundtable").exists()
-    assert not (home / ".hermes" / "plugins" / "roundtable").exists()
+        assert not (home / f".{harness}" / "skills" / "pneu").exists()
+    assert not (home / ".hermes" / "plugins" / "pneu").exists()
     for label in harness_setup.CODEX_LABELS:
         assert not (
             home / "Library" / "LaunchAgents" / f"{label}.plist"

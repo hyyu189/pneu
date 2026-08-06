@@ -127,7 +127,7 @@ def test_no_argument_non_tty_fails_with_help_without_exec(fake_commands, tmp_pat
 
     assert result == 2
     assert "stdin is not a TTY" in stderr.getvalue()
-    assert "usage: roundtable" in stderr.getvalue()
+    assert "usage: pneu" in stderr.getvalue()
     assert calls == []
 
 
@@ -144,7 +144,7 @@ def test_guide_command_renders_ascii_mailroom_and_wake_model(tmp_path):
 
     rendered = stdout.getvalue()
     assert result == 0
-    assert "Roundtable = a local mailroom for coding-agent seats" in rendered
+    assert "pneu = a local mailroom for coding-agent seats" in rendered
     assert "project mailbox: new/  ->  cur/" in rendered
     assert "Claude  SessionStart/Stop hooks" in rendered
     assert "Hermes  the session-start plugin" in rendered
@@ -217,7 +217,7 @@ def test_interactive_onboarding_prints_guide_before_menu(
     )
 
     assert result == 2
-    assert "Roundtable = a local mailroom for coding-agent seats" in stderr.getvalue()
+    assert "pneu = a local mailroom for coding-agent seats" in stderr.getvalue()
 
 
 def test_interactive_onboarding_ctrl_c_is_a_clean_cancellation(
@@ -332,9 +332,9 @@ def test_anchored_project_goes_directly_to_configured_seat_selector(
     )
 
     assert result == 0
-    assert f"Roundtable project: {project}" in stderr.getvalue()
-    assert "Choose a Roundtable project:" not in stderr.getvalue()
-    assert "not a Roundtable project yet" not in stderr.getvalue()
+    assert f"pneu project: {project}" in stderr.getvalue()
+    assert "Choose a pneu project:" not in stderr.getvalue()
+    assert "not a pneu project yet" not in stderr.getvalue()
     assert "codex — codex-b" in stderr.getvalue()
     assert environment["RT_FROM"] == "codex-b"
     assert chdir_calls == [project]
@@ -601,7 +601,7 @@ def test_registered_projects_are_grouped_in_a_second_level_menu(
     assert first_level.count("Choose an existing project") == 1
     assert str(first) not in first_level
     assert str(second) not in first_level
-    assert "Choose an existing Roundtable project:" in second_level
+    assert "Choose an existing pneu project:" in second_level
     assert second_level.index(str(first)) < second_level.index(str(second))
 
 
@@ -678,7 +678,7 @@ def test_installed_onboarding_previews_and_applies_selected_harness_once(
     ]
     assert all(kwargs["check"] is False for _command, kwargs in calls)
     assert "One-time codex integration setup" in stderr.getvalue()
-    assert "Roundtable never bypasses hook trust" in stderr.getvalue()
+    assert "pneu never bypasses hook trust" in stderr.getvalue()
     assert len(exec_calls) == 1
 
 
@@ -797,7 +797,7 @@ def test_selector_marks_configured_but_missing_harness_unavailable(
     assert "unavailable: claude" in stderr.getvalue()
     assert (
         "1) codex — codex "
-        "(starts with a visible automatic Roundtable activation turn)"
+        "(starts with a visible automatic pneu activation turn)"
         in stderr.getvalue()
     )
 
@@ -851,6 +851,6 @@ def test_first_project_onboarding_explains_non_git_topology(
 
     assert result == 2
     output = stderr.getvalue()
-    assert f"This folder is not a Roundtable project yet: {folder}" in output
+    assert f"This folder is not a pneu project yet: {folder}" in output
     assert "[durable mailboxes]" in output
     assert "Git is optional" in output

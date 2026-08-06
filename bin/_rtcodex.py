@@ -2106,7 +2106,7 @@ def require_supported_version() -> tuple[int, int, int]:
 
 
 def require_validated_version() -> tuple[int, int, int]:
-    # Compatibility alias for older roundtable_packaging artifacts that call
+    # Compatibility alias for older pneu_packaging artifacts that call
     # this name through _codex_context.  It now applies the same floor+parse
     # check as require_supported_version instead of an exact-set allowlist, so
     # a mixed-version upgrade accepts any release at or above the floor.

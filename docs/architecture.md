@@ -1,8 +1,8 @@
 # Architecture and adapter boundaries
 
-Roundtable is terminal-emulator independent by design. Terminal.app, iTerm2,
+pneu is terminal-emulator independent by design. Terminal.app, iTerm2,
 Ghostty, and other terminal hosts are not separate transports or reduced
-compatibility modes. They host harness processes that use the same Roundtable
+compatibility modes. They host harness processes that use the same pneu
 core.
 
 ## Layers
@@ -31,7 +31,7 @@ optional cmux adapter
 
 - Delivery, inbox, acknowledgement, and drain do not call a terminal-emulator
   API.
-- Project identity does not depend on Git. Any directory can be a Roundtable
+- Project identity does not depend on Git. Any directory can be a pneu
   project, including a non-code workspace.
 - Harness launchers resolve real executables and reject generated cmux PATH
   shims.
@@ -63,7 +63,7 @@ roundtable-init
   -> one project anchor, identities, mailboxes, and orientation files
   -> optional Git initialization only when requested
 
-roundtable
+pneu
   -> compact project-first menu; registered roots expand in a second level
   -> configured harness-seat selector, then the fenced rt-* launcher
 ```
@@ -77,7 +77,7 @@ Setup does not install a harness or copy credentials. Plan, apply, and status
 never invoke `launchctl`; only an explicit Codex teardown may do so.
 
 The package and harness manifests are deliberately separate. Harness
-configuration must be removed while its Roundtable commands and canonical
+configuration must be removed while its pneu commands and canonical
 skill still exist; only then can the package be uninstalled. Both removal paths
 verify ownership and fail closed on drift. A Codex-selected removal also fails
 closed until an operator outside Codex explicitly supplies `--unload-codex`;
@@ -87,7 +87,7 @@ plist files.
 `roundtable-init --here` configures an existing directory without replacing
 user documents. `roundtable-init NAME` creates a new directory. Git is not a
 project-identity requirement and is initialized only with `--git`. The
-unified `roundtable` command exposes this as the default interactive journey;
+unified `pneu` command exposes this as the default interactive journey;
 the individual harness launchers retain their scriptable entry points.
 
 Generated project configuration is repository-relative: `agents.yaml` stores
@@ -95,7 +95,7 @@ Generated project configuration is repository-relative: `agents.yaml` stores
 configuration. This keeps a cloned project portable while retaining support
 for older absolute-path configs; it is not the durable project identity. Each
 registered worktree instead has an ignored `.roundtable/project.json` UUID
-witness, and `~/.roundtable/projects.yaml` maps that stable UUID to its mutable
+witness, and `~/.pneu/projects.yaml` maps that stable UUID to its mutable
 path, derived group, status, and selected mailbox layout. New and explicitly
 upgraded entries start with the project-local layout. The Claude project-skill
 bridge is a portable relative symlink and is part of the optional initial
@@ -111,16 +111,16 @@ mutable project name.
 
 ## P0 state placement and session ownership
 
-Roundtable separates project facts from facts that are meaningful only on one
+pneu separates project facts from facts that are meaningful only on one
 host:
 
 | State | Location | Lifetime |
 | --- | --- | --- |
 | Agent identities and portable project configuration | `<project>/.roundtable/agents.yaml` | Durable project state |
-| Stable worktree identity and registry metadata | ignored `<project>/.roundtable/project.json` plus `~/.roundtable/projects.yaml` | Durable worktree and host state |
+| Stable worktree identity and registry metadata | ignored `<project>/.roundtable/project.json` plus `~/.pneu/projects.yaml` | Durable worktree and host state |
 | Inbox `new/`, `cur/`, and `tmp/`; message ledger and acknowledgements | Registry-selected local or central mail root (new/upgraded entries initially use `<project>/.roundtable/`) | Durable delivery state |
-| Current session lease, owner PID and process fingerprint, wake-adapter PID, activity and heartbeat | `~/.roundtable/.runtime/` | Host-local ephemeral state |
-| Optional terminal topology, navigation handles, and adapter diagnostics | `~/.roundtable/.runtime/adapters/` | Host-local ephemeral state |
+| Current session lease, owner PID and process fingerprint, wake-adapter PID, activity and heartbeat | `~/.pneu/.runtime/` | Host-local ephemeral state |
+| Optional terminal topology, navigation handles, and adapter diagnostics | `~/.pneu/.runtime/adapters/` | Host-local ephemeral state |
 
 Maildir `tmp/` is the deliberate exception to the simple durable/ephemeral
 split: it is staging state, but it must remain on the same filesystem as
@@ -129,7 +129,7 @@ split: it is staging state, but it must remain on the same filesystem as
 Every mailbox reader or writer acquires the UUID-keyed shared layout lock
 before resolving the registry pointer and holds it through its last mailbox
 I/O. Migration takes the matching exclusive lock. Lock files are persistent
-private coordination in `~/.roundtable/layout-locks/`, not removable PID or
+private coordination in `~/.pneu/layout-locks/`, not removable PID or
 staleness records. Each UUID also has a persistent private
 `<uuid>.writer.lock` admission gate: every entrant briefly takes it
 exclusively before the resource lock, readers release it after acquiring
@@ -170,11 +170,11 @@ fresh local candidate, and only then compare-and-sets the row back to `local`.
 Neither direction merges two trees or restores an entire old registry
 snapshot.
 
-The lock threat model treats every process running as the Roundtable owning
+The lock threat model treats every process running as the pneu owning
 UID as one integrity domain. Private permissions, no-follow opens, and inode
 revalidation protect against other UIDs, unsafe configuration, and ordinary
 replacement races; they cannot make an unprivileged lock file tamper-proof
-against a malicious process with the same UID. Roundtable-managed code
+against a malicious process with the same UID. pneu-managed code
 therefore never deletes or replaces a layout-lock file. Defending against a
 hostile same-UID process would require a privileged trust anchor and is not a
 claim of this daemon-free design.
@@ -183,7 +183,7 @@ P0 uses a deterministic key derived from the canonical project path, while
 retaining that readable path in metadata:
 
 ```text
-~/.roundtable/.runtime/
+~/.pneu/.runtime/
   projects/<canonical-path-hash>/
     project.json
     claim.lock
@@ -208,14 +208,14 @@ optional cmux `runtime.json` and legacy operation locks follow the same
 placement principle, but will move in separate changes so they do not complicate
 the session-ownership change.
 
-### Logical seat, Roundtable session, and native session
+### Logical seat, pneu session, and native session
 
 These identities are intentionally different:
 
 | Identity | Meaning | Reused |
 | --- | --- | --- |
 | `agent_id` | Stable mailbox seat inside one project, such as `codex` | Yes |
-| `session_id` | One Roundtable launch and ownership term | No |
+| `session_id` | One pneu launch and ownership term | No |
 | `native_session_id` | Harness-native Codex thread or equivalent, when available | Only for an explicit resume |
 | `lease_revision` | Fencing token for the current owner of the seat | No |
 
@@ -270,7 +270,7 @@ starts one `grok agent --no-leader stdio` child with a bounded `HOME`,
 `GROK_HOME`, XDG, temporary, log, registry, and project environment. The child
 receives only the current lease identity and an existing API credential; the
 adapter never copies or refreshes host auth state. ACP permission requests are
-default-deny and admit only the exact fenced Roundtable inbox and acknowledgement
+default-deny and admit only the exact fenced pneu inbox and acknowledgement
 commands. A prompt is successful only after the exact filename generation has
 left `new/`; the adapter retains the generation on timeout, auth failure, or
 child death and may create one newly authenticated child for recovery.
@@ -292,9 +292,9 @@ declared dead merely because it has not emitted a recent heartbeat.
 | Liveness cannot be established safely | Fail closed and require an explicit repair or release action |
 
 An inactive historical session is not a conflict. The default launch is fresh:
-it gets a new Roundtable session ID and a new native chat/thread rather than
+it gets a new pneu session ID and a new native chat/thread rather than
 silently reconnecting to history. If a future selector offers an explicit
-native-session resume, the new process still receives a new Roundtable session
+native-session resume, the new process still receives a new pneu session
 ID and lease revision; only `native_session_id` is reused. P0 exposes only the
 fresh path until each harness's native resume flow and project-root validation
 have passed real end-to-end tests.

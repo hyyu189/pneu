@@ -1,0 +1,8 @@
+name: pneu
+version: "8.0.0"
+description: "Wake an opted-in Hermes CLI session when durable pneu mail arrives."
+author: Roundtable contributors
+provides_hooks:
+  - on_session_start
+  - on_session_reset
+  - on_session_finalize

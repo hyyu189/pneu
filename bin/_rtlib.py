@@ -755,7 +755,7 @@ def projects_registry_path():
     if override:
         return _absolute_registry_path(override)
     return _absolute_registry_path(
-        Path.home() / ".roundtable" / "projects.yaml"
+        Path.home() / ".pneu" / "projects.yaml"
     )
 
 

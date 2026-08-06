@@ -1,6 +1,6 @@
 # Runtime compatibility
 
-Roundtable's durable maildir core and its harness wake adapters have different
+pneu's durable maildir core and its harness wake adapters have different
 compatibility boundaries. Delivery can succeed while an offline or unsupported
 harness remains unwoken.
 
@@ -23,7 +23,7 @@ Conversely, removing Codex onboarding requires
 `roundtable-setup remove --unload-codex` from outside a Codex session, so a
 loaded job cannot be orphaned after its plist and executable are removed.
 
-The normal `roundtable` launcher owns the next step: it performs a targeted
+The normal `pneu` launcher owns the next step: it performs a targeted
 Codex service preflight and starts or repairs only states proven safe. Users do
 not normally run the two low-level service reload commands themselves.
 
@@ -93,7 +93,7 @@ targets. `RT_CLAUDE_BIN`, `RT_HERMES_BIN`, and `RT_CODEX_BIN` provide explicit
 selection; an explicit Claude or Hermes path is still rejected if it resolves
 to a cmux wrapper.
 
-With no native Hermes arguments, the Roundtable seat launches as
+With no native Hermes arguments, the pneu seat launches as
 `hermes --tui`. Any explicit arguments are passed through unchanged, preserving
 oneshot, headless, and management modes; callers can request `--tui` alongside
 resume or other native arguments when desired.
@@ -111,7 +111,7 @@ inspected against Hermes Agent `0.19.0`; older releases are not yet a support
 claim. These paths have focused automated coverage, but the real credentialed
 send-to-wake-to-drain/ack gate remains required before promotion.
 
-Inside a Roundtable project, each launcher exports `RT_FROM` automatically when
+Inside a pneu project, each launcher exports `RT_FROM` automatically when
 exactly one configured instance uses that harness. A multi-instance
 configuration must select its identity explicitly, for example
 `RT_FROM=claude-review rt-claude`. This identity path is configuration-based
@@ -121,7 +121,7 @@ is not claimed until its end-to-end gate passes.
 
 ## Claude lifecycle and unattended drain
 
-For an anchored bare Claude launch, Roundtable supplies a fresh
+For an anchored bare Claude launch, pneu supplies a fresh
 `--session-id <UUID>`. This makes the P0 default a new, addressable chat even
 when the user's native startup preference is Remote Control/FleetView. An
 unanchored launch or any explicit native arguments keep Claude's native
@@ -198,7 +198,7 @@ Codex wake is ready only when all of the following are true:
 - the daemon response has the validated required fields and does not claim a
   foreign Codex-managed lifecycle backend;
 - the owned/current app-server plist matches the selected executable and the
-  live Roundtable LaunchAgent reports that same program, arguments, and
+  live pneu LaunchAgent reports that same program, arguments, and
   critical environment;
 - Darwin's kernel-reported Unix-socket peer PID is that LaunchAgent process or
   one of its same-user descendants, and the LaunchAgent PID is stable across
@@ -216,13 +216,13 @@ Codex wake is ready only when all of the following are true:
 general process-identity proof: the gate-exercised 0.144.6 implementation was
 source-verified to always report the fixed
 `$CODEX_HOME/packages/standalone/current/codex` management slot, even when the
-responsive app-server was launched from npm by Roundtable. Every release must
+responsive app-server was launched from npm by pneu. Every release must
 satisfy the same runtime schema and launchd/socket-peer identity checks or it
 fails closed. Handshake liveness alone is not readiness. A daemon left running
 after a CLI upgrade fails closed until it is reloaded and revalidated.
 
 Codex release acceptance is a version floor plus a live protocol handshake, not
-a per-version allowlist. Roundtable ships far more slowly than the harness, so
+a per-version allowlist. pneu ships far more slowly than the harness, so
 enumerating and validating every release number is impractical; the support
 contract is instead the `0.144.6` floor plus a live read-only protocol probe of
 the running daemon at each readiness check. Releases below the floor are always
@@ -260,8 +260,8 @@ and re-runs the inspection inside them. The final `ready` observation and
 project-seat claim happen before those locks are released, so a concurrent
 setup or reload cannot slip between them. A version or owned-plist mismatch is
 never interpreted as permission to silently restart the shared app-server.
-Roundtable Codex therefore requires a project anchor in P0;
-unanchored users can run native `codex` without Roundtable messaging. True
+pneu Codex therefore requires a project anchor in P0;
+unanchored users can run native `codex` without pneu messaging. True
 zero-downtime upgrades would require versioned blue/green sockets and are P1
 rather than a P0 claim.
 
@@ -275,7 +275,7 @@ request later and accepts it only when all of these identities agree:
 - the hook's native session/thread ID exists in the app-server;
 - the app-server reports the exact canonical project cwd;
 - the thread is an interactive root thread, not a child or ephemeral thread;
-- the request's project, agent ID, Roundtable session ID, and lease revision
+- the request's project, agent ID, pneu session ID, and lease revision
   match the current fenced host lease;
 - the project has not acquired a conflicting current binding.
 
@@ -292,7 +292,7 @@ lease to its replacement native thread; a request from an older lease cannot
 replace a newer claim. If `clear` replaces a request while the bridge is
 draining it, the bridge quarantines the superseded binding and processes the
 replacement request before it can wake pending mail. User-level Codex hooks may
-require a one-time `/hooks` trust review, and Roundtable does not bypass that
+require a one-time `/hooks` trust review, and pneu does not bypass that
 decision. The manual
 `rt-codex-wake bind /absolute/project/path` command remains a diagnostic
 fallback.
@@ -329,7 +329,7 @@ floor is admitted when its daemon passes that probe and rejected when it fails.
 | Codex distribution | CLI | App-server | Result |
 | --- | ---: | ---: | --- |
 | npm | `0.144.6` | isolated `0.144.6` | `initialize`, thread read/list, hooks list, and turn-history protocol smoke passed |
-| npm | `0.144.6` | Roundtable launchd `0.144.6` | RC5 live cutover, cold start, launchd-to-socket-peer ownership, SessionStart thread/lease identity, auto-bind, and isolated upgrade passed; credentialed wake E2E remains pending |
+| npm | `0.144.6` | pneu launchd `0.144.6` | RC5 live cutover, cold start, launchd-to-socket-peer ownership, SessionStart thread/lease identity, auto-bind, and isolated upgrade passed; credentialed wake E2E remains pending |
 | standalone | not installed | not installed | resolver and fixtures only; support is not yet claimed |
 | below the `0.144.6` floor | any | any | rejected always, before any probe |
 | at/above the floor (e.g. standalone `0.145.0`) | any | any | policy row, not an exercised pairing: launchable when its identity-proven daemon passes the live read-only protocol probe, rejected on probe failure; a passing probe permits launch but is not yet an end-to-end support claim until a live gate runs |
@@ -358,7 +358,7 @@ Every supported P0 participant currently shares one host filesystem and one
 host-local runtime root. This is independent of terminal emulator: Terminal,
 iTerm2, Ghostty, and cmux can all reach the same maildir and harness adapters.
 It is not cross-host transport. Two coding sessions on different Macs do not
-share a Roundtable merely because both were launched over SSH; a future
+share a pneu merely because both were launched over SSH; a future
 cross-host transport must preserve durable delivery and identity fencing across
 machines.
 
@@ -368,7 +368,7 @@ The current source tree replaces the earlier cmux keyboard-nudge delivery path.
 cmux surface IDs and project-local `.armed-*` markers are not delivery or
 liveness facts in Messaging v2. Existing maildir state remains durable, while
 session leases and heartbeats live under the host-local
-`~/.roundtable/.runtime/` tree.
+`~/.pneu/.runtime/` tree.
 
 ## Official surface notes
 
@@ -376,12 +376,12 @@ OpenAI documents the standalone installer cache under
 `$CODEX_HOME/packages/standalone`, with the visible command normally installed
 under `~/.local/bin` on macOS and Linux. The public CLI supports `--remote` with
 Unix-socket endpoints. OpenAI currently labels `codex app-server` experimental,
-so Roundtable intentionally keeps an exact compatibility matrix instead of
+so pneu intentionally keeps an exact compatibility matrix instead of
 assuming semver compatibility.
 
 For the pinned 0.144.6 implementation, Codex constructs
 [`managedCodexPath` from the fixed standalone slot](https://github.com/openai/codex/blob/5d1fbf26c43abc65a203928b2e31561cb039e06d/codex-rs/app-server-daemon/src/managed_install.rs#L19-L64)
 and [probes `managedCodexVersion` from that path](https://github.com/openai/codex/blob/5d1fbf26c43abc65a203928b2e31561cb039e06d/codex-rs/app-server-daemon/src/lib.rs#L443-L454)
-independently of the socket-serving process. Roundtable therefore treats those
+independently of the socket-serving process. pneu therefore treats those
 fields as management-slot metadata and authenticates its externally managed
 server through launchd plus Darwin's Unix-socket peer PID.

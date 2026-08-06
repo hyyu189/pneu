@@ -11,8 +11,8 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PLUGIN = ROOT / "integrations" / "hermes" / "roundtable" / "__init__.py"
-MANIFEST = ROOT / "integrations" / "hermes" / "roundtable" / "plugin.yaml"
+PLUGIN = ROOT / "integrations" / "hermes" / "pneu" / "__init__.py"
+MANIFEST = ROOT / "integrations" / "hermes" / "pneu" / "plugin.yaml"
 
 
 def _load_plugin():

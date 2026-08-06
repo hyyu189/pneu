@@ -1848,8 +1848,8 @@ def test_production_mailbox_consumers_do_not_construct_layout_paths() -> None:
     ]
     consumers.extend(
         [
-            ROOT / "integrations" / "hermes" / "roundtable" / "__init__.py",
-            ROOT / "roundtable_packaging" / "smoke.py",
+            ROOT / "integrations" / "hermes" / "pneu" / "__init__.py",
+            ROOT / "pneu_packaging" / "smoke.py",
         ]
     )
     violations = [
@@ -1906,9 +1906,9 @@ def test_direct_mailbox_consumers_use_locked_resolver_only() -> None:
 
 def test_indirect_consumers_do_not_retain_waiter_mailbox_paths() -> None:
     hermes = (
-        ROOT / "integrations" / "hermes" / "roundtable" / "__init__.py"
+        ROOT / "integrations" / "hermes" / "pneu" / "__init__.py"
     ).read_text()
-    smoke = (ROOT / "roundtable_packaging" / "smoke.py").read_text()
+    smoke = (ROOT / "pneu_packaging" / "smoke.py").read_text()
 
     assert "--wait-last-wake-drained" in hermes
     assert "_triggered_new_dir" not in hermes

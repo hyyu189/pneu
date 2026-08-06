@@ -174,7 +174,7 @@ def runtime_root() -> Path:
         )
     if generic_path is not None or legacy_path is not None:
         return generic_path or legacy_path
-    return Path.home() / ".roundtable" / ".runtime"
+    return Path.home() / ".pneu" / ".runtime"
 
 
 def canonical_project(project: Path | str) -> Path:

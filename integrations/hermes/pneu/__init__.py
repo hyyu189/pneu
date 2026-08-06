@@ -1,6 +1,6 @@
-"""Hermes user-plugin bridge for Roundtable's durable inbox.
+"""Hermes user-plugin bridge for pneu's durable inbox.
 
-The plugin is deliberately inert unless it was launched through a Roundtable
+The plugin is deliberately inert unless it was launched through pneu
 launcher that supplied a complete, fenced session environment.  It never reads
 message bodies or credentials.  ``rt-wait-inbox`` remains responsible for
 validating the lease and watching the durable maildir.
@@ -43,7 +43,7 @@ _PENDING_RENOTIFY_SECONDS = 600
 _PENDING_PAUSE_SECONDS = 1200
 
 _MAIL_MESSAGE = (
-    "[Roundtable] New durable mail is waiting. Run "
+    "[pneu] New durable mail is waiting. Run "
     "`rt-inbox --fenced --archive-quiet-acks -f json`, act on each non-ack "
     "message, and acknowledge it with `rt-ack <id>[,<id>...]`; successful "
     "acknowledgement also archives that message to `cur/`. Reply with "
@@ -53,17 +53,17 @@ _MAIL_MESSAGE = (
     "automatically after the triggered messages are archived."
 )
 _PENDING_MESSAGE = (
-    "[Roundtable] The triggered mail generation is still pending in `new/` "
+    "[pneu] The triggered mail generation is still pending in `new/` "
     "after repeated notices. Automatic notices are paused for this "
     "generation to prevent a loop; the mail remains durable and the watcher "
     "re-arms automatically once `rt-ack` archives it."
 )
 _FENCE_MESSAGE = (
-    "[Roundtable] This Hermes watcher stopped because its session lease was "
-    "superseded. Continue from the newer Roundtable-launched session."
+    "[pneu] This Hermes watcher stopped because its session lease was "
+    "superseded. Continue from the newer pneu-launched session."
 )
 _CONFIG_MESSAGE = (
-    "[Roundtable] Inbox watching stopped because the Roundtable session or "
+    "[pneu] Inbox watching stopped because the pneu session or "
     "installation is invalid. Run `rt-doctor` before restarting Hermes."
 )
 

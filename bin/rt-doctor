@@ -90,7 +90,7 @@ def socket_check(path: Path) -> tuple[bool, str]:
 
 def daemon_fix(socket_path: Path) -> str:
     if socket_path != DEFAULT_SOCKET:
-        return f"~/.roundtable/bin/rt-doctor --socket {DEFAULT_SOCKET}"
+        return f"~/.pneu/bin/rt-doctor --socket {DEFAULT_SOCKET}"
     return SAFE_CODEX_LAUNCH_FIX
 
 
@@ -100,7 +100,7 @@ def socket_fix(socket_path: Path, detail: str) -> str:
     if detail.startswith("owner uid"):
         return f"chown $(id -u) {socket_path}"
     if socket_path != DEFAULT_SOCKET:
-        return f"~/.roundtable/bin/rt-doctor --socket {DEFAULT_SOCKET}"
+        return f"~/.pneu/bin/rt-doctor --socket {DEFAULT_SOCKET}"
     if "No such file" in detail:
         return SAFE_CODEX_LAUNCH_FIX
     return f"inspect the unsafe socket path {socket_path}, then {SAFE_CODEX_LAUNCH_FIX}"
@@ -118,7 +118,7 @@ def parse_timestamp(value: object) -> datetime | None:
 
 def _codex_setup_status(prefix: Path, home: Path) -> tuple[int, dict]:
     """Run the ownership authority's read-only status command in-process."""
-    from roundtable_packaging import setup as harness_setup
+    from pneu_packaging import setup as harness_setup
 
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -1632,5 +1632,5 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except Exception as error:
         print(f"FAIL doctor: {error}")
-        print("  fix: inspect ~/.roundtable/.runtime/rt-codex-wake.log.jsonl")
+        print("  fix: inspect ~/.pneu/.runtime/rt-codex-wake.log.jsonl")
         raise SystemExit(2)

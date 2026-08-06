@@ -15,7 +15,7 @@ artifact.
 ## Locked inputs
 
 The builder accepts source only from `git archive HEAD`. It refuses a dirty
-worktree, builds the Roundtable wheel as `py3-none-any`, and includes the eight
+worktree, builds the pneu wheel as `py3-none-any`, and includes the eight
 official PyYAML 6.0.3 wheels for:
 
 - CPython 3.11, 3.12, 3.13, and 3.14;
@@ -56,7 +56,7 @@ mamba run -n general python scripts/build_release.py \
 
 The output directory contains:
 
-- `roundtable-messaging-<version>-macos.tar.gz`;
+- `pneu-<version>-macos.tar.gz`;
 - `SHA256SUMS` for that archive.
 
 The archive has its own `SHA256SUMS` covering every payload file and
@@ -71,14 +71,14 @@ notice, the compatibility matrix, and the source-commit ledger. Top-level
 ```bash
 cd artifacts && shasum -a 256 --check SHA256SUMS
 cd ..
-tar -xzf artifacts/roundtable-messaging-<version>-macos.tar.gz
-cd roundtable-messaging-<version>
+tar -xzf artifacts/pneu-<version>-macos.tar.gz
+cd pneu-<version>
 shasum -a 256 --check SHA256SUMS
-export HOME=/tmp/roundtable-release-home
+export HOME=/tmp/pneu-release-home
 export CODEX_HOME="$HOME/.codex"
-export RT_RUNTIME_DIR="$HOME/.roundtable/.runtime"
+export RT_RUNTIME_DIR="$HOME/.pneu/.runtime"
 export RT_CODEX_RUNTIME_DIR="$RT_RUNTIME_DIR"
-prefix="$HOME/.roundtable"
+prefix="$HOME/.pneu"
 link_dir="$HOME/.local/bin"
 mkdir -p "$HOME"
 ./install --prefix "$prefix" --link-dir "$link_dir"
@@ -139,16 +139,16 @@ credentialed real-harness E2E.
 The intended five-minute path begins with the archive:
 
 ```bash
-tar -xzf roundtable-messaging-<version>-macos.tar.gz
-cd roundtable-messaging-<version>
+tar -xzf pneu-<version>-macos.tar.gz
+cd pneu-<version>
 ./install
 export PATH="$HOME/.local/bin:$PATH"  # once per shell; persist it in your shell profile
-roundtable
+pneu
 ```
 
-`roundtable` is the normal entry: select or create a project folder, select a
+`pneu` is the normal entry: select or create a project folder, select a
 harness, review any missing one-time integration, and launch. `roundtable
-setup` is always preview-only; `roundtable setup apply` is the explicit expert
+setup` is always preview-only; `pneu setup apply` is the explicit expert
 path. On first Codex use, the judge may need to review the user hook once with
 `/hooks`. Subsequent SessionStart binding is intended to be automatic, with
 manual `rt-codex-wake bind` retained only as a fallback.
@@ -164,7 +164,7 @@ Before tagging or attaching the archive to a public release:
 3. clean-account Claude and Hermes setup passes skill discovery, lifecycle
    hook, tripwire, and real send-to-wake-to-drain/ack acceptance;
 4. npm Codex `0.144.6` passes the coordinated default-daemon reload, proves the
-   socket peer belongs to the exact Roundtable LaunchAgent process tree,
+   socket peer belongs to the exact pneu LaunchAgent process tree,
    verifies that trusted SessionStart `session_id` matches the app-server
    thread and the private runtime launch intent resolves to the same current
    fenced lease, then completes real send-to-wake-to-drain/ack acceptance;

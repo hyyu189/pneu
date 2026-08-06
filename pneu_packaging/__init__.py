@@ -1,9 +1,9 @@
-"""Release installation support for Roundtable Messaging."""
+"""Release installation support for pneu."""
 
 from __future__ import annotations
 
 
-VERSION = "0.3.0"
+VERSION = "1.0.0"
 MANIFEST_SCHEMA = "roundtable.install.v1"
 MANAGED_MARKER = ".roundtable-managed.json"
 
@@ -16,14 +16,15 @@ MANAGED_HELPERS = (
 )
 
 MANAGED_ASSETS = (
-    "share/roundtable/integrations/hermes/roundtable/__init__.py",
-    "share/roundtable/integrations/hermes/roundtable/plugin.yaml",
-    "share/roundtable/integrations/openclaw/roundtable/__init__.py",
-    "share/roundtable/integrations/grok/roundtable/__init__.py",
-    "share/roundtable/skills/shared/roundtable/SKILL.md",
+    "share/pneu/integrations/hermes/pneu/__init__.py",
+    "share/pneu/integrations/hermes/pneu/plugin.yaml",
+    "share/pneu/integrations/openclaw/roundtable/__init__.py",
+    "share/pneu/integrations/grok/roundtable/__init__.py",
+    "share/pneu/skills/shared/pneu/SKILL.md",
 )
 
 TOOLS = (
+    "pneu",
     "roundtable",
     "roundtable-init",
     "roundtable-setup",

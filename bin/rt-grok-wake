@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
-INSTALLED_SHARE = ROOT / "share" / "roundtable"
+INSTALLED_SHARE = ROOT / "share" / "pneu"
 for import_root in (BIN, INSTALLED_SHARE, ROOT):
     if import_root.is_dir() and str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))

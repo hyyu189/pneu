@@ -3,8 +3,8 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "roundtable-messaging"
-version = "0.3.0"
+name = "pneu"
+version = "1.0.0"
 description = "Durable local maildir coordination for coding agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -33,13 +33,13 @@ test = [
 ]
 
 [project.scripts]
-roundtable-smoke = "roundtable_packaging.smoke:main"
-roundtable-setup = "roundtable_packaging.setup:main"
-roundtable-uninstall = "roundtable_packaging.cli:uninstall_main"
+roundtable-smoke = "pneu_packaging.smoke:main"
+roundtable-setup = "pneu_packaging.setup:main"
+roundtable-uninstall = "pneu_packaging.cli:uninstall_main"
 
 [tool.setuptools]
 include-package-data = false
-packages = ["roundtable_packaging"]
+packages = ["pneu_packaging"]
 py-modules = ["_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtruntime"]
 script-files = [
   "bin/_rtcodex.py",
@@ -47,6 +47,7 @@ script-files = [
   "bin/_rtlib.py",
   "bin/_rtmigrate.py",
   "bin/_rtruntime.py",
+  "bin/pneu",
   "bin/roundtable",
   "bin/roundtable-init",
   "bin/rt-ack",
@@ -71,11 +72,11 @@ script-files = [
   "bin/rt-wait-inbox",
   "bin/rt-worktree",
 ]
-package-dir = { "" = "bin", "roundtable_packaging" = "roundtable_packaging" }
+package-dir = { "" = "bin", "pneu_packaging" = "pneu_packaging" }
 
 [tool.setuptools.data-files]
-"share/roundtable" = ["LICENSE", "NOTICE"]
-"share/roundtable/docs" = [
+"share/pneu" = ["LICENSE", "NOTICE"]
+"share/pneu/docs" = [
   "docs/architecture.md",
   "docs/compatibility.md",
   "docs/install.md",
@@ -83,20 +84,20 @@ package-dir = { "" = "bin", "roundtable_packaging" = "roundtable_packaging" }
   "docs/release.md",
   "docs/wp21-quiet-ack-nudge-retirement.md",
 ]
-"share/roundtable/integrations/hermes/roundtable" = [
-  "integrations/hermes/roundtable/__init__.py",
-  "integrations/hermes/roundtable/plugin.yaml",
+"share/pneu/integrations/hermes/pneu" = [
+  "integrations/hermes/pneu/__init__.py",
+  "integrations/hermes/pneu/plugin.yaml",
 ]
-"share/roundtable/integrations/openclaw/roundtable" = [
+"share/pneu/integrations/openclaw/roundtable" = [
   "integrations/openclaw/roundtable/__init__.py",
 ]
-"share/roundtable/integrations/grok/roundtable" = [
+"share/pneu/integrations/grok/roundtable" = [
   "integrations/grok/roundtable/__init__.py",
 ]
-"share/roundtable/skills/shared/roundtable" = [
-  "skills/shared/roundtable/SKILL.md",
+"share/pneu/skills/shared/pneu" = [
+  "skills/shared/pneu/SKILL.md",
 ]
-"share/roundtable/templates" = [
+"share/pneu/templates" = [
   "templates/AGENTS.md.tmpl",
   "templates/BRIEF.md.tmpl",
   "templates/CLAUDE.md.tmpl",

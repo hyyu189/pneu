@@ -30,8 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 
-RELEASE_SCHEMA = "roundtable.release.v1"
-PROJECT_NAME = "roundtable-messaging"
+RELEASE_SCHEMA = "pneu.release.v1"
+PROJECT_NAME = "pneu"
 DEPENDENCY_NAME = "PyYAML"
 DEPENDENCY_VERSION = "6.0.3"
 
@@ -158,9 +158,9 @@ OUTER_STATIC_FILES = {
     "docs/provenance/source-commits.tsv",
     "docs/release.md",
     "install",
-    "roundtable_packaging/__init__.py",
-    "roundtable_packaging/cli.py",
-    "roundtable_packaging/setup.py",
+    "pneu_packaging/__init__.py",
+    "pneu_packaging/cli.py",
+    "pneu_packaging/setup.py",
     "scripts/install.sh",
     "scripts/uninstall.sh",
     "uninstall",
@@ -190,19 +190,19 @@ REQUIRED_PROJECT_ROOT_FILES = frozenset(
 )
 REQUIRED_PROJECT_PACKAGE_FILES = frozenset(
     {
-        "roundtable_packaging/__init__.py",
-        "roundtable_packaging/cli.py",
-        "roundtable_packaging/setup.py",
-        "roundtable_packaging/smoke.py",
+        "pneu_packaging/__init__.py",
+        "pneu_packaging/cli.py",
+        "pneu_packaging/setup.py",
+        "pneu_packaging/smoke.py",
     }
 )
 REQUIRED_PROJECT_DATA_FILES = frozenset(
     {
-        "share/roundtable/integrations/hermes/roundtable/__init__.py",
-        "share/roundtable/integrations/hermes/roundtable/plugin.yaml",
-        "share/roundtable/integrations/openclaw/roundtable/__init__.py",
-        "share/roundtable/integrations/grok/roundtable/__init__.py",
-        "share/roundtable/skills/shared/roundtable/SKILL.md",
+        "share/pneu/integrations/hermes/pneu/__init__.py",
+        "share/pneu/integrations/hermes/pneu/plugin.yaml",
+        "share/pneu/integrations/openclaw/roundtable/__init__.py",
+        "share/pneu/integrations/grok/roundtable/__init__.py",
+        "share/pneu/skills/shared/pneu/SKILL.md",
     }
 )
 REQUIRED_PROJECT_SCRIPTS = frozenset(
@@ -212,6 +212,7 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "_rtlib.py",
         "_rtmigrate.py",
         "_rtruntime.py",
+        "pneu",
         "roundtable",
         "roundtable-init",
         "rt-ack",
@@ -398,7 +399,7 @@ def _project_version(source: Path) -> str:
     if not isinstance(version, str) or not version:
         raise ReleaseError("project version must be a non-empty string")
     try:
-        tree = ast.parse((source / "roundtable_packaging" / "__init__.py").read_text())
+        tree = ast.parse((source / "pneu_packaging" / "__init__.py").read_text())
     except (OSError, SyntaxError) as error:
         raise ReleaseError(f"cannot read packaging version: {error}") from error
     packaging_version = None
@@ -418,7 +419,7 @@ def _project_version(source: Path) -> str:
     if packaging_version != version:
         raise ReleaseError(
             f"version mismatch: pyproject={version!r} "
-            f"roundtable_packaging.VERSION={packaging_version!r}"
+            f"pneu_packaging.VERSION={packaging_version!r}"
         )
     return version
 
@@ -482,7 +483,7 @@ def _build_project_wheel(
         ],
         env=environment,
     )
-    matches = sorted(wheel_dir.glob(f"roundtable_messaging-{version}-*.whl"))
+    matches = sorted(wheel_dir.glob(f"pneu-{version}-*.whl"))
     if len(matches) != 1:
         raise ReleaseError(
             f"expected one project wheel for {version}, found {len(matches)}"
@@ -495,8 +496,8 @@ def _build_project_wheel(
 
 
 def _validate_project_wheel(wheel: Path, version: str) -> None:
-    dist_info = f"roundtable_messaging-{version}.dist-info/"
-    data_prefix = f"roundtable_messaging-{version}.data/"
+    dist_info = f"pneu-{version}.dist-info/"
+    data_prefix = f"pneu-{version}.data/"
     with zipfile.ZipFile(wheel) as archive:
         names = [name for name in archive.namelist() if not name.endswith("/")]
     if not names:
@@ -525,10 +526,10 @@ def _validate_project_wheel(wheel: Path, version: str) -> None:
             raise ReleaseError(f"forbidden runtime path in project wheel: {name}")
         allowed = (
             name in REQUIRED_PROJECT_ROOT_FILES
-            or name.startswith("roundtable_packaging/")
+            or name.startswith("pneu_packaging/")
             or name.startswith(dist_info)
             or name.startswith(f"{data_prefix}scripts/")
-            or name.startswith(f"{data_prefix}data/share/roundtable/")
+            or name.startswith(f"{data_prefix}data/share/pneu/")
         )
         if not allowed:
             raise ReleaseError(f"unexpected path in project wheel: {name}")
@@ -640,9 +641,9 @@ def _copy_release_bootstrap(source: Path, staging: Path) -> None:
             "docs/provenance/source-commits.tsv"
         ),
         "docs/release.md": "docs/release.md",
-        "roundtable_packaging/__init__.py": "roundtable_packaging/__init__.py",
-        "roundtable_packaging/cli.py": "roundtable_packaging/cli.py",
-        "roundtable_packaging/setup.py": "roundtable_packaging/setup.py",
+        "pneu_packaging/__init__.py": "pneu_packaging/__init__.py",
+        "pneu_packaging/cli.py": "pneu_packaging/cli.py",
+        "pneu_packaging/setup.py": "pneu_packaging/setup.py",
         "scripts/install.sh": "scripts/install.sh",
         "scripts/uninstall.sh": "scripts/uninstall.sh",
     }
@@ -785,7 +786,7 @@ def build_release(
             )
 
     commit, source_date_epoch = _assert_clean_repo(repo)
-    with tempfile.TemporaryDirectory(prefix="roundtable-release-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="pneu-release-") as temporary:
         work = Path(temporary)
         source = work / "source"
         _source_from_commit(repo, commit, source)

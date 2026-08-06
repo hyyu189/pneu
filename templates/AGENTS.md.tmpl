@@ -2,4 +2,4 @@ codex:
   cwd: .
   role: fast implementation, tests, integration, CLI/runtime review
   always_read: [ROUTING.md, README.md]
-  startup: 由可信的 Roundtable SessionStart hook 自动排队并验证当前 Codex thread 绑定；正常情况下不要手动 bind。仅当 Roundtable diagnostics 明确报告自动绑定未完成时，才使用 fallback：`~/.roundtable/bin/rt-codex-wake bind "$RT_PROJECT_ROOT"`
+  startup: 由可信的 pneu SessionStart hook 自动排队并验证当前 Codex thread 绑定；正常情况下不要手动 bind。仅当 pneu diagnostics 明确报告自动绑定未完成时，才使用 fallback：`~/.pneu/bin/rt-codex-wake bind "$RT_PROJECT_ROOT"`

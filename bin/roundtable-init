@@ -41,8 +41,8 @@ FILES = {
 MARKER_BLOCKS = {
     "AGENTS.md": (
         "<!-- BEGIN Roundtable -->\n"
-        "For Roundtable work, always read `ROUTING.md` and `README.md`. "
-        "Use the `roundtable` skill for peer-agent messaging.\n"
+        "For pneu work, always read `ROUTING.md` and `README.md`. "
+        "Use the `pneu` skill for peer-agent messaging.\n"
         "<!-- END Roundtable -->\n"
     ),
     "CLAUDE.md": (
@@ -53,22 +53,22 @@ MARKER_BLOCKS = {
     ),
     "HERMES.md": (
         "<!-- BEGIN Roundtable -->\n"
-        "For Roundtable work, always read `ROUTING.md` and `README.md`. "
-        "Use the `roundtable` skill for peer-agent messaging.\n"
+        "For pneu work, always read `ROUTING.md` and `README.md`. "
+        "Use the `pneu` skill for peer-agent messaging.\n"
         "<!-- END Roundtable -->\n"
     ),
     "ROUTING.md": (
         "<!-- BEGIN Roundtable -->\n"
-        "## Roundtable routing\n\n"
+        "## pneu routing\n\n"
         "For peer-agent coordination or `rt-*` messaging, load the "
-        "`roundtable` skill and `.roundtable/agents.yaml`. Project scope is "
+        "`pneu` skill and `.roundtable/agents.yaml`. Project scope is "
         "in `BRIEF.md`, shared status is in `README.md`, and durable decisions "
         "are in `decision.md`.\n"
         "<!-- END Roundtable -->\n"
     ),
     "README.md": (
         "<!-- BEGIN Roundtable -->\n"
-        "## Roundtable status\n\n"
+        "## pneu status\n\n"
         "Agent routing is in [`ROUTING.md`](ROUTING.md). Keep the current "
         "shared status in this README so every harness sees the same state.\n"
         "<!-- END Roundtable -->\n"
@@ -116,7 +116,7 @@ MARKERS = {
 def parse_args():
     parser = argparse.ArgumentParser(
         prog="roundtable-init",
-        description="Bootstrap a roundtable project that uses global rt-* tools.",
+        description="Bootstrap a pneu project that uses global rt-* tools.",
     )
     parser.add_argument("project_name", nargs="?")
     location = parser.add_mutually_exclusive_group()

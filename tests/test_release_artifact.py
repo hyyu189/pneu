@@ -13,7 +13,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from roundtable_packaging import VERSION
+from pneu_packaging import VERSION
 from scripts import build_release
 
 
@@ -36,7 +36,7 @@ def run(command: list[str], cwd: Path) -> None:
 def test_outer_checksum_command_works_from_repo_root(tmp_path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    artifact = artifacts / "roundtable-messaging-test-macos.tar.gz"
+    artifact = artifacts / "pneu-test-macos.tar.gz"
     artifact.write_bytes(b"release artifact fixture\n")
     digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
     (artifacts / "SHA256SUMS").write_text(f"{digest}  {artifact.name}\n")
@@ -64,7 +64,7 @@ def test_release_workflow_exercises_isolated_artifact_setup():
     workflow = (ROOT / ".github" / "workflows" / "release-artifact.yml").read_text()
     release_doc = (ROOT / "docs" / "release.md").read_text()
 
-    assert 'prefix="$setup_home/.roundtable"' in workflow
+    assert 'prefix="$setup_home/.pneu"' in workflow
     assert 'link_dir="$setup_home/.local/bin"' in workflow
     assert 'export HOME="$setup_home"' in workflow
     assert 'export CODEX_HOME="$setup_home/.codex"' in workflow
@@ -74,12 +74,12 @@ def test_release_workflow_exercises_isolated_artifact_setup():
     assert "./migrate" not in workflow
     assert 'test ! -e "$prefix"' in workflow
     assert 'export PATH="$link_dir:$PATH"' in workflow
-    assert 'HOME="$setup_home" roundtable --help' in workflow
-    assert "export HOME=/tmp/roundtable-release-home" in release_doc
+    assert 'HOME="$setup_home" pneu --help' in workflow
+    assert "export HOME=/tmp/pneu-release-home" in release_doc
     assert 'export CODEX_HOME="$HOME/.codex"' in release_doc
-    assert 'export RT_RUNTIME_DIR="$HOME/.roundtable/.runtime"' in release_doc
+    assert 'export RT_RUNTIME_DIR="$HOME/.pneu/.runtime"' in release_doc
     assert 'export RT_CODEX_RUNTIME_DIR="$RT_RUNTIME_DIR"' in release_doc
-    assert 'prefix="$HOME/.roundtable"' in release_doc
+    assert 'prefix="$HOME/.pneu"' in release_doc
     assert 'link_dir="$HOME/.local/bin"' in release_doc
     assert (
         'export PATH="$HOME/.local/bin:$PATH"  # once per shell; '
@@ -182,21 +182,21 @@ def test_locked_matrix_and_hash_fail_closed(tmp_path):
     "missing",
     [
         "_rtruntime.py",
-        "roundtable_messaging-0.1.8.data/scripts/roundtable",
-        "roundtable_messaging-0.1.8.data/scripts/_rtruntime.py",
+        "pneu-0.1.8.data/scripts/roundtable",
+        "pneu-0.1.8.data/scripts/_rtruntime.py",
         (
-            "roundtable_messaging-0.1.8.data/data/share/roundtable/"
-            "integrations/hermes/roundtable/plugin.yaml"
+            "pneu-0.1.8.data/data/share/pneu/"
+            "integrations/hermes/pneu/plugin.yaml"
         ),
         (
-            "roundtable_messaging-0.1.8.data/data/share/roundtable/"
-            "skills/shared/roundtable/SKILL.md"
+            "pneu-0.1.8.data/data/share/pneu/"
+            "skills/shared/pneu/SKILL.md"
         ),
     ],
 )
 def test_project_wheel_validator_requires_runtime_helper_copies(tmp_path, missing):
-    wheel = tmp_path / "roundtable_messaging-0.1.8-py3-none-any.whl"
-    data_prefix = "roundtable_messaging-0.1.8.data/"
+    wheel = tmp_path / "pneu-0.1.8-py3-none-any.whl"
+    data_prefix = "pneu-0.1.8.data/"
     required = {
         *build_release.REQUIRED_PROJECT_ROOT_FILES,
         *build_release.REQUIRED_PROJECT_PACKAGE_FILES,
@@ -269,7 +269,7 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
     )
 
     root, relative, files = archive_members(first.artifact)
-    assert root == f"roundtable-messaging-{VERSION}"
+    assert root == f"pneu-{VERSION}"
     assert {
         "BUILD-METADATA.json",
         "CREDITS.md",
@@ -284,17 +284,17 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
         "docs/provenance/source-commits.tsv",
         "docs/release.md",
         "install",
-        "roundtable_packaging/__init__.py",
-        "roundtable_packaging/cli.py",
-        "roundtable_packaging/setup.py",
+        "pneu_packaging/__init__.py",
+        "pneu_packaging/cli.py",
+        "pneu_packaging/setup.py",
         "scripts/install.sh",
         "scripts/uninstall.sh",
         "uninstall",
     }.issubset(relative)
     assert "migrate" not in relative
-    assert "roundtable_packaging/migrate.py" not in relative
+    assert "pneu_packaging/migrate.py" not in relative
     assert any(
-        name.startswith(f"wheels/roundtable_messaging-{VERSION}-")
+        name.startswith(f"wheels/pneu-{VERSION}-")
         and name.endswith("-py3-none-any.whl")
         for name in relative
     )

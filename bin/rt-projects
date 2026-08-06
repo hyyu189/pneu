@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--registry",
         type=Path,
         default=projects_registry_path(),
-        help="registry path (default: ~/.roundtable/projects.yaml)",
+        help="registry path (default: ~/.pneu/projects.yaml)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("list", help="list registry rows and diagnostics")

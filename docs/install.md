@@ -1,6 +1,6 @@
 # Installation and ownership
 
-Roundtable installs into a versioned private Python environment and exposes
+pneu installs into a versioned private Python environment and exposes
 stable user-level commands. The installer owns only paths recorded in its
 manifest and stops before overwriting an unrelated or locally modified path.
 
@@ -21,19 +21,19 @@ isolated paths:
 
 ```bash
 mamba run -n general ./scripts/install.sh \
-  --prefix /tmp/roundtable-preview \
-  --link-dir /tmp/roundtable-preview-bin
+  --prefix /tmp/pneu-preview \
+  --link-dir /tmp/pneu-preview-bin
 ```
 
 ## Layout
 
 The default install creates:
 
-- `~/.roundtable/versions/<version>`: the private virtual environment;
-- `~/.roundtable/current`: the active version symlink;
-- `~/.roundtable/bin`: stable command wrappers;
-- `~/.roundtable/install-manifest.json`: owned paths and digests;
-- `~/.roundtable/skills/shared/roundtable`: the canonical installed skill link;
+- `~/.pneu/versions/<version>`: the private virtual environment;
+- `~/.pneu/current`: the active version symlink;
+- `~/.pneu/bin`: stable command wrappers;
+- `~/.pneu/install-manifest.json`: owned paths and digests;
+- `~/.pneu/skills/shared/pneu`: the canonical installed skill link;
 - `~/.local/bin/rt-*`: user-visible links to the stable wrappers.
 
 Project registries, persistent UUID layout locks, registry-selected local or
@@ -53,7 +53,7 @@ central marker validates its legacy archive, imports a durable recovery record
 under the exclusive layout lock, and atomically rebinds the marker. That
 one-time import fails closed if the legacy archive has already been removed.
 
-Run `roundtable projects migrate ROOT` for the explicit local-to-central
+Run `pneu projects migrate ROOT` for the explicit local-to-central
 cutover. The command emits one JSON record containing its durable recovery
 record and the file/byte totals, preflight counts, projected hold, layout-lock
 wait, exclusive-hold duration, admitted registry-wait cap, copy/fsync
@@ -71,7 +71,7 @@ registry-lock wait is capped to the time remaining in a second five-second
 hold budget. The projection is an admission heuristic and filesystem calls or
 fsync are not asynchronously interrupted.
 
-Use `roundtable projects rollback ROOT --manifest PATH` only with the exact
+Use `pneu projects rollback ROOT --manifest PATH` only with the exact
 recovery record reported by the active forward migration. Rollback first
 creates and verifies a new archival backup and recovery record for current
 central mail, including post-cutover deliveries, then changes the registry
@@ -83,18 +83,18 @@ fails closed and requires inspecting the registry pointer before retrying.
 Harness onboarding is a second ownership layer. After
 `roundtable-setup apply`, it also records:
 
-- `~/.roundtable/harness-setup.json`: exact config fragments, links, and plist
+- `~/.pneu/harness-setup.json`: exact config fragments, links, and plist
   files owned by onboarding;
-- `~/.roundtable/backups/harness-setup/`: private backups of existing config
+- `~/.pneu/backups/harness-setup/`: private backups of existing config
   files before a managed merge;
 - an owned Codex SessionStart fragment in `~/.codex/hooks.json`, when Codex is
   selected;
-- `~/.claude/skills/roundtable`, `~/.hermes/skills/roundtable`, and/or
-  `~/.codex/skills/roundtable`: selected harnesses' global discovery links to
+- `~/.claude/skills/pneu`, `~/.hermes/skills/pneu`, and/or
+  `~/.codex/skills/pneu`: selected harnesses' global discovery links to
   the one canonical installed skill.
 
 Those global links mean a user does not download or copy the skill separately
-for each new Roundtable project.
+for each new pneu project.
 
 Stable wrappers export one absolute host-local runtime root. Set
 `RT_RUNTIME_DIR` to override the default `<prefix>/.runtime`;
@@ -112,7 +112,7 @@ between multiple auth homes remains outside the P0 lifecycle contract.
 ## New-user artifact journey
 
 The host must already have CPython 3.11 through 3.14. The archive bundles the
-Roundtable wheel and every Python package dependency, but not the interpreter;
+pneu wheel and every Python package dependency, but not the interpreter;
 stock macOS alone does not guarantee this prerequisite. The installer first
 honors an already-activated environment (`VIRTUAL_ENV`, then `CONDA_PREFIX`)
 before scanning `python3.14`, `python3.13`, `python3.12`, `python3.11`, and then
@@ -125,14 +125,14 @@ Then extract the release archive and run its installer. No source checkout,
 build, or network dependency download is part of this path:
 
 ```bash
-tar -xzf roundtable-messaging-<version>-macos.tar.gz
-cd roundtable-messaging-<version>
+tar -xzf pneu-<version>-macos.tar.gz
+cd pneu-<version>
 ./install
 export PATH="$HOME/.local/bin:$PATH"  # once per shell; persist it in your shell profile
-roundtable
+pneu
 ```
 
-`roundtable` is the ordinary product entry. It selects or creates a project
+`pneu` is the ordinary product entry. It selects or creates a project
 folder, lists only seats whose harness executable is available (and marks
 configured-but-missing harnesses unavailable), previews missing one-time
 integration for the chosen harness, and asks before applying any owned
@@ -144,18 +144,18 @@ ignored. Harness orientation files likewise use the project-relative cwd, and
 the portable `.claude/skills -> ../skills` bridge is included in the optional
 initial Git commit. An existing user-managed Claude skills directory is
 preserved and never hidden by a generated ignore rule. Existing absolute-path
-Roundtable configs remain readable and are not rewritten behind the user's
+pneu configs remain readable and are not rewritten behind the user's
 back.
 
 The equivalent standalone controls are intentionally explicit:
 
 ```bash
-roundtable setup          # read-only preview
-roundtable setup apply    # expert/scriptable apply
-roundtable setup status
+pneu setup          # read-only preview
+pneu setup apply    # expert/scriptable apply
+pneu setup status
 ```
 
-Running `roundtable setup` without `apply` never writes configuration, creates
+Running `pneu setup` without `apply` never writes configuration, creates
 runtime state, or invokes `launchctl`.
 
 ## Source install
@@ -196,7 +196,7 @@ load a macOS service, or bind a Codex thread.
 
 ## Host onboarding details
 
-The normal `roundtable` flow invokes the same planner for only the harness the
+The normal `pneu` flow invokes the same planner for only the harness the
 user selected. It displays the plan and requests confirmation before applying
 it. To inspect all detected harnesses without launching one, run setup with no
 subcommand:
@@ -211,7 +211,7 @@ write configuration, or invoke `launchctl`. `apply` and `status` also never
 load or unload a service. Harnesses can be selected explicitly and repeatedly:
 
 ```bash
-roundtable setup \
+pneu setup \
   --harness claude \
   --harness hermes \
   --harness codex
@@ -220,11 +220,11 @@ roundtable setup \
 After reviewing the plan:
 
 ```bash
-roundtable setup apply \
+pneu setup apply \
   --harness claude \
   --harness hermes \
   --harness codex
-roundtable setup status
+pneu setup status
 ```
 
 `apply` completes every collision and ownership check before its first
@@ -233,8 +233,8 @@ is idempotent. It performs these harness-specific actions:
 
 | Harness | Managed onboarding |
 | --- | --- |
-| Claude | Merges owned asynchronous SessionStart and Stop inbox watchers plus three absolute, lease-fenced mail-command allow rules into `~/.claude/settings.json`; links the global Roundtable skill |
-| Hermes | Adds one marked `roundtable` plugin entry to `~/.hermes/config.yaml`; links the packaged plugin and global skill |
+| Claude | Merges owned asynchronous SessionStart and Stop inbox watchers plus three absolute, lease-fenced mail-command allow rules into `~/.claude/settings.json`; links the global pneu skill |
+| Hermes | Adds one marked `pneu` plugin entry to `~/.hermes/config.yaml`; links the packaged plugin and global skill |
 | Codex | Merges one SessionStart auto-bind hook into `~/.codex/hooks.json`; writes the app-server and wake-bridge plist files under `~/Library/LaunchAgents`; links the global skill |
 
 Setup never installs Claude, Hermes, or Codex itself and never copies
@@ -242,7 +242,7 @@ credentials. It configures only harnesses already detected, unless
 `--harness` is supplied explicitly.
 
 Claude setup fails before writing when the same settings file has
-`disableAllHooks: true` or an `ask`/`deny` rule that overrides Roundtable's
+`disableAllHooks: true` or an `ask`/`deny` rule that overrides pneu's
 three narrow mail commands. Review those choices with `/hooks` or
 `/permissions`; setup never deletes them. Organization-managed, project-local,
 or command-line policy can still take precedence outside that file, so a
@@ -250,7 +250,7 @@ successful plan/apply is not a substitute for the real wake acceptance test.
 
 Codex may require a one-time `/hooks` review before it trusts the installed
 user-level SessionStart hook. That user decision cannot be automated and
-Roundtable never bypasses it.
+pneu never bypasses it.
 
 Setup writes service definitions but still never calls `launchctl`. The normal
 Codex launcher performs a targeted service preflight afterward. When setup
@@ -280,10 +280,10 @@ not steps in the normal onboarding journey.
 The supported project-first entry for an interactive user is:
 
 ```bash
-roundtable
+pneu
 ```
 
-Outside an anchored project, its menu offers registered Roundtable projects,
+Outside an anchored project, its menu offers registered pneu projects,
 safe setup of the current or another existing folder, and creation of a new
 folder. It then lists every configured Claude, Codex, and Hermes seat and
 launches the selection with a fenced identity. It never offers the user's home
@@ -292,9 +292,9 @@ directory or the filesystem root as a project.
 The scriptable project commands remain available:
 
 ```bash
-roundtable init --here
-roundtable init my-project
-roundtable init my-git-project --git
+pneu init --here
+pneu init my-project
+pneu init my-git-project --git
 
 # Equivalent low-level spelling:
 roundtable-init --here
@@ -302,21 +302,21 @@ roundtable-init my-project
 roundtable-init my-git-project --git
 ```
 
-Initialization creates missing Roundtable files and appends clearly marked
+Initialization creates missing pneu files and appends clearly marked
 blocks to supported existing orientation files. Repeating it is safe. No Git
 repository is created by default; `--git` initializes and makes an initial
 commit only when the target is not already inside a Git worktree. Existing
 repositories and user-owned documents are preserved.
 
-Once registered, launch from the project or run bare `roundtable` elsewhere.
+Once registered, launch from the project or run bare `pneu` elsewhere.
 Its first menu groups all registered roots behind one `Choose an existing
 project` option, then shows their paths in a second-level menu. The explicit
 harness commands remain available for direct/scriptable launches:
 
 ```bash
-roundtable claude
-roundtable hermes
-roundtable codex
+pneu claude
+pneu hermes
+pneu codex
 
 # Low-level aliases:
 rt-claude
@@ -329,15 +329,15 @@ Explicit native arguments are passed through unchanged so scripted/headless
 Hermes modes remain available.
 
 A project-anchored bare Claude launch supplies a fresh native `--session-id`,
-so Roundtable opens an addressable chat even when Claude is configured to start
+so pneu opens an addressable chat even when Claude is configured to start
 in Remote Control/FleetView. Explicit Claude arguments and unanchored launches
 are passed through unchanged.
 
-Roundtable Codex requires an initialized/registered project anchor. The anchor
+pneu Codex requires an initialized/registered project anchor. The anchor
 is what lets the launcher claim a fenced seat under the host service lock and
 lets SessionStart bind the correct native thread. The unanchored launcher
 choice remains available for Claude and Hermes; use native `codex` directly
-when no Roundtable project or messaging is wanted.
+when no pneu project or messaging is wanted.
 
 Claude's installed hooks and the Hermes plugin handle their native inbox wake
 lifecycle. A fresh Codex thread binds when Codex dispatches SessionStart on its
@@ -366,7 +366,7 @@ configuration and queueing paths are automated and tested.
 ## Offline release install
 
 A generated release archive includes a `wheels/` directory containing the
-Roundtable wheel and compatible PyYAML wheels. From the unpacked archive:
+pneu wheel and compatible PyYAML wheels. From the unpacked archive:
 
 ```bash
 ./install
@@ -381,13 +381,13 @@ archive generation, checksums, and promotion gates.
 
 ## Upgrade gate
 
-Installing a new version atomically advances `~/.roundtable/current`; stable
+Installing a new version atomically advances `~/.pneu/current`; stable
 wrappers and owned LaunchAgent definitions use that path. A repeated
-`roundtable setup apply` may update only plists and hook fragments whose old
+`pneu setup apply` may update only plists and hook fragments whose old
 digests are proven by the setup manifest; foreign drift still fails closed. A
 running Codex app-server does not change executable in place.
 
-On the next `roundtable` Codex launch, the service preflight compares the
+On the next `pneu` Codex launch, the service preflight compares the
 selected CLI, running app-server, current plist payloads, live LaunchAgent
 program and arguments, kernel-reported Unix-socket peer process lineage, wake
 bridge heartbeat, and every host-local Codex lease. It offers a coordinated
@@ -418,17 +418,17 @@ Claude/Hermes-only setup uses plain `roundtable-setup remove` and never invokes
 
 From an unpacked release, `./uninstall` can replace the last command. The
 package uninstaller refuses to proceed while
-`~/.roundtable/harness-setup.json` exists, which prevents dangling harness
+`~/.pneu/harness-setup.json` exists, which prevents dangling harness
 configuration. Setup removal verifies owned fragments for drift, removes only
 what setup added, and preserves unrelated user configuration. The package
 uninstaller then verifies its own manifest ownership and digests before removal
 and preserves:
 
-- `~/.roundtable/projects.yaml` and its lock;
+- `~/.pneu/projects.yaml` and its lock;
 - persistent UUID admission/resource locks beside the registry;
 - registry-selected central mail under the registry parent;
 - durable migration recovery records under the registry parent;
-- global runtime state under `~/.roundtable/.runtime`;
+- global runtime state under `~/.pneu/.runtime`;
 - every project-local `.roundtable` mailbox, ledger, and exact central-mail
   bookmark;
 - verified payload archives, including an operator-selected external archive
@@ -438,5 +438,5 @@ and preserves:
 It does not remove the registry, layout locks, local/central mail, bookmarks,
 recovery records, or migration archives. Uninstall never runs a migration or
 rollback. Use
-`roundtable projects rollback ROOT --manifest PATH` explicitly before
+`pneu projects rollback ROOT --manifest PATH` explicitly before
 uninstall when local placement is desired.

@@ -46,7 +46,7 @@ try_bootstrap_candidate() {
   candidate_path=$(command -v "$1" 2>/dev/null) || return 1
   supported_python "$candidate_path" || return 1
   if [ "$build_from_source" = yes ] && ! can_build_from_source "$candidate_path"; then
-    echo "roundtable-install: skipping $candidate_path: cannot build from source (setuptools unavailable)" >&2
+    echo "pneu-install: skipping $candidate_path: cannot build from source (setuptools unavailable)" >&2
     return 1
   fi
   bootstrap_python=$candidate_path
@@ -55,17 +55,17 @@ try_bootstrap_candidate() {
 
 if [ -n "${ROUNDTABLE_BOOTSTRAP_PYTHON:-}" ]; then
   if ! bootstrap_python=$(command -v "$ROUNDTABLE_BOOTSTRAP_PYTHON" 2>/dev/null); then
-    echo "roundtable-install: CPython 3.11 through 3.14 is required; not found: $ROUNDTABLE_BOOTSTRAP_PYTHON" >&2
+    echo "pneu-install: CPython 3.11 through 3.14 is required; not found: $ROUNDTABLE_BOOTSTRAP_PYTHON" >&2
     echo "set ROUNDTABLE_BOOTSTRAP_PYTHON=/absolute/path/to/python3" >&2
     exit 1
   fi
   if ! supported_python "$bootstrap_python"; then
-    echo "roundtable-install: $bootstrap_python must be CPython 3.11 through 3.14" >&2
+    echo "pneu-install: $bootstrap_python must be CPython 3.11 through 3.14" >&2
     echo "set ROUNDTABLE_BOOTSTRAP_PYTHON=/absolute/path/to/a/supported/python3" >&2
     exit 1
   fi
   if [ "$build_from_source" = yes ] && ! can_build_from_source "$bootstrap_python"; then
-    echo "roundtable-install: $bootstrap_python cannot build from source (setuptools unavailable)" >&2
+    echo "pneu-install: $bootstrap_python cannot build from source (setuptools unavailable)" >&2
     echo "install setuptools into it, or set ROUNDTABLE_BOOTSTRAP_PYTHON to a python3 that can build" >&2
     exit 1
   fi
@@ -85,7 +85,7 @@ else
     fi
   done
   if [ -z "$bootstrap_python" ]; then
-    echo "roundtable-install: CPython 3.11 through 3.14 is required; no supported interpreter was found on PATH" >&2
+    echo "pneu-install: CPython 3.11 through 3.14 is required; no supported interpreter was found on PATH" >&2
     echo "install a supported CPython with Homebrew (for example, brew install python@3.12) or from python.org, then rerun this installer" >&2
     if [ "$build_from_source" = yes ]; then
       echo "a source install also needs setuptools in that interpreter; use a release --wheel-dir for an offline install without a build" >&2
@@ -102,5 +102,5 @@ elif [ "$mode" = source ]; then
 fi
 
 PYTHONPATH="$source_root${PYTHONPATH:+:$PYTHONPATH}" \
-  exec "$bootstrap_python" -m roundtable_packaging.cli \
+  exec "$bootstrap_python" -m pneu_packaging.cli \
   install "$@"

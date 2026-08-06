@@ -39,4 +39,4 @@ else
 fi
 
 PYTHONPATH="$source_root${PYTHONPATH:+:$PYTHONPATH}" \
-  exec "$bootstrap_python" -m roundtable_packaging.cli uninstall "$@"
+  exec "$bootstrap_python" -m pneu_packaging.cli uninstall "$@"

@@ -1,18 +1,18 @@
 ---
-name: roundtable
+name: pneu
 description: >-
-  Use when active roundtable coordination is required: an inbound [FROM→TO kind
+  Use when active pneu coordination is required: an inbound [FROM→TO kind
   id=...] message arrives, the user mentions Hermes/Claude/Codex as peer agents,
   rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
   routing, or cmux surface-routing bugs. Do not use merely because a repo
   contains .roundtable/agents.yaml.
-version: 7.3.0
-author: Roundtable contributors
+version: 8.0.0
+author: pneu contributors
 license: MIT
 platforms: [macos]
 ---
 
-# Roundtable
+# pneu
 
 Collocated agents (Hermes, Claude, Codex) collaborate per project and talk
 through the `rt-*` CLI tools. Messages are **files in the project's mailbox**;
@@ -21,32 +21,33 @@ wakes are harness-native. Nothing touches a keyboard.
 **Rule #0 — every collaborating session needs one project anchor.** One project
 × one logical harness seat = one dedicated session = one mailbox. Every
 identity mechanism keys off that canonical project path. For a human, prefer
-the unified `roundtable` entry: it chooses or safely creates the project first,
-then selects a configured harness seat. The scriptable `rt-claude`,
+the unified `pneu` entry: it chooses or safely creates the project first,
+then selects a configured harness seat. `roundtable` remains a silent
+compatibility alias. The scriptable `rt-claude`,
 `rt-hermes`, and `rt-codex` launchers remain available. A project with no open
 session for an agent means that agent is **offline** there; mail waits durably
 in `new/`.
 
 ## One-time host setup
 
-Package installation provides one canonical Roundtable skill. Onboarding links
+Package installation provides one canonical pneu skill. Onboarding links
 that installed copy into each selected harness's global skill directory; do not
 ask a vibe-coding user to clone, pull, or copy this skill per project.
 
-For normal users, launch `roundtable`: it previews any missing integration for
+For normal users, launch `pneu`: it previews any missing integration for
 the selected harness and asks once before applying owned changes. The
 standalone setup commands are expert/scriptable controls:
 
 ```bash
-roundtable setup          # read-only plan
-roundtable setup apply    # owned hooks, plugin/skill links, Codex plists
-roundtable setup status
+pneu setup          # read-only plan
+pneu setup apply    # owned hooks, plugin/skill links, Codex plists
+pneu setup status
 ```
 
 Setup configures detected harnesses. Repeat `--harness` to make the selection
 explicit. It never installs a harness or moves credentials. Codex plist files
 are written but not loaded by setup. On the next project-anchored
-`roundtable codex` launch, a service preflight starts a cold service or stopped
+`pneu codex` launch, a service preflight starts a cold service or stopped
 wake bridge automatically. It offers a coordinated app-server reload only from
 outside Codex and only when no active or ambiguous Codex seat exists. Never
 instruct an ordinary user to run the low-level daemon/wake reload commands.
@@ -59,14 +60,14 @@ roundtable-setup remove --unload-codex
 roundtable-uninstall
 ```
 
-The command refuses when called inside Codex and touches only Roundtable's two
+The command refuses when called inside Codex and touches only pneu's two
 owned labels. Claude/Hermes-only onboarding uses plain
 `roundtable-setup remove`.
 
 Any directory can become a project and Git is optional:
 
 ```bash
-roundtable                         # recommended interactive entry
+pneu                         # recommended interactive entry
 roundtable-init --here
 roundtable-init new-project          # no Git by default
 roundtable-init new-git-project --git
@@ -76,7 +77,7 @@ roundtable-init new-git-project --git
 
 | Tool | Purpose |
 |------|---------|
-| `roundtable` | Recommended project-first onboarding, harness selection, and launch. |
+| `pneu` (`roundtable` alias) | Recommended project-first onboarding, harness selection, and launch. |
 | `roundtable-setup [plan\|apply\|status\|remove]` | Own host-level harness onboarding; the default is a no-write plan. |
 | `roundtable-init --here` / `roundtable-init NAME` | Adopt the current directory or create and register a project; add `--git` only when wanted. |
 | `rt-claude` / `rt-hermes` / `rt-codex` | Claim a fenced project seat and launch the real harness executable. |
@@ -87,9 +88,9 @@ roundtable-init new-git-project --git
 | `rt-projects resolve ROOT` | Diagnostic JSON view of the UUID-pinned mailbox selected by the registry. |
 | `rt-projects migrate ROOT` | Exclusively copy a local mailbox through a verified archive and durable recovery record into the central UUID store. |
 | `rt-projects rollback ROOT --manifest PATH` | Copy current central mail back to local; requires the exact active forward recovery record and preserves post-cutover mail. |
-| `roundtable worktree add NAME [options]` | Create a Git sibling worktree, bootstrap its Roundtable registry identity, and print its `codex@NAME` launch route. |
-| `roundtable worktree list` | List registered siblings in the current Git-derived group with branch, UUID, and seat status. |
-| `roundtable worktree remove NAME [--keep-branch]` | Refuse active/ambiguous seats, unbind Codex, tombstone the registry row, remove the worktree, and delete only a merged branch. |
+| `pneu worktree add NAME [options]` | Create a Git sibling worktree, bootstrap its pneu registry identity, and print its `codex@NAME` launch route. |
+| `pneu worktree list` | List registered siblings in the current Git-derived group with branch, UUID, and seat status. |
+| `pneu worktree remove NAME [--keep-branch]` | Refuse active/ambiguous seats, unbind Codex, tombstone the registry row, remove the worktree, and delete only a merged branch. |
 | `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit. |
 | `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: where does cmux think an agent sits. Not part of sending. |
 
@@ -98,7 +99,7 @@ one, set `ROUNDTABLE_PROJECT_DIR` or `RT_FALLBACK_PROJECT`.
 
 ## Worktree lifecycle
 
-`roundtable worktree add <name>` resolves the Git common directory from the
+`pneu worktree add <name>` resolves the Git common directory from the
 current repository (or `--repo PATH`), so any sibling worktree shares one
 derived group key. The default target is `../<name>` beside the current repo
 root; `--path PATH` may select another path outside that worktree. Before any
@@ -107,7 +108,7 @@ group key, target, new `wt/<name>` branch, and future `codex@<name>` address.
 `--dry-run` prints that restatement without changing anything; `--yes` is the
 scripted confirmation path.
 
-`roundtable worktree remove <name>` resolves exactly one active sibling in the
+`pneu worktree remove <name>` resolves exactly one active sibling in the
 same group. It refuses active, unhealthy-but-owned, or ambiguous seat state,
 then unbinds any Codex binding, tombstones the registry row, and removes the
 linked worktree. A branch is deleted only after it is merged; pass
@@ -115,9 +116,9 @@ linked worktree. A branch is deleted only after it is merged; pass
 
 Launch dedicated sessions with `rt-codex`, `rt-claude`, or `rt-hermes`. When
 called outside a project on a TTY they offer registered projects, project
-creation, or (for Claude/Hermes) an explicit unanchored launch. Roundtable
+creation, or (for Claude/Hermes) an explicit unanchored launch. pneu
 Codex requires a project anchor; native `codex` remains available for sessions
-that do not need Roundtable messaging. Non-TTY unanchored calls exit 2. All
+that do not need pneu messaging. Non-TTY unanchored calls exit 2. All
 three launchers select a real harness executable instead of a generated cmux
 PATH shim and export the unique configured `RT_FROM` identity. A
 multi-instance project must set `RT_FROM` explicitly. Launching one seat from
@@ -172,7 +173,7 @@ mail remains durable, but that Claude session may need a later normal
 interaction or resume before it is armed again.
 
 A listing entry with kind `malformed` is a raw file that cannot be delivered
-as Roundtable mail; while it sits in `new/` it keeps waking this seat even
+as pneu mail; while it sits in `new/` it keeps waking this seat even
 though it carries no readable message. Its `remedy` field names the cleanup
 that actually breaks the wake loop: `rt-ack` means acknowledge the listed
 raw id with `rt-ack` to archive it; `manual-move` means `rt-ack` cannot
@@ -188,7 +189,7 @@ first, then move the named file out of `new/`; retrying `rt-ack` cannot repair
 these classes.
 
 **Arming (Claude)** — the setup-owned SessionStart hook launches the first
-fenced inbox watcher for a Roundtable-launched session, and its Stop hook
+fenced inbox watcher for a pneu-launched session, and its Stop hook
 normally launches the successor after a completed turn. When mail wakes
 Claude, the system reminder prints the package-managed absolute paths for
 `rt-inbox`, `rt-ack`, and `rt-say`, including their `--fenced` and
@@ -198,11 +199,11 @@ keyboard route. Ordinary users and agents should not start or kill watcher
 processes themselves.
 
 **Arming (Hermes)** — the setup-owned plugin starts the fenced watcher at
-Hermes session start and injects a user-visible Roundtable notice when mail
-lands. It is inert outside a complete Roundtable launcher lease and shuts down
+Hermes session start and injects a user-visible pneu notice when mail
+lands. It is inert outside a complete pneu launcher lease and shuts down
 its watcher with the Hermes session.
 
-**Arming (Codex)** — launch through project-anchored `roundtable codex` (or
+**Arming (Codex)** — launch through project-anchored `pneu codex` (or
 `rt-codex`). The trusted SessionStart hook atomically queues the native thread
 identity; the wake bridge validates its exact project cwd and fenced launcher
 lease before binding. On first use Codex may ask the human to review the hook
@@ -247,7 +248,7 @@ them; put any referenced message id in the body. For anything long,
 write `handoff/<topic>.md`, commit, and rt-say a one-line pointer.
 
 Emergency keyboard path (`--legacy-nudge-only` + submit-key lore) is archived
-in `~/.roundtable/docs/legacy-v1-keyboard.md`; human-coordinated use only.
+in `~/.pneu/docs/legacy-v1-keyboard.md`; human-coordinated use only.
 
 ## Receiving
 
@@ -261,7 +262,7 @@ in `~/.roundtable/docs/legacy-v1-keyboard.md`; human-coordinated use only.
 ## When mail sits unanswered
 
 Mail waiting in `new/` means the receiver is offline, unarmed, or busy — not
-lost. Diagnose in order: ① is a Roundtable-launched session open in that
+lost. Diagnose in order: ① is a pneu-launched session open in that
 project (Rule #0)? ② does `roundtable-setup status` report the harness
 configured? ③ does `rt-doctor` report a current fenced lease and healthy
 adapter? ④ for Codex, is the thread bound and are both services healthy?
@@ -300,5 +301,5 @@ instances:
 ## More
 
 Optional multi-agent playbooks (cross-agent freeze/merge signoff, `/goal` build
-dispatch, git-based doc collaboration) live in `~/.roundtable/docs/workflows/` —
+dispatch, git-based doc collaboration) live in `~/.pneu/docs/workflows/` —
 not needed for ordinary messaging.

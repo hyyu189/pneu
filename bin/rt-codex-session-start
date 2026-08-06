@@ -74,7 +74,7 @@ def _trace_root(environment: dict[str, str]) -> Path | None:
     if isinstance(prefix, str) and prefix.startswith("/"):
         return Path(prefix) / ".runtime"
     try:
-        return Path.home() / ".roundtable" / ".runtime"
+        return Path.home() / ".pneu" / ".runtime"
     except (OSError, RuntimeError):
         return None
 

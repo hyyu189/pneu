@@ -71,7 +71,7 @@ METADATA_RULES = (
         re.compile(r"claude\.ai/code/" + "session_", re.IGNORECASE),
     ),
 )
-RELEASE_SURFACE_PREFIXES = ("bin/", "roundtable_packaging/")
+RELEASE_SURFACE_PREFIXES = ("bin/", "pneu_packaging/")
 RELEASE_FORBIDDEN_TOKENS = (
     "RT_MIGRATION_" + "FAILPOINT",
 )

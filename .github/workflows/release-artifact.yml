@@ -52,7 +52,7 @@ jobs:
       - name: Verify source and tests
         run: |
           python scripts/check_public_safety.py
-          python -m compileall -q bin roundtable_packaging scripts tests integrations
+          python -m compileall -q bin pneu_packaging scripts tests integrations
           python -m pytest -p no:cacheprovider -p no:rerunfailures -q tests
 
       - name: Build locked offline artifact
@@ -65,9 +65,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          extract_root="$RUNNER_TEMP/roundtable-release-extract"
-          setup_home="$RUNNER_TEMP/roundtable-release-home"
-          prefix="$setup_home/.roundtable"
+          extract_root="$RUNNER_TEMP/pneu-release-extract"
+          setup_home="$RUNNER_TEMP/pneu-release-home"
+          prefix="$setup_home/.pneu"
           link_dir="$setup_home/.local/bin"
           fake_launchctl="$RUNNER_TEMP/roundtable-fake-launchctl"
           launchctl_sentinel="$RUNNER_TEMP/roundtable-launchctl-invoked"
@@ -116,7 +116,7 @@ jobs:
               ROUNDTABLE_BOOTSTRAP_PYTHON="$(command -v python)" \
               ./install --prefix "$prefix" --link-dir "$link_dir"
             export PATH="$link_dir:$PATH"
-            HOME="$setup_home" roundtable --help
+            HOME="$setup_home" pneu --help
             setup=(
               "$link_dir/roundtable-setup"
               --home "$setup_home"
@@ -144,10 +144,10 @@ jobs:
             test -d "$prefix/.runtime"
             test -f "$setup_home/.claude/settings.json"
             test -f "$setup_home/.hermes/config.yaml"
-            test -L "$setup_home/.claude/skills/roundtable"
-            test -L "$setup_home/.hermes/plugins/roundtable"
-            test -L "$setup_home/.hermes/skills/roundtable"
-            test -L "$setup_home/.codex/skills/roundtable"
+            test -L "$setup_home/.claude/skills/pneu"
+            test -L "$setup_home/.hermes/plugins/pneu"
+            test -L "$setup_home/.hermes/skills/pneu"
+            test -L "$setup_home/.codex/skills/pneu"
             test -f "$setup_home/Library/LaunchAgents/com.roundtable.codex-app-server.plist"
             test -f "$setup_home/Library/LaunchAgents/com.roundtable.codex-wake.plist"
             test ! -e "$launchctl_sentinel"
@@ -163,10 +163,10 @@ jobs:
             test ! -e "$prefix/harness-setup.json"
             test ! -e "$setup_home/.claude/settings.json"
             test ! -e "$setup_home/.hermes/config.yaml"
-            test ! -L "$setup_home/.claude/skills/roundtable"
-            test ! -L "$setup_home/.hermes/plugins/roundtable"
-            test ! -L "$setup_home/.hermes/skills/roundtable"
-            test ! -L "$setup_home/.codex/skills/roundtable"
+            test ! -L "$setup_home/.claude/skills/pneu"
+            test ! -L "$setup_home/.hermes/plugins/pneu"
+            test ! -L "$setup_home/.hermes/skills/pneu"
+            test ! -L "$setup_home/.codex/skills/pneu"
             test ! -e "$setup_home/Library/LaunchAgents/com.roundtable.codex-app-server.plist"
             test ! -e "$setup_home/Library/LaunchAgents/com.roundtable.codex-wake.plist"
             test ! -e "$launchctl_sentinel"
@@ -179,7 +179,7 @@ jobs:
       - name: Upload candidate without publishing a release
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: roundtable-messaging-macos
+          name: pneu-macos
           path: artifacts/*
           if-no-files-found: error
           compression-level: 0

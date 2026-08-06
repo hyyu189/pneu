@@ -1,4 +1,4 @@
-"""Ownership-safe onboarding for Roundtable harness integrations.
+"""Ownership-safe onboarding for pneu harness integrations.
 
 The command is deliberately dry-run first: invoking it without a subcommand is
 equivalent to ``plan``.  ``plan`` and ``status`` only inspect files.  ``apply``
@@ -188,7 +188,7 @@ def _validate_prefix(prefix: Path) -> None:
     info = _inspect_owned(prefix, kind="directory")
     if info is None:
         raise SetupError(
-            f"Roundtable install prefix does not exist: {prefix}; install the package first"
+            f"pneu install prefix does not exist: {prefix}; install the package first"
         )
 
 
@@ -575,7 +575,7 @@ def _hermes_managed_insertion(
     enabled_value = (
         plugins_value.get("enabled") if isinstance(plugins_value, dict) else None
     )
-    if isinstance(enabled_value, list) and "roundtable" in enabled_value:
+    if isinstance(enabled_value, list) and "pneu" in enabled_value:
         return payload, None
 
     plugins_node = root_entries.get("plugins")
@@ -583,11 +583,11 @@ def _hermes_managed_insertion(
         index = len(text)
         indent = ""
         body = (
-            "# >>> roundtable managed: hermes plugin\n"
+            "# >>> pneu managed: hermes plugin\n"
             "plugins:\n"
             "  enabled:\n"
-            "    - roundtable\n"
-            "# <<< roundtable managed: hermes plugin\n"
+            "    - pneu\n"
+            "# <<< pneu managed: hermes plugin\n"
         )
     else:
         if not isinstance(plugins_node, yaml.MappingNode) or plugins_node.flow_style:
@@ -603,10 +603,10 @@ def _hermes_managed_insertion(
             index = plugins_node.end_mark.index
             indent = " " * plugins_node.start_mark.column
             body = (
-                f"{indent}# >>> roundtable managed: hermes plugin\n"
+                f"{indent}# >>> pneu managed: hermes plugin\n"
                 f"{indent}enabled:\n"
-                f"{indent}  - roundtable\n"
-                f"{indent}# <<< roundtable managed: hermes plugin\n"
+                f"{indent}  - pneu\n"
+                f"{indent}# <<< pneu managed: hermes plugin\n"
             )
         else:
             if not isinstance(enabled_node, yaml.SequenceNode) or enabled_node.flow_style:
@@ -617,9 +617,9 @@ def _hermes_managed_insertion(
             index = enabled_node.end_mark.index
             indent = " " * enabled_node.start_mark.column
             body = (
-                f"{indent}# >>> roundtable managed: hermes plugin\n"
-                f"{indent}- roundtable\n"
-                f"{indent}# <<< roundtable managed: hermes plugin\n"
+                f"{indent}# >>> pneu managed: hermes plugin\n"
+                f"{indent}- pneu\n"
+                f"{indent}# <<< pneu managed: hermes plugin\n"
             )
 
     separator = "" if index == 0 or text[index - 1] == "\n" else "\n"
@@ -786,7 +786,7 @@ def _claude_permission_rules(prefix: Path) -> tuple[str, ...]:
     unsafe = set("*?[](){}'\"\\$`;|&<>")
     if any(character.isspace() or character in unsafe for character in rendered_prefix):
         raise SetupError(
-            "Claude integration requires a shell-safe Roundtable install prefix "
+            "Claude integration requires a shell-safe pneu install prefix "
             f"for exact permission rules; unsupported prefix: {rendered_prefix!r}"
         )
     command_root = prefix / "bin"
@@ -825,7 +825,7 @@ def _claude_permission_conflicts(
 
 
 def _codex_groups(prefix: Path) -> dict[str, dict[str, Any]]:
-    """Return the one lifecycle hook Roundtable owns in Codex.
+    """Return the one lifecycle hook pneu owns in Codex.
 
     The hook only records a fenced bind request.  The wake bridge performs the
     app-server identity validation later, outside the SessionStart callback.
@@ -896,16 +896,16 @@ def _selected_runtime(home: Path, prefix: Path) -> Path:
 
 def _skill_path(home: Path, harness: str) -> Path:
     if harness == "codex":
-        return _selected_codex_home(home) / "skills" / "roundtable"
-    return home / f".{harness}" / "skills" / "roundtable"
+        return _selected_codex_home(home) / "skills" / "pneu"
+    return home / f".{harness}" / "skills" / "pneu"
 
 
 def _skill_target(prefix: Path) -> Path:
-    return prefix / "skills" / "shared" / "roundtable"
+    return prefix / "skills" / "shared" / "pneu"
 
 
 def _hermes_plugin_path(home: Path) -> Path:
-    return home / ".hermes" / "plugins" / "roundtable"
+    return home / ".hermes" / "plugins" / "pneu"
 
 
 def _hermes_plugin_target(prefix: Path) -> Path:
@@ -913,10 +913,10 @@ def _hermes_plugin_target(prefix: Path) -> Path:
         prefix
         / "current"
         / "share"
-        / "roundtable"
+        / "pneu"
         / "integrations"
         / "hermes"
-        / "roundtable"
+        / "pneu"
     )
 
 
@@ -974,7 +974,7 @@ def _prepare_claude(
     after = copy.deepcopy(before)
     if after.get("disableAllHooks") is True:
         raise SetupError(
-            "Claude disableAllHooks=true prevents Roundtable wake hooks; "
+            "Claude disableAllHooks=true prevents pneu wake hooks; "
             "review that user choice with /hooks before applying setup"
         )
     prior_config = (
@@ -1020,7 +1020,7 @@ def _prepare_claude(
             count = groups.count(group)
             if count > 1:
                 raise SetupError(
-                    f"Claude hook event {event} contains duplicate Roundtable "
+                    f"Claude hook event {event} contains duplicate pneu "
                     f"fragments: {path}"
                 )
             added = count == 0
@@ -1037,13 +1037,13 @@ def _prepare_claude(
                 if not added:
                     raise SetupError(
                         f"cannot replace pre-existing legacy Claude {event} "
-                        "hook; first remove Roundtable setup, then remove that "
+                        "hook; first remove pneu setup, then remove that "
                         "user-owned fragment, and apply setup again"
                     )
                 if groups.count(group):
                     raise SetupError(
                         f"Claude hook event {event} already contains the new "
-                        f"Roundtable fragment: {path}"
+                        f"pneu fragment: {path}"
                     )
                 index = groups.index(prior_group)
                 groups[index] = copy.deepcopy(group)
@@ -1080,7 +1080,7 @@ def _prepare_claude(
             f"permissions.{policy}={rule!r}" for policy, rule in conflicts
         )
         raise SetupError(
-            "Claude ask/deny rules override Roundtable's narrow unattended "
+            "Claude ask/deny rules override pneu's narrow unattended "
             f"mail permissions: {rendered}; review them with /permissions "
             "before applying setup"
         )
@@ -1107,7 +1107,7 @@ def _prepare_claude(
         count = allow.count(rule)
         if count > 1:
             raise SetupError(
-                f"Claude permissions.allow contains duplicate Roundtable rule "
+                f"Claude permissions.allow contains duplicate pneu rule "
                 f"{rule!r}: {path}"
             )
         prior_rule = prior_rules.get(rule)
@@ -1176,19 +1176,19 @@ def _prepare_hermes(home: Path, prefix: Path) -> tuple[dict[str, Any], dict[str,
     disabled = plugins.get("disabled", [])
     if not isinstance(disabled, list):
         raise SetupError(f"Hermes plugins.disabled must be a list: {path}")
-    if "roundtable" in disabled:
+    if "pneu" in disabled:
         raise SetupError(
-            f"Hermes plugin 'roundtable' is explicitly disabled in {path}; "
+            f"Hermes plugin 'pneu' is explicitly disabled in {path}; "
             "remove that user choice before applying setup"
         )
 
     enabled = plugins.get("enabled", [])
     if not isinstance(enabled, list):
         raise SetupError(f"Hermes plugins.enabled must be a list: {path}")
-    enabled_count = enabled.count("roundtable")
+    enabled_count = enabled.count("pneu")
     if enabled_count > 1:
         raise SetupError(
-            f"Hermes plugins.enabled contains duplicate 'roundtable' entries: {path}"
+            f"Hermes plugins.enabled contains duplicate 'pneu' entries: {path}"
         )
     enabled_added = enabled_count == 0
     after_payload, managed_fragment = _hermes_managed_insertion(
@@ -1228,7 +1228,7 @@ def _prepare_hermes(home: Path, prefix: Path) -> tuple[dict[str, Any], dict[str,
 @contextlib.contextmanager
 def _codex_context(home: Path, prefix: Path) -> Iterator[Any]:
     if _rtcodex is None:
-        raise SetupError("Roundtable Codex support module is not installed")
+        raise SetupError("pneu Codex support module is not installed")
     module = _rtcodex
     names = (
         "INSTALL_PREFIX",
@@ -1392,7 +1392,7 @@ def _prepare_codex_config(
     count = groups.count(group)
     if count > 1:
         raise SetupError(
-            f"Codex hook event {event} contains duplicate Roundtable "
+            f"Codex hook event {event} contains duplicate pneu "
             f"fragments: {path}"
         )
     added = count == 0
@@ -1704,7 +1704,7 @@ def _validate_hermes(
     if not isinstance(added, bool):
         raise SetupError("invalid Hermes plugin ownership record")
     if not added_only or added:
-        if not isinstance(enabled, list) or enabled.count("roundtable") != 1:
+        if not isinstance(enabled, list) or enabled.count("pneu") != 1:
             raise SetupError(
                 "managed Hermes plugin drift: expected exactly one enabled entry"
             )
@@ -1726,8 +1726,8 @@ def _validate_hermes(
             raise SetupError("invalid pre-existing Hermes plugin ownership record")
     elif config.get("managed_fragment") is not None:
         raise SetupError("invalid pre-existing Hermes plugin ownership record")
-    if isinstance(disabled, list) and "roundtable" in disabled:
-        raise SetupError("managed Hermes plugin drift: roundtable is now disabled")
+    if isinstance(disabled, list) and "pneu" in disabled:
+        raise SetupError("managed Hermes plugin drift: pneu is now disabled")
     for key, path, target in (
         (
             "plugin",
@@ -2281,7 +2281,7 @@ def _selected(
 
 def _source_preflight(prefix: Path, harnesses: list[str]) -> None:
     if harnesses:
-        _validate_source(_skill_target(prefix), "installed Roundtable skill")
+        _validate_source(_skill_target(prefix), "installed pneu skill")
     if "claude" in harnesses:
         for command, description in (
             ("rt-wait-inbox", "Claude inbox wake hook"),
@@ -2291,17 +2291,17 @@ def _source_preflight(prefix: Path, harnesses: list[str]) -> None:
         ):
             _validate_executable(
                 prefix / "bin" / command,
-                f"installed Roundtable {description}",
+                f"installed pneu {description}",
             )
     if "hermes" in harnesses:
         _validate_source(
             _hermes_plugin_target(prefix),
-            "installed Hermes Roundtable integration",
+            "installed Hermes pneu integration",
         )
     if "codex" in harnesses:
         _validate_executable(
             prefix / "bin" / "rt-codex-session-start",
-            "installed Roundtable Codex SessionStart hook",
+            "installed pneu Codex SessionStart hook",
         )
 
 
@@ -2772,7 +2772,7 @@ def _render(result: dict[str, Any], *, as_json: bool) -> None:
     if result.get("restart_required"):
         print(
             "  Codex service activation/reload is deferred to the next "
-            "Roundtable Codex launch; Roundtable may ask before a shared reload"
+            "pneu Codex launch; pneu may ask before a shared reload"
         )
 
 
@@ -2793,7 +2793,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         help="harness to configure; repeat for more than one",
     )
-    parser.add_argument("--prefix", help="Roundtable installation prefix")
+    parser.add_argument("--prefix", help="pneu installation prefix")
     parser.add_argument("--home", help="home directory to configure")
     parser.add_argument(
         "--unload-codex",
@@ -2814,7 +2814,7 @@ def main(argv: list[str] | None = None) -> int:
     prefix = (
         _absolute(args.prefix)
         if args.prefix
-        else _absolute(os.environ.get("ROUNDTABLE_INSTALL_PREFIX", home / ".roundtable"))
+        else _absolute(os.environ.get("ROUNDTABLE_INSTALL_PREFIX", home / ".pneu"))
     )
     try:
         _validate_user_chain(home, home)
