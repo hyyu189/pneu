@@ -816,6 +816,68 @@ def test_rt_inbox_json_all_outputs_current_records(tmp_path):
     assert payload[0]["body"] == "new"
 
 
+def test_rt_inbox_renders_origin_project_and_reply_to_with_legacy_fallback(
+    tmp_path,
+):
+    project = tmp_path / "project"
+    state = write_project(project)
+    origin_uuid = json.loads((state / "project.json").read_text())["uuid"]
+    uuid_id = "20260806T020000Z-codex-to-claude-70001"
+    legacy_id = "20260806T020001Z-hermes-to-claude-70002"
+    unknown_id = "20260806T020002Z-grok-to-claude-70003"
+    new_dir = state / "inbox" / "claude" / "new"
+    new_dir.mkdir(parents=True)
+    (new_dir / f"{uuid_id}.md").write_text(
+        _rtlib.format_mail_envelope(
+            "codex",
+            "claude",
+            "question",
+            uuid_id,
+            "uuid-aware local",
+            origin_uuid=origin_uuid,
+        )
+    )
+    write_mail(state, "claude", legacy_id, "hermes", "fyi", "legacy local")
+    (new_dir / f"{unknown_id}.md").write_text(
+        _rtlib.format_mail_envelope(
+            "grok",
+            "claude",
+            "fyi",
+            unknown_id,
+            "unknown origin",
+            origin_uuid="00000000-0000-4000-8000-000000000099",
+        )
+    )
+
+    inbox = run_tool(
+        "rt-inbox",
+        "claude",
+        "-f",
+        "json",
+        cwd=project,
+        env={"RT_FROM": "claude"},
+    )
+
+    assert inbox.returncode == 0, inbox.stderr
+    payload = {record["msg_id"]: record for record in json.loads(inbox.stdout)}
+    assert payload[uuid_id]["from"] == f"codex@{project.name}"
+    assert payload[uuid_id]["reply_to"] == f"codex@{project.name}"
+    assert payload[legacy_id]["from"] == "hermes"
+    assert payload[legacy_id]["reply_to"] == "hermes"
+    assert payload[unknown_id]["from"] == "grok"
+    assert payload[unknown_id]["reply_to"] == "grok"
+
+    text_inbox = run_tool(
+        "rt-inbox",
+        "claude",
+        cwd=project,
+        env={"RT_FROM": "claude"},
+    )
+    assert text_inbox.returncode == 0, text_inbox.stderr
+    assert f"codex@{project.name}" in text_inbox.stdout
+    assert "hermes  fyi" in text_inbox.stdout
+
+
 def test_rt_say_inbox_ack_flow_with_fake_cmux(tmp_path):
     project = tmp_path / "project"
     write_project(project)
@@ -1306,6 +1368,8 @@ def test_rt_say_cross_worktree_uses_target_config_and_origin_ledger(tmp_path):
     assert payload[0]["msg_id"] == msg_id
     assert payload[0]["origin_uuid"] == origin_uuid
     assert payload[0]["target_project_uuid"] == target_uuid
+    assert payload[0]["from"] == f"codex@{origin.name}"
+    assert payload[0]["reply_to"] == f"codex@{origin.name}"
 
 
 def test_rt_say_cross_worktree_creates_fresh_origin_ledger_directories(
@@ -1760,6 +1824,11 @@ def test_rt_ack_groups_same_named_senders_by_origin_uuid(tmp_path):
     )
     assert len(first_quiet) == 1
     assert len(third_quiet) == 1
+    receiver_uuid = json.loads(
+        (receiver_state / "project.json").read_text()
+    )["uuid"]
+    assert f" origin={receiver_uuid}]" in first_quiet[0].read_text()
+    assert f" origin={receiver_uuid}]" in third_quiet[0].read_text()
     assert f"refs={refs[0]}" in first_quiet[0].read_text()
     assert f"refs={refs[1]}" in third_quiet[0].read_text()
     assert not list(
@@ -2754,7 +2823,7 @@ def test_rt_say_folds_agent_case_but_keeps_project_name_exact(tmp_path):
     ).is_file()
 
 
-def test_rt_say_named_address_excludes_sender_project_itself(tmp_path):
+def test_rt_say_named_address_resolves_sender_project_locally(tmp_path):
     (
         origin,
         origin_state,
@@ -2764,22 +2833,36 @@ def test_rt_say_named_address_excludes_sender_project_itself(tmp_path):
         env,
     ) = git_sibling_projects(tmp_path)
 
-    sent = run_tool(
+    named = run_tool(
         "rt-say",
         f"claude@{origin.name}",
         "question",
-        "qualified form is sibling-only",
+        "qualified form is local",
+        cwd=origin,
+        env=env,
+    )
+    bare = run_tool(
+        "rt-say",
+        "claude",
+        "question",
+        "bare form is local",
         cwd=origin,
         env=env,
     )
 
-    assert sent.returncode != 0
-    assert f"no active sibling project named {origin.name!r}" in sent.stderr
-    assert not (origin_state / "inbox").exists()
-    assert read_ledger(origin_state) == []
+    assert named.returncode == 0, named.stderr
+    assert bare.returncode == 0, bare.stderr
+    named_id = named.stdout.strip().split()[-1]
+    bare_id = bare.stdout.strip().split()[-1]
+    local_new = origin_state / "inbox" / "claude" / "new"
+    assert (local_new / f"{named_id}.md").is_file()
+    assert (local_new / f"{bare_id}.md").is_file()
+    assert not (_target_state / "inbox").exists()
 
 
-def test_rt_say_same_basename_address_selects_sibling_not_sender(tmp_path):
+def test_rt_say_same_basename_address_fails_closed_with_self_project_enabled(
+    tmp_path,
+):
     (
         origin,
         origin_state,
@@ -2798,12 +2881,10 @@ def test_rt_say_same_basename_address_selects_sibling_not_sender(tmp_path):
         env=env,
     )
 
-    assert sent.returncode == 0, sent.stderr
-    ref = sent.stdout.strip().split()[-1]
-    assert (
-        sibling_state / "inbox" / "claude" / "new" / f"{ref}.md"
-    ).is_file()
-    assert not (origin_state / "inbox" / "claude").exists()
+    assert sent.returncode != 0
+    assert "is ambiguous in sender group" in sent.stderr
+    assert not (sibling_state / "inbox").exists()
+    assert not (origin_state / "inbox").exists()
 
 
 def test_rt_say_non_git_group_of_one_refuses_every_named_address(tmp_path):
@@ -2817,21 +2898,31 @@ def test_rt_say_non_git_group_of_one_refuses_every_named_address(tmp_path):
         "RT_PROJECTS_FILE": str(registry),
     }
 
-    for project_name in (target.name, origin.name):
-        sent = run_tool(
-            "rt-say",
-            f"claude@{project_name}",
-            "question",
-            "non-git projects are groups of one",
-            cwd=origin,
-            env=env,
-        )
+    sibling_sent = run_tool(
+        "rt-say",
+        f"claude@{target.name}",
+        "question",
+        "non-git sibling remains unavailable",
+        cwd=origin,
+        env=env,
+    )
+    local_sent = run_tool(
+        "rt-say",
+        f"claude@{origin.name}",
+        "question",
+        "non-git self project is local",
+        cwd=origin,
+        env=env,
+    )
 
-        assert sent.returncode != 0
-        assert "no active sibling project" in sent.stderr
+    assert sibling_sent.returncode != 0
+    assert "no active sibling project" in sibling_sent.stderr
+    assert local_sent.returncode == 0, local_sent.stderr
+    local_id = local_sent.stdout.strip().split()[-1]
+    assert (
+        origin_state / "inbox" / "claude" / "new" / f"{local_id}.md"
+    ).is_file()
     assert not (target_state / "inbox").exists()
-    assert not (origin_state / "inbox").exists()
-    assert read_ledger(origin_state) == []
 
 
 def test_resolve_project_address_identity_mismatch_echoes_typed_name(
@@ -4898,7 +4989,8 @@ def test_maildir_default_does_not_probe_even_an_unhealthy_cmux(tmp_path):
 
     assert proc.returncode == 0
     assert (
-        "note: no active seat observed for claude; mail is durable" in proc.stderr
+        "note: no seat has ever been claimed for claude in this project; "
+        "mail is durable" in proc.stderr
     )
     assert proc.stdout.startswith("sent maildir-only ")
     assert read_cmux_calls(trace_dir) == []
@@ -4927,8 +5019,58 @@ def test_maildir_status_precedes_inactive_seat_advisory_on_terminal(tmp_path):
 
     assert proc.returncode == 0
     assert proc.stdout.index("sent maildir-only") < proc.stdout.index(
-        "note: no active seat observed"
+        "note: no seat has ever been claimed"
     )
+
+
+def test_maildir_advisory_distinguishes_a_previously_claimed_seat(tmp_path):
+    project, _state, env, _trace_dir = say_project(tmp_path)
+    token = _rtruntime.claim(project, "claude", "claude", owner_pid=os.getpid())
+    assert _rtruntime.release(token)
+
+    proc = run_tool("rt-say", "claude", "fyi", "claimed before", cwd=project, env=env)
+
+    assert proc.returncode == 0
+    assert "note: no active seat observed for claude; mail is durable" in proc.stderr
+    assert "no seat has ever been claimed" not in proc.stderr
+
+
+def test_maildir_advisory_suggests_active_same_agent_sibling(tmp_path):
+    origin, _origin_state, sibling, _sibling_state, _registry, env = (
+        git_sibling_projects(tmp_path)
+    )
+    token = _rtruntime.claim(sibling, "claude", "claude", owner_pid=os.getpid())
+    try:
+        proc = run_tool(
+            "rt-say",
+            f"claude@{origin.name}",
+            "fyi",
+            "sibling suggestion",
+            cwd=origin,
+            env=env,
+        )
+    finally:
+        assert _rtruntime.release(token)
+
+    assert proc.returncode == 0
+    assert "did you mean claude@frontend?" in proc.stderr
+
+
+def test_maildir_advisory_does_not_suggest_an_inactive_sibling(tmp_path):
+    origin, _origin_state, _sibling, _sibling_state, _registry, env = (
+        git_sibling_projects(tmp_path)
+    )
+    proc = run_tool(
+        "rt-say",
+        f"claude@{origin.name}",
+        "fyi",
+        "no sibling suggestion",
+        cwd=origin,
+        env=env,
+    )
+
+    assert proc.returncode == 0
+    assert "did you mean" not in proc.stderr
 
 
 def test_default_maildir_sender_uses_unique_codex_thread_environment_without_cmux(tmp_path):

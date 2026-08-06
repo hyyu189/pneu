@@ -1690,7 +1690,6 @@ def resolve_project_address(
             raw
             for raw in (document.get("projects") or [])
             if isinstance(raw, dict)
-            and raw.get("uuid") != origin_uuid
             and raw.get("name") == target_name
             and raw.get("status") != "tombstoned"
         ]
@@ -1698,7 +1697,6 @@ def resolve_project_address(
             entry
             for entry in entries
             if entry.get("status") == "active"
-            and entry.get("uuid") != origin_uuid
             and entry.get("name") == target_name
         ]
         candidate_uuids = {entry["uuid"] for entry in candidates}

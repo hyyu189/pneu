@@ -693,6 +693,34 @@ def render_text(records):
     )
 
 
+def render_records(records):
+    """Add mutable, registry-derived sender and reply display fields."""
+
+    try:
+        registry_entries, _warnings = load_project_registry_strict()
+    except ProjectRegistryError:
+        registry_entries = []
+    project_names = {
+        entry.get("uuid"): entry.get("name")
+        for entry in registry_entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("uuid"), str)
+        and isinstance(entry.get("name"), str)
+        and entry.get("name")
+    }
+    rendered = []
+    for record in records:
+        record = dict(record)
+        sender = str(record.get("from") or "")
+        project_name = project_names.get(record.get("origin_uuid"))
+        if sender and project_name:
+            sender = f"{sender}@{project_name}"
+        record["from"] = sender
+        record["reply_to"] = sender
+        rendered.append(record)
+    return rendered
+
+
 def _main_locked(args, fenced_agent):
     notices = []
     agent = (args.agent or fenced_agent or infer_agent()).lower()
@@ -785,6 +813,7 @@ def main():
         INBOX_DIR = mailbox.inbox_dir
         PROJECT_UUID = mailbox.project_uuid
         records, output_format, notices = _main_locked(args, fenced_agent)
+    records = render_records(records)
     output = (
         json.dumps(records, ensure_ascii=False, indent=2)
         if output_format == "json"
