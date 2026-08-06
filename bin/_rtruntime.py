@@ -712,8 +712,15 @@ def _read_agent_records(paths: SeatPaths, project: Path) -> list[dict[str, Any]]
 def harness_lease_records(
     project: Path | str,
     harness: str,
+    *,
+    claim_lock_held: bool = False,
 ) -> list[dict[str, Any]]:
-    """Return validated lease records for one harness without creating state."""
+    """Return validated lease records for one harness without creating state.
+
+    ``claim_lock_held`` is for callers performing a larger guarded ownership
+    transition. It avoids reopening the same project lock while preserving the
+    normal shared-lock behavior for diagnostic callers.
+    """
     canonical = canonical_project(project)
     selected_harness = _validate_harness(harness)
     paths = seat_paths(canonical, f"__inspect-{selected_harness}__")
@@ -725,8 +732,11 @@ def harness_lease_records(
     if _path_info(paths.agents_dir) is None:
         return []
     _validate_read_path(paths.agents_dir, directory=True)
-    with _locked(paths.claim_lock, shared=True):
+    if claim_lock_held:
         records = _read_agent_records(paths, canonical)
+    else:
+        with _locked(paths.claim_lock, shared=True):
+            records = _read_agent_records(paths, canonical)
     return [
         json.loads(json.dumps(record))
         for record in records
@@ -1127,6 +1137,69 @@ def resolve_codex_launch_intent(
         return current
 
 
+def clear_codex_launch_intent_if_stale(
+    project: Path | str,
+    *,
+    lock_held: bool = False,
+) -> bool:
+    """Remove a Codex launch intent only after proving its lease is stale.
+
+    The handoff command uses this while holding ``seat_claim_guard``.  An
+    intent tied to a live or ambiguous seat is never removed; a missing lease
+    is stale, and a stale lease is removable only when its complete fence
+    matches the intent.  This keeps cleanup from becoming an alternate way to
+    steal a live launch claim.
+    """
+
+    canonical = canonical_project(project)
+    lookup = seat_paths(canonical, "__codex-launch-intent__")
+    intent_path = lookup.project_dir / CODEX_LAUNCH_INTENT_NAME
+
+    def clear() -> bool:
+        if _path_info(intent_path) is None:
+            return False
+        payload = _read_json(intent_path)
+        if payload is None:
+            return False
+        agent_id, session_id, revision, _active, _armed_at = (
+            _validate_codex_launch_intent(payload, canonical)
+        )
+        inspection = inspect_seat(canonical, agent_id)
+        if inspection.status in {"active_healthy", "active_unhealthy"}:
+            raise RuntimeStateError(
+                f"Codex launch intent still belongs to an active seat for {canonical}"
+            )
+        if inspection.status == "ambiguous":
+            raise RuntimeStateError(
+                f"Codex launch intent seat state is ambiguous for {canonical}: "
+                f"{inspection.detail}"
+            )
+        if inspection.status == "stale":
+            token = inspection.token
+            if (
+                token is None
+                or token.agent_id != agent_id
+                or token.session_id != session_id
+                or str(token.revision) != str(revision)
+            ):
+                raise RuntimeStateError(
+                    "Codex launch intent does not match the stale seat fence"
+                )
+        elif inspection.status != "vacant":
+            raise RuntimeStateError(
+                f"cannot classify Codex launch intent state for {canonical}: "
+                f"{inspection.status}"
+            )
+        _validate_read_path(intent_path, directory=False)
+        intent_path.unlink()
+        return True
+
+    if lock_held:
+        return clear()
+    with seat_claim_guard(canonical):
+        return clear()
+
+
 def _normalize_fence(session_id: Any, revision: Any) -> tuple[str, str]:
     if not isinstance(session_id, str) or not session_id:
         raise FenceRejected("session ID is missing")
@@ -1207,6 +1280,27 @@ def seat_shared_guard(
             session_id,
             revision,
         )
+
+
+@contextmanager
+def seat_claim_guard(project: Path | str, agent_id: str = "codex"):
+    """Hold the project claim lock for a guarded seat handoff.
+
+    A handoff must inspect stale state and remove the binding/launch intent as
+    one ownership transition. Claimers and fenced routing operations already
+    use this lock, so keeping it exclusive prevents a fresh seat from being
+    published between the safety check and the cleanup.
+    """
+
+    canonical = canonical_project(project)
+    paths = seat_paths(canonical, agent_id)
+    _ensure_private_dir(paths.runtime_root)
+    _ensure_private_dir(paths.runtime_root / "projects")
+    _ensure_private_dir(paths.project_dir)
+    _ensure_private_dir(paths.agents_dir)
+    with _locked(paths.claim_lock):
+        _write_project_meta(paths, canonical)
+        yield
 
 
 @contextmanager

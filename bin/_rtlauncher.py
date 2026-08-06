@@ -25,6 +25,7 @@ from _rtruntime import (
     SeatOccupied,
     arm_codex_launch_intent,
     claim,
+    inspect_seat,
     release,
     runtime_root,
 )
@@ -210,8 +211,10 @@ def claim_launch_seat(root: Path | None, harness: str, agent_id: str | None):
             f"rt-{harness}: no configured {harness} instance in {root}; "
             "add one to .roundtable/agents.yaml or set RT_FROM"
         )
+    token = _same_process_lease(root, harness, agent_id)
     try:
-        token = claim(root, agent_id, harness)
+        if token is None:
+            token = claim(root, agent_id, harness)
     except SeatOccupied as error:
         status = error.inspection.status
         condition = "unhealthy" if status == "active_unhealthy" else "active"
@@ -244,6 +247,39 @@ def claim_launch_seat(root: Path | None, harness: str, agent_id: str | None):
         "RT_LEASE_REVISION": str(token.revision),
     }
     os.environ.update(environment)
+    return token
+
+
+def _same_process_lease(
+    root: Path | None,
+    harness: str,
+    agent_id: str,
+):
+    """Return an active lease already owned by this launcher process.
+
+    A resume-shaped launcher can be re-entered by a harness lifecycle path
+    before the original process reaches ``exec``.  Claiming the logical seat a
+    second time is not safe: the lease file can advance while the child still
+    receives the first claim's environment.  Reusing only a lease whose
+    validated owner PID is this process makes that path idempotent while
+    preserving the normal fail-closed claim behavior for every other owner.
+    """
+
+    if root is None or not agent_id:
+        return None
+    try:
+        inspection = inspect_seat(root, agent_id)
+    except RuntimeStateError:
+        return None
+    token = inspection.token
+    if (
+        inspection.status not in {"active_healthy", "active_unhealthy"}
+        or token is None
+        or token.agent_id != agent_id
+        or token.harness != harness
+        or token.owner_pid != os.getpid()
+    ):
+        return None
     return token
 
 

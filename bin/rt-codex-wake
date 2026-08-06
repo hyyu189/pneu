@@ -13,6 +13,7 @@ import math
 import os
 import signal
 import shutil
+import shlex
 import stat
 import subprocess
 import sys
@@ -55,10 +56,12 @@ from _rtruntime import (
     LeaseToken,
     RuntimeStateError,
     bind_request_guard,
+    clear_codex_launch_intent_if_stale,
     harness_lease_records,
     inspect_seat,
     legacy_harness_guard,
     load_validated_lease,
+    seat_claim_guard,
     seat_shared_guard,
     update_wake,
 )
@@ -370,6 +373,82 @@ class StateStore:
             atomic_json(self.path, self.data)
             return dict(binding), True
 
+    def adopt_binding(
+        self,
+        project: Path,
+        thread: dict,
+        lease: LeaseToken,
+        *,
+        expected_thread_id: str,
+    ) -> tuple[dict, bool]:
+        """Move one existing thread binding onto the current fenced lease.
+
+        Adoption is narrower than a normal bind: the stored project and
+        native thread must be the exact identities selected by the caller.
+        The caller holds ``seat_shared_guard`` for the fresh lease, so an old
+        owner cannot race this state transition.
+        """
+
+        key = str(project)
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str) or thread_id != expected_thread_id:
+            raise IdentityError(
+                f"binding adoption thread identity mismatch for {project}"
+            )
+        if lease.harness != "codex":
+            raise IdentityError(
+                f"binding adoption lease is for harness {lease.harness!r}"
+            )
+        with self._lock(True):
+            loaded = self._read()
+            if loaded is not None:
+                self.data = loaded
+            existing = self.bindings.get(key)
+            if not isinstance(existing, dict):
+                raise IdentityError(f"no stored binding to adopt for {project}")
+            if (
+                existing.get("project") != key
+                or existing.get("agent") != lease.agent_id
+                or existing.get("threadId") != expected_thread_id
+            ):
+                raise IdentityError(
+                    f"stored binding identity changed before adoption for {project}"
+                )
+            same_fence = (
+                existing.get("roundtableSessionId") == lease.session_id
+                and str(existing.get("leaseRevision")) == str(lease.revision)
+            )
+            if same_fence:
+                return dict(existing), False
+            for other_project, binding in self.bindings.items():
+                if other_project != key and binding.get("threadId") == expected_thread_id:
+                    raise IdentityError(
+                        f"thread {expected_thread_id} is already bound to "
+                        f"{other_project}"
+                    )
+            now = utc_now()
+            adopted = dict(existing)
+            adopted.update(
+                {
+                    "agent": lease.agent_id,
+                    "project": key,
+                    "threadId": expected_thread_id,
+                    "sessionId": thread.get("sessionId"),
+                    "bindingRevision": uuid.uuid4().hex,
+                    "roundtableSessionId": lease.session_id,
+                    "leaseRevision": lease.revision,
+                    "adoptedAt": now,
+                }
+            )
+            self.bindings[key] = adopted
+            self.data.setdefault("projects", {})[key] = {
+                "phase": "EMPTY",
+                "reboundAt": now,
+                "adoptedAt": now,
+            }
+            atomic_json(self.path, self.data)
+            return dict(adopted), True
+
     def unbind(self, project: Path) -> bool:
         key = str(project.expanduser().resolve())
         with self._lock(True):
@@ -566,10 +645,91 @@ def _discover_binding_lease(project: Path) -> LeaseToken | None:
     return inspection.token
 
 
+def _adopt_stale_binding(
+    client: AppServerClient,
+    store: StateStore,
+    project: Path,
+    binding: dict,
+) -> tuple[dict, LeaseToken] | None:
+    """Adopt a dead-fenced binding when its exact thread has a fresh seat.
+
+    The bridge must prove the same project, agent, native thread, supported
+    interactive source, and a live current Codex lease before changing the
+    stored fence. A changed or ambiguous identity remains a rejection.
+    """
+
+    agent_id = binding.get("agent")
+    thread_id = binding.get("threadId")
+    if not isinstance(agent_id, str) or not agent_id:
+        raise IdentityError(f"stored binding lacks agent identity for {project}")
+    if not isinstance(thread_id, str) or not thread_id:
+        raise IdentityError(f"stored binding lacks threadId for {project}")
+    inspection = inspect_seat(project, agent_id)
+    if inspection.status in {"vacant", "stale"}:
+        return None
+    if inspection.status == "ambiguous" or inspection.token is None:
+        raise IdentityError(
+            f"cannot adopt binding on an ambiguous Codex seat for {project}: "
+            f"{inspection.detail}"
+        )
+    if inspection.status not in {"active_healthy", "active_unhealthy"}:
+        raise IdentityError(
+            f"cannot classify Codex seat for binding adoption at {project}: "
+            f"{inspection.status}"
+        )
+
+    selected_thread = validate_thread(
+        project,
+        read_thread(client, thread_id),
+        thread_id,
+    )
+    old_session_id = binding.get("roundtableSessionId")
+    old_lease_revision = binding.get("leaseRevision")
+    try:
+        with seat_shared_guard(
+            project,
+            inspection.token.agent_id,
+            inspection.token.session_id,
+            inspection.token.revision,
+        ) as current:
+            adopted, did_change = store.adopt_binding(
+                project,
+                selected_thread,
+                current,
+                expected_thread_id=thread_id,
+            )
+            update_wake(
+                project,
+                current.agent_id,
+                current.session_id,
+                current.revision,
+                native_session_id=thread_id,
+            )
+    except (FenceRejected, RuntimeStateError) as error:
+        raise IdentityError(
+            f"Codex seat changed before binding adoption for {project}: {error}"
+        ) from error
+    if did_change:
+        log_event(
+            "binding_adopted",
+            project=str(project),
+            agent=current.agent_id,
+            thread_id=thread_id,
+            old_session_id=old_session_id,
+            old_lease_revision=old_lease_revision,
+            new_session_id=current.session_id,
+            new_lease_revision=current.revision,
+            binding_revision=adopted.get("bindingRevision"),
+        )
+    return adopted, current
+
+
 def heartbeat_bound_seats(
     store: StateStore,
     projects: list[Path],
     results: list["ProjectResult"],
+    *,
+    client: AppServerClient | None = None,
 ) -> None:
     """Refresh per-seat wake health after successful bridge iterations."""
     for project, result in zip(projects, results):
@@ -590,11 +750,29 @@ def heartbeat_bound_seats(
                 native_session_id=binding.get("threadId"),
             )
         except (IdentityError, FenceRejected, RuntimeStateError) as error:
-            log_event(
-                "seat_heartbeat_rejected",
-                project=str(project),
-                error=str(error),
-            )
+            if client is None:
+                log_event(
+                    "seat_heartbeat_rejected",
+                    project=str(project),
+                    error=str(error),
+                )
+                continue
+            try:
+                adopted = _adopt_stale_binding(client, store, project, binding)
+            except (IdentityError, FenceRejected, RuntimeStateError) as adoption_error:
+                log_event(
+                    "seat_heartbeat_rejected",
+                    project=str(project),
+                    error=str(error),
+                    adoption_error=str(adoption_error),
+                )
+            else:
+                if adopted is None:
+                    log_event(
+                        "seat_heartbeat_rejected",
+                        project=str(project),
+                        error=str(error),
+                    )
 
 
 def log_event(event: str, **fields) -> None:
@@ -1459,7 +1637,18 @@ class WakeBridge:
         if binding:
             if binding.get("project") != key:
                 raise IdentityError(f"invalid stored binding identity for {project}")
-            _binding_lease(project, binding)
+            try:
+                _binding_lease(project, binding)
+            except IdentityError as error:
+                adopted = _adopt_stale_binding(
+                    self.client,
+                    self.store,
+                    project,
+                    binding,
+                )
+                if adopted is None:
+                    raise error
+                binding, _lease = adopted
             thread_id = binding.get("threadId")
             if not thread_id:
                 raise IdentityError(f"stored binding lacks threadId for {project}")
@@ -2295,6 +2484,113 @@ def bind_command(args) -> int:
         client.close()
 
 
+def _active_codex_seats(
+    project: Path,
+    *,
+    claim_lock_held: bool = False,
+) -> list[tuple[str, object]]:
+    active = []
+    for record in harness_lease_records(
+        project,
+        "codex",
+        claim_lock_held=claim_lock_held,
+    ):
+        agent_id = record.get("agentId")
+        if not isinstance(agent_id, str) or not agent_id:
+            raise IdentityError(f"Codex lease has invalid agent identity for {project}")
+        inspection = inspect_seat(project, agent_id)
+        if inspection.status == "ambiguous":
+            raise IdentityError(
+                f"Codex seat state is ambiguous for {project}: {inspection.detail}"
+            )
+        if inspection.status in {"active_healthy", "active_unhealthy"}:
+            active.append((agent_id, inspection))
+    return active
+
+
+def handoff_command(args) -> int:
+    """Prepare one safe thread-preserving Codex seat restart."""
+
+    project = canonical_project(Path(args.project or os.getcwd()))
+    thread_id = args.thread_id or os.environ.get("CODEX_THREAD_ID")
+    if not thread_id:
+        raise IdentityError(
+            "CODEX_THREAD_ID is unavailable; pass --thread-id from the target "
+            "Codex turn"
+        )
+    require_supported_version()
+    require_supported_daemon(args.socket)
+    client = AppServerClient(args.socket)
+    try:
+        selected_thread = validate_thread(
+            project,
+            read_thread(client, thread_id),
+            thread_id,
+        )
+        store = StateStore(args.state_file)
+        binding = store.bindings.get(str(project))
+        if not isinstance(binding, dict):
+            raise IdentityError(f"no stored Codex binding for {project}")
+        binding_agent = binding.get("agent")
+        if not isinstance(binding_agent, str) or not binding_agent:
+            raise IdentityError(
+                f"stored Codex binding has invalid agent {binding_agent!r}"
+            )
+        if binding.get("threadId") != thread_id:
+            raise IdentityError(
+                f"stored binding thread {binding.get('threadId')!r} does not match "
+                f"requested thread {thread_id!r}"
+            )
+
+        # The first scan provides an operator-facing refusal before any
+        # mutation. The same check is repeated while the claim lock is held so
+        # a seat cannot appear between validation and cleanup.
+        _active_codex_seats(project)
+        with seat_claim_guard(project, binding_agent):
+            active = _active_codex_seats(project, claim_lock_held=True)
+            if active:
+                names = ", ".join(agent for agent, _inspection in active)
+                raise IdentityError(
+                    f"refusing to hand off while Codex seat(s) are active for "
+                    f"{project}: {names}"
+                )
+            store.reload()
+            binding = store.bindings.get(str(project))
+            if not isinstance(binding, dict) or binding.get("threadId") != thread_id:
+                raise IdentityError(
+                    f"stored binding changed before handoff for {project}"
+                )
+            cleared_intent = clear_codex_launch_intent_if_stale(
+                project,
+                lock_held=True,
+            )
+            removed_binding = store.unbind(project)
+    finally:
+        client.close()
+
+    resume_command = " ".join(
+        (
+            "cd",
+            shlex.quote(str(project)),
+            "&&",
+            "rt-codex",
+            "--resume",
+            shlex.quote(thread_id),
+        )
+    )
+    print(
+        f"handoff prepared project={project} thread={thread_id} "
+        f"unbound={removed_binding} launch_intent_cleared={cleared_intent}"
+    )
+    print(f"next: {resume_command}")
+    print(
+        "next binding: let the resumed Codex SessionStart bind this thread; "
+        f"fallback: rt-codex-wake bind {shlex.quote(str(project))} "
+        f"--thread-id {shlex.quote(thread_id)}"
+    )
+    return 0
+
+
 def unbind_command(args) -> int:
     project = Path(args.project).expanduser().resolve()
     store = StateStore(args.state_file)
@@ -2375,7 +2671,12 @@ def run_command(args) -> int:
                     last_rpc_ok = utc_now()
                     last_error = None
                     heartbeat(heartbeat_file, projects, args.socket, last_rpc_ok, None)
-                    heartbeat_bound_seats(store, bridge.projects, results)
+                    heartbeat_bound_seats(
+                        store,
+                        bridge.projects,
+                        results,
+                        client=client,
+                    )
                     if args.once:
                         return 0 if all(result.ok for result in results) else 1
                     messages = client.drain_notifications(args.poll_seconds)
@@ -2444,6 +2745,13 @@ def build_parser() -> argparse.ArgumentParser:
     unbind = subparsers.add_parser("unbind")
     unbind.add_argument("project")
 
+    handoff = subparsers.add_parser(
+        "handoff",
+        help="prepare a safe thread-preserving Codex seat restart",
+    )
+    handoff.add_argument("project", nargs="?")
+    handoff.add_argument("--thread-id")
+
     install = subparsers.add_parser("install")
     install.add_argument("--reload", action="store_true")
     install.add_argument("--auto-discover", action="store_true")
@@ -2457,6 +2765,8 @@ def main() -> int:
             return bind_command(args)
         if args.command == "unbind":
             return unbind_command(args)
+        if args.command == "handoff":
+            return handoff_command(args)
         if args.command == "install":
             require_default_socket(args.socket)
             require_supported_version()
