@@ -6,7 +6,7 @@ description: >-
   rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
   routing, or cmux surface-routing bugs. Do not use merely because a repo
   contains .roundtable/agents.yaml.
-version: 8.2.0
+version: 8.2.1
 author: pneu contributors
 license: MIT
 platforms: [macos]
@@ -76,6 +76,9 @@ roundtable-init new-git-project --git
 Teammate and scratch Git worktrees need no pneu registration. Adopt only a
 tree that must send or receive mail, using `roundtable-init --here`; its Git
 group membership is derived automatically. Registration is opt-in by design.
+Adopting a linked worktree never appends orientation blocks: those files are
+inherited from the repository, so onboarding leaves them byte-identical and
+only creates files the repository does not carry.
 
 ## Tools (normally linked on PATH via ~/.local/bin/)
 

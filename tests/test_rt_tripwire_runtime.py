@@ -1530,3 +1530,80 @@ def test_old_watcher_cannot_clear_replacement_lease_wake_state(
             owner.kill()
             owner.wait(timeout=5)
     assert_no_project_liveness(project)
+
+
+def test_reply_probe_tracks_expectation_lifecycle(tmp_path, monkeypatch):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+
+    assert _rtruntime.has_reply_expectations(project, "claude") is False
+
+    _rtruntime.add_reply_expectation(
+        project,
+        "claude",
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        msg_id="20260807T060101Z-claude-to-codex-probe",
+        peer="codex",
+        duration="1h",
+    )
+    assert _rtruntime.has_reply_expectations(project, "claude") is True
+
+    cleared, fired = _rtruntime.reconcile_reply_expectations(
+        project,
+        "claude",
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        {"20260807T060101Z-claude-to-codex-probe"},
+    )
+    assert [item.msg_id for item in cleared] == [
+        "20260807T060101Z-claude-to-codex-probe"
+    ]
+    assert fired == ()
+    # Clearing the last expectation unlinks the file, so the probe reports
+    # authoritative absence again.
+    assert _rtruntime.has_reply_expectations(project, "claude") is False
+
+
+def test_idle_poll_skips_ack_scan_without_expectations(tmp_path, monkeypatch):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+    wait = load_wait_module("rt_wait_probe_guard_test")
+
+    def _forbidden_scan(*_args, **_kwargs):
+        raise AssertionError(
+            "idle poll must not scan mailbox acknowledgements when no "
+            "reply expectation is pending"
+        )
+
+    monkeypatch.setattr(wait, "_reply_acknowledgements", _forbidden_scan)
+    assert (
+        wait._reconcile_reply_alarms(
+            project,
+            "claude",
+            environment["RT_SESSION_ID"],
+            environment["RT_LEASE_REVISION"],
+        )
+        == ()
+    )
+
+    _rtruntime.add_reply_expectation(
+        project,
+        "claude",
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        msg_id="20260807T060202Z-claude-to-codex-armed",
+        peer="codex",
+        duration="1h",
+    )
+    with pytest.raises(AssertionError, match="idle poll must not scan"):
+        wait._reconcile_reply_alarms(
+            project,
+            "claude",
+            environment["RT_SESSION_ID"],
+            environment["RT_LEASE_REVISION"],
+        )

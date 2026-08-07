@@ -2,6 +2,24 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-08-07: **Quiet wake** (Ocean). The periodic empty-inbox heartbeat
+  wake is retired in 1.1.0: an armed watcher is long-lived, renews its lease
+  silently, and wakes the model only for mail or a configured reply alarm.
+  The one-shot `rt-say --expect-reply <duration>` deadline alarm (cleared by
+  the quiet `ack-` receipt, fired at most once) is the only timer edge.
+  Runtime residue of retired projects is reclaimed fail-closed at
+  `worktree remove`; `rt-doctor` reports orphans without deleting.
+- 2026-08-07: **No session URLs in this public repository** (Ocean). The
+  public-safety gate forbids private Claude session URLs anywhere in
+  reachable history. Commit messages here must not carry `Claude-Session:`
+  trailers (`Co-Authored-By` remains fine). The two pre-1.1.0 handoff
+  commits that violated this were rewritten before any external consumption;
+  v1.0.0 and earlier history was not touched.
+- 2026-08-07: **Onboarding never dirties a linked worktree** (Ocean).
+  `roundtable-init` skips orientation marker-block appends when the target
+  is a linked Git worktree — those files belong to the repository's main
+  checkout. Missing files are still created; standalone projects are
+  unchanged.
 - 2026-08-06: Product name is **pneu** (Ocean). From Paris pneumatique
   slang where "un pneu" is the message itself; dual backronyms adopted:
   "Project-Native Envelope Utility" for technical contexts and "Postal

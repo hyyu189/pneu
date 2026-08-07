@@ -419,3 +419,65 @@ def test_here_never_turns_the_home_directory_into_a_project(tmp_path):
     assert result.returncode != 0
     assert "refusing to use the home" in result.stderr
     assert not (home / ".roundtable").exists()
+
+
+def test_here_skips_marker_appends_in_linked_worktree(tmp_path):
+    def git(*arguments, cwd):
+        return subprocess.run(
+            ["git", *arguments],
+            cwd=cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=True,
+            env={
+                **os.environ,
+                "GIT_AUTHOR_NAME": "t",
+                "GIT_AUTHOR_EMAIL": "t@example.invalid",
+                "GIT_COMMITTER_NAME": "t",
+                "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            },
+        )
+
+    repo = tmp_path / "mainrepo"
+    repo.mkdir()
+    orientation = {
+        "CLAUDE.md": "# Repo orientation\n\n@ROUTING.md\n@README.md\n",
+        "README.md": "# Hand-rolled readme\n\nRouting notes live here.\n",
+        "ROUTING.md": "# Hand-rolled routing\n",
+    }
+    git("init", "-q", cwd=repo)
+    for rel, content in orientation.items():
+        (repo / rel).write_text(content)
+    git("add", "-A", cwd=repo)
+    git("commit", "-q", "-m", "orientation", cwd=repo)
+    linked = tmp_path / "linked-tree"
+    git("worktree", "add", "-q", str(linked), "-b", "wt/linked", cwd=repo)
+
+    result = run_init(tmp_path, "--here", cwd=linked)
+
+    assert result.returncode == 0, result.stderr
+    assert (linked / ".roundtable" / "agents.yaml").is_file()
+    # Inherited, marker-less orientation files stay byte-identical: a linked
+    # worktree must never have tracked files dirtied by onboarding.
+    for rel, content in orientation.items():
+        assert (linked / rel).read_text() == content
+    status = git("status", "--porcelain", cwd=linked).stdout
+    tracked_changes = [
+        line
+        for line in status.splitlines()
+        if not line.endswith((".gitignore", "/")) and line.strip()
+        and not line.startswith("??")
+    ]
+    assert tracked_changes == [], status
+    # Files the repository does not carry are still created for the tree.
+    assert (linked / "BRIEF.md").is_file()
+
+    # The identical content in a standalone repository still gets the block.
+    standalone = tmp_path / "standalone"
+    standalone.mkdir()
+    for rel, content in orientation.items():
+        (standalone / rel).write_text(content)
+    control = run_init(tmp_path, "--here", cwd=standalone)
+    assert control.returncode == 0, control.stderr
+    assert "BEGIN Roundtable" in (standalone / "CLAUDE.md").read_text()

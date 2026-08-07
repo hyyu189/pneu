@@ -1596,6 +1596,25 @@ def list_reply_expectations(
         return tuple(_read_reply_expectations(paths))
 
 
+def has_reply_expectations(project: Path | str, agent_id: str) -> bool:
+    """Lock-free probe for pending reply alarms on one seat.
+
+    ``_write_reply_expectations`` unlinks the file whenever the pending set
+    becomes empty, so a missing file is authoritative absence.  Any other
+    stat outcome errs toward True: the fenced reconcile path stays the only
+    deciding read, and this probe may never suppress a real alarm.
+    """
+
+    canonical = canonical_project(project)
+    paths = seat_paths(canonical, agent_id)
+    try:
+        return _reply_expectations_path(paths).lstat().st_size > 0
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def add_reply_expectation(
     project: Path | str,
     agent_id: str,

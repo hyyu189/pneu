@@ -257,6 +257,9 @@ def preflight(project_dir, *, create_root, values, templates):
             writable=True,
             guarded=True,
         )
+    # A linked worktree inherits orientation files from its repository, so
+    # marker-block appends are skipped there; missing files are still created.
+    linked_worktree = (not create_root) and in_linked_git_worktree(project_dir)
 
     directory_rels = {
         "handoff",
@@ -304,7 +307,7 @@ def preflight(project_dir, *, create_root, values, templates):
                     r"(?m)^schema:\s*roundtable\.agents\.v1\s*$", content
                 ):
                     fail(f"existing agents file is not Roundtable v1: {target}")
-            elif rel in MARKER_BLOCKS:
+            elif rel in MARKER_BLOCKS and not linked_worktree:
                 try:
                     current = target.read_text()
                 except (OSError, UnicodeError) as error:
@@ -421,6 +424,41 @@ def in_git_worktree(project_dir):
         env=_clean_git_environment(),
     )
     return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def in_linked_git_worktree(project_dir):
+    """True only for a linked ``git worktree`` checkout of another repository.
+
+    A linked worktree inherits its orientation files (CLAUDE.md, README.md,
+    ROUTING.md, ...) from the repository it belongs to, so marker-block
+    appends would dirty tracked files the main checkout owns. The structural
+    signal is that ``--git-dir`` and ``--git-common-dir`` resolve to
+    different directories; any git failure means "not linked" so standalone
+    projects keep their normal onboarding.
+    """
+
+    def _rev_parse(argument):
+        result = subprocess.run(
+            ["git", "rev-parse", argument],
+            cwd=project_dir,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            env=_clean_git_environment(),
+        )
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip()
+        if not value:
+            return None
+        return Path(project_dir, value).resolve()
+
+    git_dir = _rev_parse("--git-dir")
+    common_dir = _rev_parse("--git-common-dir")
+    if git_dir is None or common_dir is None:
+        return False
+    return git_dir != common_dir
 
 
 def main():

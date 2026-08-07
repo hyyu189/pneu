@@ -31,6 +31,7 @@ from _rtruntime import (
     FenceRejected,
     RuntimeStateError,
     clear_wake,
+    has_reply_expectations,
     load_validated_lease,
     reconcile_reply_expectations,
     update_wake,
@@ -197,6 +198,11 @@ def _reconcile_reply_alarms(
     session_id: str,
     revision: str,
 ) -> tuple | None:
+    # The expectations file is unlinked whenever the pending set empties, so
+    # an absent file proves there is nothing to clear or fire.  Skipping here
+    # keeps the idle poll free of per-tick mailbox locking and ack parsing.
+    if not has_reply_expectations(project, agent):
+        return ()
     try:
         acknowledged = _reply_acknowledgements(project, agent)
     except ProjectLayoutLockTimeout:
