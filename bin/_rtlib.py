@@ -767,7 +767,16 @@ def _default_state_root():
 
     legacy = Path.home() / ".roundtable"
     preferred = Path.home() / ".pneu"
-    if not preferred.exists() and legacy.is_dir() and not legacy.is_symlink():
+    # Judge by the registry file, not bare directory existence: a failed
+    # probe can scaffold an empty preferred root, which must not shadow a
+    # populated legacy install.
+    if (preferred / "projects.yaml").exists():
+        return preferred
+    if (
+        legacy.is_dir()
+        and not legacy.is_symlink()
+        and (legacy / "projects.yaml").exists()
+    ):
         return legacy
     return preferred
 

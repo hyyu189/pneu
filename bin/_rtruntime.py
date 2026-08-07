@@ -179,7 +179,13 @@ def runtime_root() -> Path:
     # legacy installs stay on ~/.roundtable and fresh hosts use ~/.pneu.
     legacy = Path.home() / ".roundtable"
     preferred = Path.home() / ".pneu"
-    if not preferred.exists() and legacy.is_dir() and not legacy.is_symlink():
+    if (preferred / "projects.yaml").exists():
+        return preferred / ".runtime"
+    if (
+        legacy.is_dir()
+        and not legacy.is_symlink()
+        and (legacy / "projects.yaml").exists()
+    ):
         return legacy / ".runtime"
     return preferred / ".runtime"
 
