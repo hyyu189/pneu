@@ -29,6 +29,7 @@ _REQUIRED_ENV = (
     "RT_LEASE_REVISION",
 )
 _MAIL_MARKER = "rt-wait-inbox: mail after "
+_REPLY_OVERDUE_MARKER = "rt-wait-inbox: reply overdue:"
 _SUPERSEDED_MARKER = "rt-wait-inbox: seat lease or watcher was superseded"
 _MAIL_DRAIN_POLL_SECONDS = 0.25
 _STOP_JOIN_SECONDS = 2.0
@@ -129,6 +130,17 @@ def _triggered_non_ack_mail(output: str) -> tuple[str, ...] | None:
             return None
         names.append(name)
     return tuple(dict.fromkeys(names)) or None
+
+
+def _reply_overdue_notice(output: str) -> str | None:
+    lines = [
+        line.strip()
+        for line in output.splitlines()
+        if line.startswith(_REPLY_OVERDUE_MARKER)
+    ]
+    if not lines:
+        return None
+    return "[pneu] Reply overdue. " + "\n".join(lines)
 
 
 class _RoundtableBridge:
@@ -307,6 +319,18 @@ class _RoundtableBridge:
                 if outcome != "drained":
                     return
                 continue
+
+            if process.returncode == 0:
+                overdue = _reply_overdue_notice(output)
+                if overdue is not None:
+                    if not self._deliver(
+                        overdue,
+                        session_id=session_id,
+                        platform=platform,
+                    ):
+                        self._fail(_CONFIG_MESSAGE)
+                        return
+                    continue
 
             if _SUPERSEDED_MARKER in output:
                 # The RT_* session environment is fixed for this process, so

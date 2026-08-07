@@ -213,6 +213,31 @@ def test_activation_keeps_long_lived_waiter_without_heartbeat_restart(
     assert blocking.terminated
 
 
+def test_reply_overdue_waiter_output_delivers_one_native_alarm(
+    tmp_path, monkeypatch
+):
+    plugin = _load_plugin()
+    project, waiter = _set_activation(monkeypatch, tmp_path)
+    overdue = (
+        "rt-wait-inbox: reply overdue: msg_id=message-1 peer=claude "
+        "sent_at=2026-08-07T05:00:00.000Z duration=30m\n"
+    )
+    replacement = FakeProcess()
+    popen = FakePopen([(overdue, 0), replacement])
+    monkeypatch.setattr(plugin.subprocess, "Popen", popen)
+    context = FakeContext()
+
+    plugin.register(context)
+    context.hooks["on_session_start"]()
+    _wait_until(lambda: len(context.injected) == 1)
+
+    assert "Reply overdue" in context.injected[0][0]
+    assert "message-1" in context.injected[0][0]
+    assert len(popen.calls) == 2
+    context.hooks["on_session_finalize"]()
+    assert replacement.terminated
+
+
 def test_tui_reset_starts_and_restarts_without_watcher_overlap(
     tmp_path, monkeypatch
 ):

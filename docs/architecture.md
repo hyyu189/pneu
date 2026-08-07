@@ -256,6 +256,10 @@ count, preventing one undrained generation from causing an infinite wake loop.
 An empty inbox does not expire the watcher: it renews its lease silently on a
 cadence below the 30-second health TTL and waits for mail without emitting a
 model wake.
+The sender may attach one durable reply alarm with `rt-say --expect-reply`; a
+quiet acknowledgement found in either `new/` or `cur/` clears it, while an
+unanswered deadline is consumed and emitted once through the same watcher.
+This alarm is per-seat state and does not add a daemon or launchd timer.
 
 Hermes follows the same long-lived contract through its lifecycle plugin. The
 plugin arms on the TUI's `on_session_reset` boundary, and delivery uses the

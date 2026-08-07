@@ -49,6 +49,7 @@ LEGACY_OPERATION_ACTIVE = False
 def usage():
     print(
         "usage: rt-say [--verbose] [--fenced] "
+        "[--expect-reply <duration>] "
         "[--no-nudge | --legacy-nudge-only] "
         "<agent-or-instance>[@<project-name>] <kind> <body...>",
         file=sys.stderr,
@@ -58,7 +59,7 @@ def usage():
 
 def print_help():
     print(
-        """usage: rt-say [--verbose] [--fenced] [--no-nudge | --legacy-nudge-only] <agent-or-instance>[@<project-name>] <kind> <body...>
+        """usage: rt-say [--verbose] [--fenced] [--expect-reply <duration>] [--no-nudge | --legacy-nudge-only] <agent-or-instance>[@<project-name>] <kind> <body...>
 
 Deliver a roundtable message through the project's maildir. A successful atomic
 write to inbox/<agent>/new is successful delivery and exits 0. Normal delivery
@@ -70,6 +71,7 @@ options:
   --fenced             require the current Roundtable launcher lease; use with --no-nudge
   --no-nudge           compatibility alias; normal delivery is already maildir-only
   --legacy-nudge-only  emergency legacy cmux path; do not write maildir; failures exit 3
+  --expect-reply DURATION  record one sender-side reply alarm (90s, 30m, or 2h)
   --verbose            print route and submit details
   -h, --help           show this help
 
@@ -82,6 +84,41 @@ independently with exit 3.
 
 def utc_now():
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def parse_expect_reply_option(args):
+    """Remove and validate one expect-reply option before address parsing."""
+
+    def invalid(message):
+        print(f"rt-say: {message}", file=sys.stderr)
+        raise SystemExit(2)
+
+    matches = []
+    for index, argument in enumerate(args):
+        if argument == "--expect-reply" or argument.startswith("--expect-reply="):
+            matches.append((index, argument))
+    if len(matches) > 1:
+        invalid("--expect-reply may be supplied only once")
+    if not matches:
+        return list(args), None
+    index, argument = matches[0]
+    if argument == "--expect-reply":
+        if index + 1 >= len(args):
+            invalid(
+                "--expect-reply requires a duration such as 90s, 30m, or 2h"
+            )
+        raw_duration = args[index + 1]
+        remove = {index, index + 1}
+    else:
+        raw_duration = argument.split("=", 1)[1]
+        remove = {index}
+    try:
+        import _rtruntime
+
+        duration, _seconds = _rtruntime.parse_reply_duration(raw_duration)
+    except _rtruntime.RuntimeStateError as error:
+        invalid(f"invalid --expect-reply duration: {error}")
+    return [argument for index, argument in enumerate(args) if index not in remove], duration
 
 
 def run(*args, **kwargs):
@@ -938,13 +975,20 @@ def _prepare_legacy_context(args):
     return {"runtime": runtime, "route": route}
 
 
-def _main_locked(fenced_agent, legacy_context, address):
+def _main_locked(
+    fenced_agent,
+    legacy_context,
+    address,
+    *,
+    args=None,
+    expect_reply_duration=None,
+):
     global LEGACY_OPERATION_ACTIVE
 
-    args = sys.argv[1:]
+    args = list(sys.argv[1:] if args is None else args)
     if "-h" in args or "--help" in args:
         print_help()
-        return None, None, None
+        return None, None, None, None
 
     reject_unsupported_message_options(args)
 
@@ -958,6 +1002,11 @@ def _main_locked(fenced_agent, legacy_context, address):
         raise SystemExit(2)
     explicit_no_nudge = "--no-nudge" in args
     legacy_nudge_only = "--legacy-nudge-only" in args
+    if expect_reply_duration is not None and legacy_nudge_only:
+        raise SystemExit(
+            "rt-say: --expect-reply is maildir-only and cannot use "
+            "--legacy-nudge-only"
+        )
     if explicit_no_nudge and legacy_nudge_only:
         print("rt-say: --no-nudge and --legacy-nudge-only are mutually exclusive", file=sys.stderr)
         raise SystemExit(2)
@@ -979,6 +1028,10 @@ def _main_locked(fenced_agent, legacy_context, address):
     kind = args[1]
     body_arg = " ".join(args[2:])
     validate_mail_kind(kind)
+    if expect_reply_duration is not None and kind == "sync-ack":
+        raise SystemExit(
+            "rt-say: --expect-reply cannot be used for rt-ack acknowledgements"
+        )
     ack_mode = os.environ.get("RT_ACK_MODE") == "1"
     if kind == "sync-ack" and not ack_mode:
         raise SystemExit("rt-say: sync-ack is reserved for rt-ack; use rt-ack <msg_id>[,<msg_id>...] [body]")
@@ -1095,6 +1148,17 @@ def _main_locked(fenced_agent, legacy_context, address):
             quiet_ack=kind == "sync-ack",
         )
 
+    expectation_spec = None
+    if expect_reply_duration is not None:
+        expectation_spec = (
+            durable_sender,
+            args[0],
+            msg_id,
+            expect_reply_duration,
+            os.environ.get("RT_SESSION_ID", ""),
+            os.environ.get("RT_LEASE_REVISION", ""),
+        )
+
     if maildir_only:
         route = {"workspace": None, "surface": None, "pane": None}
         submit = "none"
@@ -1132,6 +1196,7 @@ def _main_locked(fenced_agent, legacy_context, address):
                     address.origin_root,
                     address.origin_uuid,
                 ),
+                expectation_spec,
             )
         return (
             f"sent maildir-only {msg_id}",
@@ -1142,6 +1207,7 @@ def _main_locked(fenced_agent, legacy_context, address):
                 address.origin_root,
                 address.origin_uuid,
             ),
+            expectation_spec,
         )
 
     # Everything below is the explicit, keyboard-only legacy path. It never
@@ -1296,8 +1362,33 @@ def _main_locked(fenced_agent, legacy_context, address):
             f"submit={submit}",
             None,
             None,
+            None,
         )
-    return f"sent {msg_id}", None, None
+    return f"sent {msg_id}", None, None, None
+
+
+def persist_reply_expectation(spec):
+    """Persist an expectation after maildir delivery has committed."""
+
+    sender, peer, msg_id, duration, session_id, revision = spec
+    try:
+        import _rtruntime
+
+        _rtruntime.add_reply_expectation(
+            ROOT,
+            sender,
+            session_id,
+            revision,
+            msg_id=msg_id,
+            peer=peer,
+            duration=duration,
+        )
+    except (Exception, SystemExit) as error:
+        print(
+            "rt-say: warning: maildir delivery committed but reply "
+            f"expectation was not recorded for {msg_id}: {error}",
+            file=sys.stderr,
+        )
 
 
 def main():
@@ -1307,6 +1398,7 @@ def main():
     if "-h" in args or "--help" in args:
         print_help()
         return
+    args, expect_reply_duration = parse_expect_reply_option(args)
     fenced_count = args.count("--fenced")
     if fenced_count > 1:
         print("rt-say: --fenced may be supplied only once", file=sys.stderr)
@@ -1322,10 +1414,20 @@ def main():
             file=sys.stderr,
         )
         raise SystemExit(2)
+    if expect_reply_duration is not None and "--legacy-nudge-only" in args:
+        raise SystemExit(
+            "rt-say: --expect-reply is maildir-only and cannot use "
+            "--legacy-nudge-only"
+        )
     # Fence validation uses host-runtime locks. Complete it before taking the
     # target registry or mailbox lock. It always authenticates the sender
     # project, never the independently authorized target.
     fenced_agent = authenticate_fenced_sender(ROOT, "rt-say") if fenced else ""
+    if expect_reply_duration is not None and not fenced_agent:
+        # An expectation is sender-seat state, so the option implies the same
+        # launcher-lease authentication as --fenced without changing the
+        # historical maildir command syntax.
+        fenced_agent = authenticate_fenced_sender(ROOT, "rt-say")
     _target, requested_address = requested_project_address(args)
     legacy_context = _prepare_legacy_context(args)
     target_root = (
@@ -1353,10 +1455,12 @@ def main():
         MSG_DIR = mailbox.messages_dir
         INBOX_DIR = mailbox.inbox_dir
         LEDGER_LOCK = LOCK_DIR / "ledger.lock"
-        output, deferred_ledger, activity_advisory = _main_locked(
+        output, deferred_ledger, activity_advisory, expectation_spec = _main_locked(
             fenced_agent,
             legacy_context,
             address,
+            args=args,
+            expect_reply_duration=expect_reply_duration,
         )
 
     if deferred_ledger is not None:
@@ -1385,6 +1489,8 @@ def main():
                 f"update failed: {error}",
                 file=sys.stderr,
             )
+    if expectation_spec is not None:
+        persist_reply_expectation(expectation_spec)
     if output:
         print(output)
         sys.stdout.flush()

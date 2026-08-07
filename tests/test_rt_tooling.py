@@ -7,6 +7,7 @@ import re
 import stat
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -971,6 +972,67 @@ def test_rt_say_default_maildir_writes_exact_mail_without_legacy_nudge(tmp_path)
     )
 
 
+def test_rt_say_expect_reply_persists_one_sender_alarm(tmp_path, monkeypatch):
+    project, state, env, _trace_dir = say_project(tmp_path)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    token = _rtruntime.claim(project, "codex", "codex")
+    env.update(
+        {
+            "RT_RUNTIME_DIR": str(runtime),
+            "RT_CODEX_RUNTIME_DIR": str(runtime),
+            "RT_PROJECT_ROOT": str(project),
+            "RT_SESSION_ID": token.session_id,
+            "RT_LEASE_REVISION": token.revision,
+        }
+    )
+
+    proc = run_tool(
+        "rt-say",
+        "--expect-reply",
+        "30m",
+        "claude",
+        "question",
+        "please answer",
+        cwd=project,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    msg_id = proc.stdout.strip().split()[-1]
+    expectations = _rtruntime.list_reply_expectations(project, "codex")
+    assert len(expectations) == 1
+    item = expectations[0]
+    assert item.msg_id == msg_id
+    assert item.peer == "claude"
+    assert item.duration == "30m"
+    assert item.deadline > item.sent_at
+    assert (state / "inbox" / "claude" / "new" / f"{msg_id}.md").is_file()
+
+
+@pytest.mark.parametrize("duration", ["0s", "-1m", "tomorrow", "30"])
+def test_rt_say_expect_reply_rejects_invalid_duration_without_delivery(
+    tmp_path, duration
+):
+    project, state, _env, _trace_dir = say_project(tmp_path)
+
+    proc = run_tool(
+        "rt-say",
+        "--expect-reply",
+        duration,
+        "claude",
+        "question",
+        "should not send",
+        cwd=project,
+    )
+
+    assert proc.returncode == 2
+    assert "invalid --expect-reply duration" in proc.stderr
+    assert not (state / "inbox").exists()
+    assert read_ledger(state) == []
+
+
 def test_rt_say_rejects_flag_style_kind_and_refs_without_side_effects(tmp_path):
     cases = (
         (
@@ -1757,6 +1819,89 @@ def test_rt_say_cross_worktree_same_agent_ack_routes_home_by_uuid(tmp_path):
         )
         assert inbox.returncode == 0, inbox.stderr
         assert json.loads(inbox.stdout) == []
+
+
+def test_cross_worktree_expect_reply_ack_clears_origin_alarm(
+    tmp_path, monkeypatch
+):
+    origin, origin_state, target, _target_state, _registry, env = (
+        git_sibling_projects(tmp_path)
+    )
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    token = _rtruntime.claim(origin, "codex", "codex")
+    sender_env = {
+        **env,
+        "RT_FROM": "codex",
+        "RT_PROJECT_ROOT": str(origin),
+        "RT_RUNTIME_DIR": str(runtime),
+        "RT_CODEX_RUNTIME_DIR": str(runtime),
+        "RT_SESSION_ID": token.session_id,
+        "RT_LEASE_REVISION": token.revision,
+    }
+
+    sent = run_tool(
+        "rt-say",
+        "--expect-reply",
+        "1h",
+        f"claude@{target.name}",
+        "question",
+        "please answer remotely",
+        cwd=origin,
+        env=sender_env,
+    )
+    assert sent.returncode == 0, sent.stderr
+    msg_id = sent.stdout.strip().split()[-1]
+    assert len(_rtruntime.list_reply_expectations(origin, "codex")) == 1
+
+    wait = load_cli_module("rt-wait-inbox")
+    monkeypatch.setattr(wait, "_project_root", lambda: origin)
+    wait.POLL_SECONDS = 0.01
+    for name, value in sender_env.items():
+        if name in {
+            "RT_PROJECT_ROOT",
+            "RT_FROM",
+            "RT_SESSION_ID",
+            "RT_LEASE_REVISION",
+            "RT_PROJECTS_FILE",
+        }:
+            monkeypatch.setenv(name, value)
+    result: dict[str, int] = {}
+    watcher = threading.Thread(
+        target=lambda: result.update(code=wait.run("codex", 0))
+    )
+    watcher.start()
+    time.sleep(0.08)
+    assert watcher.is_alive()
+
+    ack = run_tool(
+        "rt-ack",
+        msg_id,
+        "received remotely",
+        cwd=target,
+        env={**env, "RT_FROM": "claude"},
+    )
+    assert ack.returncode == 0, ack.stderr
+    quiet = list((origin_state / "inbox" / "codex" / "new").glob("ack-*.md"))
+    assert len(quiet) == 1
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if not _rtruntime.list_reply_expectations(origin, "codex"):
+            break
+        time.sleep(0.01)
+    assert _rtruntime.list_reply_expectations(origin, "codex") == ()
+    assert watcher.is_alive()
+
+    origin_inbox = origin_state / "inbox" / "codex" / "new"
+    origin_inbox.mkdir(parents=True, exist_ok=True)
+    (origin_inbox / "message-after-remote-ack.md").write_text(
+        "[HERMES→CODEX question id=message-after-remote-ack] mail\n"
+    )
+    watcher.join(timeout=2)
+    assert not watcher.is_alive()
+    assert result == {"code": 0}
+    assert _rtruntime.release(token)
 
 
 def test_rt_ack_groups_same_named_senders_by_origin_uuid(tmp_path):

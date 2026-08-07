@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -18,7 +19,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,9 @@ LEASE_SCHEMA = "roundtable.session-lease.v1"
 PROJECT_SCHEMA = "roundtable.runtime-project.v1"
 CODEX_LAUNCH_INTENT_SCHEMA = "roundtable.codex-launch-intent.v1"
 CODEX_LAUNCH_INTENT_NAME = "codex-launch-intent.json"
+REPLY_EXPECTATIONS_SCHEMA = "roundtable.reply-expectations.v1"
+REPLY_EXPECTATIONS_NAME = "reply-expectations.json"
+REPLY_DURATION_RE = re.compile(r"^(?P<amount>[1-9][0-9]*)(?P<unit>[smh])$")
 DEFAULT_HEARTBEAT_TTL = 30.0
 # Watchers renew more frequently than the health TTL.  Keeping the renewal
 # interval at one third of the TTL leaves room for scheduler and filesystem
@@ -152,10 +156,40 @@ class RuntimeReclaim:
     blockers: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ReplyExpectation:
+    """One durable sender-side expectation for a quiet peer acknowledgement."""
+
+    msg_id: str
+    peer: str
+    sent_at: str
+    deadline: str
+    duration: str
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
         "+00:00", "Z"
     )
+
+
+def parse_reply_duration(raw: Any) -> tuple[str, int]:
+    """Parse one positive integer reply-alarm duration."""
+
+    if not isinstance(raw, str):
+        raise RuntimeStateError(
+            "reply deadline must be a positive integer duration such as 90s, 30m, or 2h"
+        )
+    rendered = raw.strip().lower()
+    match = REPLY_DURATION_RE.fullmatch(rendered)
+    if match is None:
+        raise RuntimeStateError(
+            "reply deadline must be a positive integer duration such as 90s, 30m, or 2h"
+        )
+    amount = int(match.group("amount"))
+    unit = match.group("unit")
+    multiplier = {"s": 1, "m": 60, "h": 3600}[unit]
+    return rendered, amount * multiplier
 
 
 def _absolute_runtime_path(value: Path | str, label: str) -> Path:
@@ -546,6 +580,110 @@ def _parse_time(value: Any) -> datetime | None:
     except ValueError:
         return None
     return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+
+
+def _reply_expectations_path(paths: SeatPaths) -> Path:
+    return paths.agent_dir / REPLY_EXPECTATIONS_NAME
+
+
+def _validate_reply_expectation(
+    value: Any,
+    *,
+    path: Path,
+    index: int,
+) -> ReplyExpectation:
+    if not isinstance(value, dict):
+        raise RuntimeStateError(
+            f"reply expectation {index} in {path} is not an object"
+        )
+    msg_id = value.get("msg_id")
+    peer = value.get("peer")
+    sent_at = value.get("sent_at")
+    deadline = value.get("deadline")
+    duration = value.get("duration")
+    if (
+        not isinstance(msg_id, str)
+        or not msg_id
+        or "\x00" in msg_id
+        or not isinstance(peer, str)
+        or not peer
+        or "\x00" in peer
+        or not isinstance(sent_at, str)
+        or not isinstance(deadline, str)
+        or not isinstance(duration, str)
+    ):
+        raise RuntimeStateError(
+            f"reply expectation {index} in {path} has invalid fields"
+        )
+    normalized_duration, _seconds = parse_reply_duration(duration)
+    sent = _parse_time(sent_at)
+    due = _parse_time(deadline)
+    if sent is None or due is None or due <= sent:
+        raise RuntimeStateError(
+            f"reply expectation {index} in {path} has invalid timestamps"
+        )
+    return ReplyExpectation(
+        msg_id=msg_id,
+        peer=peer,
+        sent_at=sent_at,
+        deadline=deadline,
+        duration=normalized_duration,
+    )
+
+
+def _read_reply_expectations(paths: SeatPaths) -> list[ReplyExpectation]:
+    path = _reply_expectations_path(paths)
+    payload = _read_json(path)
+    if payload is None:
+        return []
+    if payload.get("schema") != REPLY_EXPECTATIONS_SCHEMA:
+        raise RuntimeStateError(
+            f"invalid reply expectation schema at {path}: {payload.get('schema')!r}"
+        )
+    values = payload.get("expectations")
+    if not isinstance(values, list):
+        raise RuntimeStateError(f"reply expectations is not a list: {path}")
+    result = [
+        _validate_reply_expectation(value, path=path, index=index)
+        for index, value in enumerate(values)
+    ]
+    ids = [item.msg_id for item in result]
+    if len(set(ids)) != len(ids):
+        raise RuntimeStateError(f"reply expectations contain duplicate msg_id: {path}")
+    return result
+
+
+def _reply_expectation_record(item: ReplyExpectation) -> dict[str, str]:
+    return {
+        "msg_id": item.msg_id,
+        "peer": item.peer,
+        "sent_at": item.sent_at,
+        "deadline": item.deadline,
+        "duration": item.duration,
+    }
+
+
+def _write_reply_expectations(paths: SeatPaths, values: list[ReplyExpectation]) -> None:
+    path = _reply_expectations_path(paths)
+    if not values:
+        info = _path_info(path)
+        if info is None:
+            return
+        _validate_read_path(path, directory=False)
+        try:
+            path.unlink()
+        except OSError as error:
+            raise RuntimeStateError(
+                f"cannot clear reply expectations at {path}: {error}"
+            ) from error
+        return
+    _atomic_json(
+        path,
+        {
+            "schema": REPLY_EXPECTATIONS_SCHEMA,
+            "expectations": [_reply_expectation_record(item) for item in values],
+        },
+    )
 
 
 def _validate_record(
@@ -1441,6 +1579,113 @@ def load_validated_lease(
                 revision,
             )
         )
+
+
+def list_reply_expectations(
+    project: Path | str,
+    agent_id: str,
+) -> tuple[ReplyExpectation, ...]:
+    """Read one seat's durable reply expectations without mutating them."""
+
+    canonical = canonical_project(project)
+    paths = seat_paths(canonical, agent_id)
+    _validate_read_path(paths.agent_dir, directory=True)
+    if _path_info(paths.agent_dir) is None:
+        return ()
+    with _locked(paths.state_lock, shared=True):
+        return tuple(_read_reply_expectations(paths))
+
+
+def add_reply_expectation(
+    project: Path | str,
+    agent_id: str,
+    session_id: Any,
+    revision: Any,
+    *,
+    msg_id: str,
+    peer: str,
+    duration: str,
+    sent_at: str | None = None,
+) -> ReplyExpectation:
+    """Persist one sender-side alarm under the current fenced seat."""
+
+    canonical = canonical_project(project)
+    normalized_duration, seconds = parse_reply_duration(duration)
+    if (
+        not isinstance(msg_id, str)
+        or not msg_id
+        or "\x00" in msg_id
+        or not isinstance(peer, str)
+        or not peer
+        or "\x00" in peer
+    ):
+        raise RuntimeStateError("reply expectation msg_id and peer must be non-empty strings")
+    selected_sent_at = sent_at or utc_now()
+    sent = _parse_time(selected_sent_at)
+    if sent is None:
+        raise RuntimeStateError("reply expectation sent_at is invalid")
+    deadline = (
+        sent + timedelta(seconds=seconds)
+    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    item = ReplyExpectation(
+        msg_id=msg_id,
+        peer=peer,
+        sent_at=selected_sent_at,
+        deadline=deadline,
+        duration=normalized_duration,
+    )
+    paths = seat_paths(canonical, agent_id)
+    with _locked(paths.state_lock):
+        _load_fenced_record(paths, canonical, agent_id, session_id, revision)
+        current = _read_reply_expectations(paths)
+        if any(existing.msg_id == msg_id for existing in current):
+            raise RuntimeStateError(
+                f"reply expectation already exists for msg_id {msg_id}"
+            )
+        _write_reply_expectations(paths, [*current, item])
+    return item
+
+
+def reconcile_reply_expectations(
+    project: Path | str,
+    agent_id: str,
+    session_id: Any,
+    revision: Any,
+    acknowledged_msg_ids: set[str] | frozenset[str] = frozenset(),
+    *,
+    now: datetime | None = None,
+) -> tuple[tuple[ReplyExpectation, ...], tuple[ReplyExpectation, ...]]:
+    """Clear acknowledged alarms and atomically consume newly overdue alarms.
+
+    The returned pairs are ``(cleared, fired)``. Fired entries are removed in
+    the same fenced write that marks them consumed, so a watcher restart can
+    never emit the same alarm twice.
+    """
+
+    canonical = canonical_project(project)
+    paths = seat_paths(canonical, agent_id)
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    acknowledged = set(acknowledged_msg_ids)
+    with _locked(paths.state_lock):
+        _load_fenced_record(paths, canonical, agent_id, session_id, revision)
+        current = _read_reply_expectations(paths)
+        cleared: list[ReplyExpectation] = []
+        fired: list[ReplyExpectation] = []
+        remaining: list[ReplyExpectation] = []
+        for item in current:
+            if item.msg_id in acknowledged:
+                cleared.append(item)
+                continue
+            deadline = _parse_time(item.deadline)
+            if deadline is not None and deadline <= current_time:
+                fired.append(item)
+                continue
+            remaining.append(item)
+        if len(remaining) != len(current):
+            _write_reply_expectations(paths, remaining)
+    return tuple(cleared), tuple(fired)
 
 
 @contextmanager

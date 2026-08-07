@@ -22,7 +22,7 @@ rt-say  ->  project mailbox: new/  ->  agent acts  ->  rt-ack  ->  cur/
 ```
 
 The `rt-*` names and `RT_*` environment variables are pneu's tool prefix and
-remain stable in 1.0.1. Project state remains under `.roundtable/`, and
+remain stable in 1.1.0. Project state remains under `.roundtable/`, and
 `roundtable.*` wire and registry schema identifiers are unchanged. `roundtable`
 is a silent compatibility alias for the primary `pneu` command.
 
@@ -33,8 +33,8 @@ wheel and locked dependencies but not Python; the host needs CPython 3.11
 through 3.14.
 
 ```bash
-tar -xzf pneu-1.0.1-macos.tar.gz
-cd pneu-1.0.1
+tar -xzf pneu-1.1.0-macos.tar.gz
+cd pneu-1.1.0
 ./install
 export PATH="$HOME/.local/bin:$PATH"
 pneu
@@ -97,6 +97,9 @@ An armed Claude or Hermes inbox watcher is long-lived: while `new/` is empty it
 renews its fenced lease silently and does not emit a heartbeat wake or create a
 model turn. The watcher wakes only when mail appears; its 30-second health TTL
 is renewed on a tighter cadence so a dead watcher becomes stale promptly.
+For dispatches or questions that need an answer, `rt-say --expect-reply 30m ...`
+adds a durable one-shot sender alarm: a quiet acknowledgement clears it, while
+an unanswered deadline wakes the sender once through the existing watcher.
 
 ### Installation and migration
 
@@ -113,7 +116,7 @@ The repository records validation evidence and open promotion gates in
 [`docs/compatibility.md`](docs/compatibility.md). A supported platform/runtime
 claim requires a real end-to-end smoke test; version-number comparisons and
 fixtures alone do not establish support. Cross-host SSH, Linux service
-management, and multi-auth switching remain out of scope for 1.0.1.
+management, and multi-auth switching remain out of scope for 1.1.0.
 
 ## History
 

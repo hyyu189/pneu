@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -398,6 +399,82 @@ def test_reclaim_project_runtime_preserves_live_or_ambiguous_leases(
 
     process_table[101] = "start-owner-101"
     assert _rtruntime.release(token)
+
+
+def test_reply_expectation_duration_and_ack_clear_are_fenced(
+    tmp_path, runtime, process_table
+):
+    root = project(tmp_path)
+    lease = _rtruntime.claim(root, "codex", "codex", owner_pid=101)
+    sent_at = "2026-08-07T05:00:00.000Z"
+
+    item = _rtruntime.add_reply_expectation(
+        root,
+        "codex",
+        lease.session_id,
+        lease.revision,
+        msg_id="20260807T050000Z-codex-to-claude-1",
+        peer="claude",
+        duration="30m",
+        sent_at=sent_at,
+    )
+
+    assert item.deadline == "2026-08-07T05:30:00.000Z"
+    assert _rtruntime.list_reply_expectations(root, "codex") == (item,)
+    cleared, fired = _rtruntime.reconcile_reply_expectations(
+        root,
+        "codex",
+        lease.session_id,
+        lease.revision,
+        {item.msg_id},
+        now=datetime(2026, 8, 7, 5, 1, tzinfo=timezone.utc),
+    )
+    assert cleared == (item,)
+    assert fired == ()
+    assert _rtruntime.list_reply_expectations(root, "codex") == ()
+
+
+def test_reply_expectation_fires_once_and_rejects_invalid_duration(
+    tmp_path, runtime, process_table
+):
+    root = project(tmp_path)
+    lease = _rtruntime.claim(root, "codex", "codex", owner_pid=101)
+
+    assert _rtruntime.parse_reply_duration("90s") == ("90s", 90)
+    assert _rtruntime.parse_reply_duration("2H") == ("2h", 7200)
+    for invalid in ("0s", "-1m", "soon", "30", "1d"):
+        with pytest.raises(_rtruntime.RuntimeStateError):
+            _rtruntime.parse_reply_duration(invalid)
+
+    item = _rtruntime.add_reply_expectation(
+        root,
+        "codex",
+        lease.session_id,
+        lease.revision,
+        msg_id="20260807T050001Z-codex-to-hermes-1",
+        peer="hermes",
+        duration="1s",
+        sent_at="2026-08-07T05:00:00.000Z",
+    )
+    due = datetime(2026, 8, 7, 5, 0, 1, tzinfo=timezone.utc)
+    cleared, fired = _rtruntime.reconcile_reply_expectations(
+        root,
+        "codex",
+        lease.session_id,
+        lease.revision,
+        now=due,
+    )
+    assert cleared == ()
+    assert fired == (item,)
+    assert _rtruntime.list_reply_expectations(root, "codex") == ()
+    again = _rtruntime.reconcile_reply_expectations(
+        root,
+        "codex",
+        lease.session_id,
+        lease.revision,
+        now=due + timedelta(seconds=10),
+    )
+    assert again == ((), ())
 
 
 def test_stale_heartbeat_never_makes_a_live_owner_claimable(

@@ -624,10 +624,16 @@ def test_empty_watcher_renews_silently_until_mail(tmp_path, monkeypatch):
     )
     thread.start()
     try:
-        time.sleep(0.08)
+        deadline = time.monotonic() + 2
+        inspection = None
+        while time.monotonic() < deadline:
+            inspection = _rtruntime.inspect_seat(project, "claude")
+            if inspection.status == "active_healthy":
+                break
+            time.sleep(0.01)
         assert thread.is_alive()
-        inspection = _rtruntime.inspect_seat(project, "claude")
-        assert inspection.status == "active_healthy"
+        assert inspection is not None
+        assert inspection.status == "active_healthy", inspection.detail
         assert inspection.heartbeat_age is not None
         assert inspection.heartbeat_age <= _rtruntime.DEFAULT_HEARTBEAT_TTL
         assert not printed
@@ -883,6 +889,7 @@ def test_two_queued_stop_hooks_recheck_breaker_after_watcher_claim(
     monkeypatch.setattr(wait, "watcher_is_live", lambda _token: False)
     monkeypatch.setattr(wait, "update_wake", update)
     monkeypatch.setattr(wait, "clear_wake", clear)
+    monkeypatch.setattr(wait, "_reconcile_reply_alarms", lambda *_args: ())
 
     def worker() -> None:
         results[threading.current_thread().name] = wait.run(
@@ -1019,6 +1026,163 @@ def test_quiet_ack_does_not_wake_or_emit_empty_heartbeat(tmp_path, monkeypatch):
     assert "ack-message-1.md" not in output
     assert "heartbeat timeout" not in output
     assert_no_project_liveness(project)
+
+
+def test_reply_alarm_wakes_once_with_contentful_overdue_notice(
+    tmp_path, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+    _rtruntime.add_reply_expectation(
+        project,
+        "claude",
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        msg_id="20260807T050100Z-claude-to-hermes-overdue",
+        peer="hermes",
+        duration="1s",
+        sent_at="2026-08-07T05:00:00.000Z",
+    )
+    wait = load_wait_module("rt_wait_reply_alarm_test")
+    monkeypatch.setattr(wait, "_project_root", lambda: project)
+    wait.POLL_SECONDS = 0.01
+    printed: list[tuple[tuple, dict]] = []
+    wait.print = lambda *args, **kwargs: printed.append((args, kwargs))
+    result: dict[str, int] = {}
+
+    thread = threading.Thread(
+        target=lambda: result.update(
+            code=wait.run("claude", 0, claude_hook=True)
+        )
+    )
+    thread.start()
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result == {"code": 2}
+    output = "\n".join(str(args[0]) for args, _kwargs in printed if args)
+    assert "reply overdue:" in output
+    assert "20260807T050100Z-claude-to-hermes-overdue" in output
+    assert "peer=hermes" in output
+    assert "sent_at=2026-08-07T05:00:00.000Z" in output
+    assert "duration=1s" in output
+    assert _rtruntime.list_reply_expectations(project, "claude") == ()
+
+
+def test_reply_alarm_survives_watcher_restart(
+    tmp_path, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+    expectation = _rtruntime.add_reply_expectation(
+        project,
+        "claude",
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        msg_id="20260807T050102Z-claude-to-hermes-restart",
+        peer="hermes",
+        duration="1s",
+    )
+
+    first = load_wait_module("rt_wait_reply_restart_first_test")
+    monkeypatch.setattr(first, "_project_root", lambda: project)
+    first.POLL_SECONDS = 0.01
+    first.print = lambda *_args, **_kwargs: None
+    first_result: dict[str, int] = {}
+    first_thread = threading.Thread(
+        target=lambda: first_result.update(code=first.run("claude", 0))
+    )
+    first_thread.start()
+    time.sleep(0.08)
+    assert first_thread.is_alive()
+
+    first_message = project_inbox(project, "claude") / "message-before-restart.md"
+    first_message.parent.joinpath("new").mkdir(parents=True, exist_ok=True)
+    first_message = first_message.parent / "new" / first_message.name
+    first_message.write_text(
+        "[HERMES→CLAUDE question id=message-before-restart] mail\n"
+    )
+    first_thread.join(timeout=2)
+    assert not first_thread.is_alive()
+    assert first_result == {"code": 0}
+    assert _rtruntime.list_reply_expectations(project, "claude") == (expectation,)
+    first_message.unlink()
+
+    time.sleep(1.05)
+    second = load_wait_module("rt_wait_reply_restart_second_test")
+    monkeypatch.setattr(second, "_project_root", lambda: project)
+    second.POLL_SECONDS = 0.01
+    printed: list[tuple[tuple, dict]] = []
+    second.print = lambda *args, **kwargs: printed.append((args, kwargs))
+    second_result: dict[str, int] = {}
+    second_thread = threading.Thread(
+        target=lambda: second_result.update(
+            code=second.run("claude", 0, claude_hook=True)
+        )
+    )
+    second_thread.start()
+    second_thread.join(timeout=2)
+    assert not second_thread.is_alive()
+    assert second_result == {"code": 2}
+    output = "\n".join(str(args[0]) for args, _kwargs in printed if args)
+    assert "reply overdue:" in output
+    assert expectation.msg_id in output
+    assert _rtruntime.list_reply_expectations(project, "claude") == ()
+
+
+def test_reply_alarm_clears_from_archived_cross_route_ack_without_waking(
+    tmp_path, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+    expectation = _rtruntime.add_reply_expectation(
+        project,
+        "claude",
+        environment["RT_SESSION_ID"],
+        environment["RT_LEASE_REVISION"],
+        msg_id="20260807T050101Z-claude-to-hermes-cleared",
+        peer="hermes@other-worktree",
+        duration="1h",
+    )
+    wait = load_wait_module("rt_wait_reply_ack_test")
+    monkeypatch.setattr(wait, "_project_root", lambda: project)
+    wait.POLL_SECONDS = 0.01
+    result: dict[str, int] = {}
+    thread = threading.Thread(
+        target=lambda: result.update(code=wait.run("claude", 0))
+    )
+    thread.start()
+    time.sleep(0.08)
+    assert thread.is_alive()
+
+    cur_dir = project_inbox(project, "claude") / "cur"
+    cur_dir.mkdir(parents=True, exist_ok=True)
+    (cur_dir / "ack-20260807T050102Z-hermes-to-claude-receipt.md").write_text(
+        "[HERMES→CLAUDE sync-ack "
+        "id=20260807T050102Z-hermes-to-claude-receipt] "
+        f"refs={expectation.msg_id}\n"
+    )
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if _rtruntime.list_reply_expectations(project, "claude") == ():
+            break
+        time.sleep(0.01)
+    assert _rtruntime.list_reply_expectations(project, "claude") == ()
+    assert thread.is_alive()
+
+    new_dir = project_inbox(project, "claude") / "new"
+    new_dir.mkdir(parents=True, exist_ok=True)
+    (new_dir / "message-after-reply-ack.md").write_text(
+        "[HERMES→CLAUDE question id=message-after-reply-ack] mail\n"
+    )
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result == {"code": 0}
 
 
 def test_fenced_inbox_archives_quiet_ack_without_a_shell_move(

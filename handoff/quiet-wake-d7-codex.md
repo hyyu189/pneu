@@ -17,7 +17,8 @@ Source directive: [`quiet-wake-d7.md`](quiet-wake-d7.md)
 - `rt-doctor` reports runtime directories whose project root is missing and
   whose registry entry is tombstoned or absent. The doctor path is
   report-only and never deletes runtime state.
-- Version surfaces and current docs/skill text are `1.0.1` / `8.1.0`.
+- D7's standalone version baseline was `1.0.1`; the sequenced D8 batch
+  supersedes it with combined release `1.1.0`.
 
 ## Evidence
 

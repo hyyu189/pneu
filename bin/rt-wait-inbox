@@ -12,16 +12,19 @@ import hashlib
 import json
 import os
 import signal
+import stat
 import sys
 import time
 from pathlib import Path
 
 from _rtlib import (
+    MailEnvelopeError,
     ProjectLayoutLockTimeout,
     ProjectRegistryError,
     is_project_root,
     locked_project_mailbox_checked,
     not_project_message,
+    parse_mail_envelope,
 )
 from _rtruntime import (
     DEFAULT_HEARTBEAT_RENEWAL_INTERVAL,
@@ -29,6 +32,7 @@ from _rtruntime import (
     RuntimeStateError,
     clear_wake,
     load_validated_lease,
+    reconcile_reply_expectations,
     update_wake,
     watcher_is_live,
 )
@@ -40,6 +44,7 @@ from _rtruntime import (
 POLL_SECONDS = min(5.0, DEFAULT_HEARTBEAT_RENEWAL_INTERVAL)
 LAYOUT_SCAN_TIMEOUT_SECONDS = 1.0
 GENERATION_POLL_SECONDS = 0.25
+REPLY_OVERDUE_PREFIX = "rt-wait-inbox: reply overdue:"
 
 
 class StopRequested(Exception):
@@ -142,6 +147,79 @@ def _ack_count(new_dir: Path) -> int:
         )
     except FileNotFoundError:
         return 0
+
+
+def _reply_acknowledgements(project: Path, agent: str) -> set[str]:
+    """Read valid quiet-ack refs from both active and archived maildir names."""
+
+    acknowledged: set[str] = set()
+    with locked_project_mailbox_checked(
+        project,
+        timeout=LAYOUT_SCAN_TIMEOUT_SECONDS,
+    ) as mailbox:
+        inbox = mailbox.inbox_dir / agent
+        for folder in ("new", "cur"):
+            directory = inbox / folder
+            try:
+                entries = sorted(directory.iterdir())
+            except FileNotFoundError:
+                continue
+            for path in entries:
+                if path.name.startswith(".") or not path.name.startswith("ack-"):
+                    continue
+                try:
+                    info = path.lstat()
+                    if not stat.S_ISREG(info.st_mode):
+                        continue
+                    content = path.read_text(encoding="utf-8")
+                    parsed = parse_mail_envelope(content)
+                except (OSError, UnicodeError, MailEnvelopeError):
+                    # A malformed quiet receipt is not proof that a peer
+                    # processed the message; leave the alarm eligible to fire.
+                    continue
+                if (
+                    parsed is None
+                    or parsed.get("kind") != "sync-ack"
+                    or parsed.get("to") != agent
+                ):
+                    continue
+                for part in str(parsed.get("body") or "").split():
+                    if part.startswith("refs="):
+                        acknowledged.update(
+                            ref for ref in part.removeprefix("refs=").split(",") if ref
+                        )
+    return acknowledged
+
+
+def _reconcile_reply_alarms(
+    project: Path,
+    agent: str,
+    session_id: str,
+    revision: str,
+) -> tuple | None:
+    try:
+        acknowledged = _reply_acknowledgements(project, agent)
+    except ProjectLayoutLockTimeout:
+        return ()
+    try:
+        _cleared, overdue = reconcile_reply_expectations(
+            project,
+            agent,
+            session_id,
+            revision,
+            acknowledged,
+        )
+    except FenceRejected:
+        return None
+    return overdue
+
+
+def _reply_overdue_lines(expectations) -> list[str]:
+    return [
+        f"{REPLY_OVERDUE_PREFIX} msg_id={item.msg_id} peer={item.peer} "
+        f"sent_at={item.sent_at} duration={item.duration}"
+        for item in expectations
+    ]
 
 
 def _mailbox_snapshot(
@@ -356,11 +434,19 @@ def run(
         ):
             _report_stop_hook_retry_exhausted()
             return 0
+        overdue = _reconcile_reply_alarms(
+            project,
+            agent,
+            session_id,
+            revision,
+        )
         mail = pending_at_stop
         waited_seconds = 0
-        superseded = False
+        superseded = overdue is None
+        if superseded:
+            overdue = ()
 
-        while not mail:
+        while not mail and not overdue and not superseded:
             time.sleep(POLL_SECONDS)
             waited_seconds += POLL_SECONDS
             try:
@@ -381,11 +467,22 @@ def run(
             except ProjectLayoutLockTimeout:
                 # Do not count an exclusive migration as an empty heartbeat.
                 continue
+            overdue = _reconcile_reply_alarms(
+                project,
+                agent,
+                session_id,
+                revision,
+            )
+            if overdue is None:
+                superseded = True
+                break
             mail = candidate_mail
 
         if superseded:
             print("rt-wait-inbox: seat lease or watcher was superseded")
             return 0
+        if overdue:
+            print("\n".join(_reply_overdue_lines(overdue)))
         if mail:
             prior_messages = token.last_wake_messages
             attempts = (
@@ -421,8 +518,9 @@ def run(
             )
         # Claude Code's asyncRewake contract wakes an idle session only when
         # the background hook exits 2. Ordinary terminal/Hermes watchers keep
-        # their success exit after a mail generation; an empty inbox never
-        # reaches this point because the watcher renews silently in place.
+        # their success exit after a mail or reply-alarm generation; an empty
+        # inbox never reaches this point because the watcher renews silently
+        # in place.
         return 2 if claude_hook else 0
     except StopRequested:
         return 0

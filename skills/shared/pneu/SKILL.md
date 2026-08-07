@@ -6,7 +6,7 @@ description: >-
   rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
   routing, or cmux surface-routing bugs. Do not use merely because a repo
   contains .roundtable/agents.yaml.
-version: 8.1.0
+version: 8.2.0
 author: pneu contributors
 license: MIT
 platforms: [macos]
@@ -73,6 +73,10 @@ roundtable-init new-project          # no Git by default
 roundtable-init new-git-project --git
 ```
 
+Teammate and scratch Git worktrees need no pneu registration. Adopt only a
+tree that must send or receive mail, using `roundtable-init --here`; its Git
+group membership is derived automatically. Registration is opt-in by design.
+
 ## Tools (normally linked on PATH via ~/.local/bin/)
 
 | Tool | Purpose |
@@ -81,7 +85,7 @@ roundtable-init new-git-project --git
 | `roundtable-setup [plan\|apply\|status\|remove]` | Own host-level harness onboarding; the default is a no-write plan. |
 | `roundtable-init --here` / `roundtable-init NAME` | Adopt the current directory or create and register a project; add `--git` only when wanted. |
 | `rt-claude` / `rt-hermes` / `rt-codex` | Claim a fenced project seat and launch the real harness executable. |
-| `rt-say <agent>[@<project>] <kind> "body"` | Write the message into this project or one exact registered sibling worktree (atomic maildir). |
+| `rt-say [--expect-reply DURATION] <agent>[@<project>] <kind> "body"` | Write the message into this project or one exact registered sibling worktree (atomic maildir); optionally arm one sender-side reply alarm. |
 | `rt-ack <id>[,<id>...] ["note"]` | Acknowledge and archive received message(s). Comma-batches. The sender gets a quiet `ack-*` file. |
 | `rt-inbox` | List un-ack'd inbound messages. |
 | `rt-projects <list\|add\|rm\|upgrade>` | Maintain the validated project registry; `upgrade` is the explicit, backed-up v1→v2 gate. |
@@ -170,8 +174,14 @@ An armed Claude or Hermes watcher is long-lived while `new/` is empty. It
 renews the fenced lease silently on a ten-second target cadence with the
 30-second `DEFAULT_HEARTBEAT_TTL`; an empty inbox never emits a heartbeat
 wake, exits for a Stop-hook turn, or spends model tokens. Mail, including a
-`malformed` listing, is still the only wake edge. A dead watcher therefore
+`malformed` listing, is the ordinary wake edge; a configured reply alarm is the
+only contentful timer edge. A dead watcher therefore
 becomes stale within one TTL while a live idle seat remains `active_healthy`.
+Use `rt-say --expect-reply 90s ...` for a dispatch or question that needs an
+answer; the positive `s`, `m`, or `h` duration is stored on the sender seat.
+The matching quiet `ack-` receipt clears it from either `new/` or `cur/`;
+otherwise the existing watcher emits one contentful `reply overdue` wake and
+consumes that alarm. Do not use it for `fyi` messages or acknowledgements.
 Claude's Stop hook normally re-arms automatically; never launch a second
 watcher from the model turn. One unchanged pending generation receives its
 initial wake and at most one Stop-hook retry, then pauses instead of looping.
@@ -236,7 +246,11 @@ state and must not be used as routing or liveness truth.
 
 ## Sending
 
-`rt-say <agent>[@<project>] <kind> "body"` from the project root. The bare
+`rt-say [--expect-reply DURATION] <agent>[@<project>] <kind> "body"` from the
+project root. The optional positive `s`, `m`, or `h` duration creates one
+durable sender-side reply alarm for dispatches and questions that need an
+answer; a quiet acknowledgement clears it, and an unanswered deadline fires
+once through the existing watcher poll. The bare
 form stays inside the current project; `@project` names one registered project
 in the same derived group, including the current project by its own name. A
 report to another project's seat must use the explicit `agent@project` form.
