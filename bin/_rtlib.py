@@ -754,9 +754,22 @@ def projects_registry_path():
     override = os.environ.get("RT_PROJECTS_FILE")
     if override:
         return _absolute_registry_path(override)
-    return _absolute_registry_path(
-        Path.home() / ".pneu" / "projects.yaml"
-    )
+    return _absolute_registry_path(_default_state_root() / "projects.yaml")
+
+
+def _default_state_root():
+    """Prefer the pre-rename state root on hosts that already have one.
+
+    The symlink-hardened path checks refuse a linked state root, so a legacy
+    install keeps its real ~/.roundtable directory in place; only a host with
+    no legacy root uses ~/.pneu.
+    """
+
+    legacy = Path.home() / ".roundtable"
+    preferred = Path.home() / ".pneu"
+    if not preferred.exists() and legacy.is_dir() and not legacy.is_symlink():
+        return legacy
+    return preferred
 
 
 def _registry_path(path=None):

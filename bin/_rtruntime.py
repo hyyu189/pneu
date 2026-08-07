@@ -174,7 +174,14 @@ def runtime_root() -> Path:
         )
     if generic_path is not None or legacy_path is not None:
         return generic_path or legacy_path
-    return Path.home() / ".pneu" / ".runtime"
+    # Mirror _rtlib._default_state_root: a host with a real pre-rename state
+    # root keeps it (the symlink-hardened checks refuse a linked root), so
+    # legacy installs stay on ~/.roundtable and fresh hosts use ~/.pneu.
+    legacy = Path.home() / ".roundtable"
+    preferred = Path.home() / ".pneu"
+    if not preferred.exists() and legacy.is_dir() and not legacy.is_symlink():
+        return legacy / ".runtime"
+    return preferred / ".runtime"
 
 
 def canonical_project(project: Path | str) -> Path:
