@@ -180,14 +180,24 @@ def test_remove_refuses_active_unhealthy_owned_seat(lab):
 
 
 def test_remove_full_cycle_deletes_merged_branch(lab):
-    tmp_path, base, registry, _runtime = lab
+    tmp_path, base, registry, runtime = lab
     created = run_tool("add", "demo", "--repo", str(base), "--yes", cwd=base)
     assert created.returncode == 0, created.stderr
     target = tmp_path / "demo"
+    sys.path.insert(0, str(ROOT / "bin"))
+    from _rtruntime import claim, release, seat_paths
+
+    token = claim(target, "codex", "codex", owner_pid=os.getpid())
+    assert release(token)
+    runtime_project = seat_paths(target, "codex").project_dir
+    assert runtime_project.exists()
+
     removed = run_tool("remove", "demo", "--yes", cwd=base)
     assert removed.returncode == 0, removed.stderr
     assert not target.exists()
     assert "registry: tombstoned" in removed.stdout
+    assert f"runtime: reclaimed {runtime_project}" in removed.stdout
+    assert not runtime_project.exists()
     assert "deleted (merged): wt/demo" in removed.stdout
     assert git(base, "show-ref", "--verify", "refs/heads/wt/demo", check=False).returncode != 0
 

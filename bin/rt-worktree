@@ -31,6 +31,7 @@ from _rtruntime import (
     RuntimeStateError,
     harness_lease_records,
     inspect_seat,
+    reclaim_project_runtime,
 )
 
 
@@ -617,6 +618,14 @@ def _worktree_remove(args, *, cwd: Path, stdin, stdout, stderr) -> int:
         return 1
 
     _unbind_codex(target)
+    runtime_reclaim = reclaim_project_runtime(target)
+    if runtime_reclaim.blockers:
+        print(
+            "rt-worktree: runtime advisory: preserving retired project "
+            f"directory {runtime_reclaim.path} because "
+            + "; ".join(runtime_reclaim.blockers),
+            file=stderr,
+        )
     try:
         changed = unregister_project(target, path=projects_registry_path())
     except SystemExit as error:
@@ -660,6 +669,16 @@ def _worktree_remove(args, *, cwd: Path, stdin, stdout, stderr) -> int:
     print(f"  path: {target}", file=stdout)
     print(f"  uuid: {entry['uuid']}", file=stdout)
     print("  registry: tombstoned", file=stdout)
+    if runtime_reclaim.removed:
+        print(f"  runtime: reclaimed {runtime_reclaim.path}", file=stdout)
+    elif runtime_reclaim.blockers:
+        print(
+            f"  runtime: preserved (live or ambiguous lease; see advisory) "
+            f"{runtime_reclaim.path}",
+            file=stdout,
+        )
+    else:
+        print(f"  runtime: no directory at {runtime_reclaim.path}", file=stdout)
     print(f"  branch: {branch_result}", file=stdout)
     return 0
 

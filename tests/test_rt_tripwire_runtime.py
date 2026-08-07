@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import resource
 import subprocess
 import sys
 import threading
@@ -85,6 +86,30 @@ def claim_environment(
     return environment
 
 
+def apply_claim_environment(monkeypatch, environment: dict[str, str]) -> None:
+    for name in (
+        "RT_PROJECT_ROOT",
+        "RT_FROM",
+        "RT_SESSION_ID",
+        "RT_LEASE_REVISION",
+    ):
+        monkeypatch.setenv(name, environment[name])
+
+
+def process_fd_count() -> int | None:
+    for candidate in (Path("/dev/fd"), Path("/proc/self/fd")):
+        try:
+            return sum(1 for _entry in candidate.iterdir())
+        except OSError:
+            continue
+    return None
+
+
+def process_rss_bytes() -> int:
+    value = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    return value if sys.platform == "darwin" else value * 1024
+
+
 def run_tool(
     name: str,
     *args: str,
@@ -102,6 +127,15 @@ def run_tool(
         stderr=subprocess.PIPE,
         check=False,
     )
+
+
+def load_wait_module(name: str = "rt_wait_tripwire_test"):
+    loader = SourceFileLoader(name, str(BIN / "rt-wait-inbox"))
+    spec = spec_from_loader(name, loader)
+    assert spec is not None
+    module = module_from_spec(spec)
+    loader.exec_module(module)
+    return module
 
 
 def assert_no_project_liveness(project: Path, agent: str = "claude") -> None:
@@ -571,26 +605,106 @@ def test_duplicate_claude_session_start_hook_quietly_uses_live_watcher(
     assert result.stderr == ""
 
 
-def test_claude_hook_uses_async_rewake_exit_for_heartbeat(
-    tmp_path, monkeypatch
-):
+def test_empty_watcher_renews_silently_until_mail(tmp_path, monkeypatch):
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+    wait = load_wait_module("rt_wait_silent_renewal_test")
+    monkeypatch.setattr(wait, "_project_root", lambda: project)
+    wait.POLL_SECONDS = 0.01
+    printed: list[tuple[tuple, dict]] = []
+    wait.print = lambda *args, **kwargs: printed.append((args, kwargs))
+    result: dict[str, int] = {}
 
-    result = run_tool(
-        "rt-wait-inbox",
-        "--claude-hook",
-        "claude",
-        "0",
-        cwd=project,
-        env=environment,
+    thread = threading.Thread(
+        target=lambda: result.update(
+            code=wait.run("claude", 0, claude_hook=True)
+        )
     )
+    thread.start()
+    try:
+        time.sleep(0.08)
+        assert thread.is_alive()
+        inspection = _rtruntime.inspect_seat(project, "claude")
+        assert inspection.status == "active_healthy"
+        assert inspection.heartbeat_age is not None
+        assert inspection.heartbeat_age <= _rtruntime.DEFAULT_HEARTBEAT_TTL
+        assert not printed
 
-    assert result.returncode == 2
-    assert "heartbeat timeout after 0m" in result.stdout
-    assert "heartbeat completed" in result.stderr
-    assert "Stop hook will re-arm" in result.stderr
+        new_dir = project_inbox(project, "claude") / "new"
+        new_dir.mkdir(parents=True, exist_ok=True)
+        (new_dir / "message-silent-renewal.md").write_text(
+            "[HERMES→CLAUDE question id=message-silent-renewal] mail\n"
+        )
+        thread.join(timeout=2)
+        assert not thread.is_alive()
+    finally:
+        if thread.is_alive():
+            new_dir = project_inbox(project, "claude") / "new"
+            new_dir.mkdir(parents=True, exist_ok=True)
+            (new_dir / "message-cleanup.md").write_text(
+                "[HERMES→CLAUDE question id=message-cleanup] stop\n"
+            )
+            thread.join(timeout=2)
+
+    assert result == {"code": 2}
+    output = "\n".join(str(args[0]) for args, _kwargs in printed if args)
+    assert "message-silent-renewal.md" in output
+    assert "heartbeat timeout" not in output
+    assert "heartbeat completed" not in output
+
+
+def test_empty_watcher_accelerated_soak_has_flat_rss_and_fds(tmp_path, monkeypatch):
+    project = write_project(tmp_path / "project")
+    runtime = tmp_path / "runtime"
+    environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+    wait = load_wait_module("rt_wait_flat_soak_test")
+    monkeypatch.setattr(wait, "_project_root", lambda: project)
+    wait.POLL_SECONDS = 0.002
+    result: dict[str, object] = {}
+
+    def watch() -> None:
+        try:
+            result["code"] = wait.run("claude", 0, claude_hook=True)
+        except BaseException as error:  # pragma: no cover - assertion below
+            result["error"] = error
+
+    fd_before = process_fd_count()
+    thread = threading.Thread(target=watch)
+    thread.start()
+    samples: list[tuple[int | None, int]] = []
+    try:
+        for _index in range(20):
+            time.sleep(0.025)
+            assert thread.is_alive()
+            samples.append((process_fd_count(), process_rss_bytes()))
+        new_dir = project_inbox(project, "claude") / "new"
+        new_dir.mkdir(parents=True, exist_ok=True)
+        (new_dir / "message-flat-soak.md").write_text(
+            "[HERMES→CLAUDE question id=message-flat-soak] mail\n"
+        )
+        thread.join(timeout=2)
+    finally:
+        if thread.is_alive():
+            new_dir = project_inbox(project, "claude") / "new"
+            new_dir.mkdir(parents=True, exist_ok=True)
+            (new_dir / "message-flat-soak-cleanup.md").write_text(
+                "[HERMES→CLAUDE question id=message-flat-soak-cleanup] stop\n"
+            )
+            thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert "error" not in result
+    assert result == {"code": 2}
+    fd_samples = [count for count, _rss in samples if count is not None]
+    fd_after = process_fd_count()
+    if fd_before is not None and fd_after is not None:
+        assert abs(fd_after - fd_before) <= 1
+    assert fd_samples
+    rss_samples = [rss for _count, rss in samples]
+    assert max(rss_samples) - min(rss_samples) <= 16 * 1024 * 1024
 
 
 def test_claude_stop_hook_breaks_an_undrained_mail_retry_loop(
@@ -835,50 +949,75 @@ def test_claude_stop_hook_wakes_a_fresh_late_message_generation(
     assert "automatic re-wake is paused" not in late_generation.stderr
 
 
-def test_claude_stop_hook_rearms_after_a_successful_drain(tmp_path, monkeypatch):
+def test_claude_stop_hook_stays_armed_on_empty_inbox(tmp_path, monkeypatch):
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
-
-    result = run_tool(
-        "rt-wait-inbox",
-        "--claude-stop-hook",
-        "claude",
-        "0",
-        cwd=project,
-        env=environment,
-        input_text='{"stop_hook_active": true}',
+    apply_claim_environment(monkeypatch, environment)
+    wait = load_wait_module("rt_wait_stop_empty_test")
+    monkeypatch.setattr(wait, "_project_root", lambda: project)
+    wait.POLL_SECONDS = 0.01
+    result: dict[str, int] = {}
+    thread = threading.Thread(
+        target=lambda: result.update(
+            code=wait.run(
+                "claude",
+                0,
+                claude_hook=True,
+                claude_stop_hook=True,
+                stop_hook_active=True,
+            )
+        )
     )
+    thread.start()
+    time.sleep(0.08)
+    assert thread.is_alive()
 
-    assert result.returncode == 2
-    assert "heartbeat timeout after 0m" in result.stdout
+    new_dir = project_inbox(project, "claude") / "new"
+    new_dir.mkdir(parents=True, exist_ok=True)
+    (new_dir / "message-stop-empty.md").write_text(
+        "[HERMES→CLAUDE question id=message-stop-empty] mail\n"
+    )
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result == {"code": 2}
 
 
-def test_quiet_ack_does_not_wake_and_empty_heartbeat_backoff_persists(
-    tmp_path, monkeypatch
-):
+def test_quiet_ack_does_not_wake_or_emit_empty_heartbeat(tmp_path, monkeypatch):
     project = write_project(tmp_path / "project")
     runtime = tmp_path / "runtime"
     environment = claim_environment(monkeypatch, runtime, project)
+    apply_claim_environment(monkeypatch, environment)
+    wait = load_wait_module("rt_wait_quiet_ack_test")
+    monkeypatch.setattr(wait, "_project_root", lambda: project)
+    wait.POLL_SECONDS = 0.01
+    printed: list[tuple[tuple, dict]] = []
+    wait.print = lambda *args, **kwargs: printed.append((args, kwargs))
+    result: dict[str, int] = {}
     new_dir = project_inbox(project, "claude") / "new"
     new_dir.mkdir(parents=True)
     (new_dir / "ack-message-1.md").write_text(
         "[CODEX→CLAUDE sync-ack id=message-1] received\n"
     )
 
-    first = run_tool(
-        "rt-wait-inbox", "claude", "0", cwd=project, env=environment
+    thread = threading.Thread(
+        target=lambda: result.update(code=wait.run("claude", 0))
     )
-    second = run_tool(
-        "rt-wait-inbox", "claude", "0", cwd=project, env=environment
-    )
+    thread.start()
+    time.sleep(0.08)
+    assert thread.is_alive()
+    assert not printed
 
-    assert first.returncode == second.returncode == 0
-    assert "heartbeat timeout after 0m" in first.stdout
-    assert "consecutive empty beats: 1" in first.stdout
-    assert "consecutive empty beats: 2" in second.stdout
-    assert "1 quiet ack file(s) pending" in first.stdout
-    assert "ack-message-1.md" not in first.stdout.split("heartbeat timeout", 1)[0]
+    (new_dir / "message-after-quiet-ack.md").write_text(
+        "[CODEX→CLAUDE question id=message-after-quiet-ack] mail\n"
+    )
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert result == {"code": 0}
+    output = "\n".join(str(args[0]) for args, _kwargs in printed if args)
+    assert "message-after-quiet-ack.md" in output
+    assert "ack-message-1.md" not in output
+    assert "heartbeat timeout" not in output
     assert_no_project_liveness(project)
 
 

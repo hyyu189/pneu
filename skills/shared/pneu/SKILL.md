@@ -6,7 +6,7 @@ description: >-
   rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
   routing, or cmux surface-routing bugs. Do not use merely because a repo
   contains .roundtable/agents.yaml.
-version: 8.0.0
+version: 8.1.0
 author: pneu contributors
 license: MIT
 platforms: [macos]
@@ -165,6 +165,13 @@ receipt. Move any quiet `ack-*` files to `cur/` without acknowledging them;
 Claude's hook-provided fenced inbox command performs that quiet-ack drain
 itself. Hermes and Codex re-arm automatically after the triggered non-ack
 generation is archived.
+
+An armed Claude or Hermes watcher is long-lived while `new/` is empty. It
+renews the fenced lease silently on a ten-second target cadence with the
+30-second `DEFAULT_HEARTBEAT_TTL`; an empty inbox never emits a heartbeat
+wake, exits for a Stop-hook turn, or spends model tokens. Mail, including a
+`malformed` listing, is still the only wake edge. A dead watcher therefore
+becomes stale within one TTL while a live idle seat remains `active_healthy`.
 Claude's Stop hook normally re-arms automatically; never launch a second
 watcher from the model turn. One unchanged pending generation receives its
 initial wake and at most one Stop-hook retry, then pauses instead of looping.

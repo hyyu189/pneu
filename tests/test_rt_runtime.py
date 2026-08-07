@@ -340,7 +340,7 @@ def test_old_watcher_cannot_clear_or_update_replacement_watcher(
     )
 
 
-def test_activity_and_empty_backoff_state_share_the_fenced_record(
+def test_activity_and_legacy_empty_count_share_the_fenced_record(
     tmp_path, runtime, process_table
 ):
     root = project(tmp_path)
@@ -362,6 +362,42 @@ def test_activity_and_empty_backoff_state_share_the_fenced_record(
     assert active.activity_at is not None
     assert backed_off.activity_revision == 1
     assert backed_off.empty_beats == 6
+
+
+def test_reclaim_project_runtime_removes_only_all_stale_leases(
+    tmp_path, runtime, process_table
+):
+    root = project(tmp_path)
+    token = _rtruntime.claim(root, "claude", "claude", owner_pid=101)
+    process_table[101] = None
+
+    result = _rtruntime.reclaim_project_runtime(root)
+
+    assert result.removed
+    assert not result.blockers
+    assert not result.path.exists()
+    assert not _rtruntime.seat_paths(root, "claude").project_dir.exists()
+
+
+def test_reclaim_project_runtime_preserves_live_or_ambiguous_leases(
+    tmp_path, runtime, process_table
+):
+    root = project(tmp_path)
+    token = _rtruntime.claim(root, "claude", "claude", owner_pid=101)
+
+    live = _rtruntime.reclaim_project_runtime(root)
+    assert not live.removed
+    assert live.blockers and "owner pid 101 is running" in live.blockers[0]
+    assert live.path.exists()
+
+    process_table[101] = RuntimeError("cannot inspect")
+    ambiguous = _rtruntime.reclaim_project_runtime(root)
+    assert not ambiguous.removed
+    assert ambiguous.blockers and "cannot be inspected" in ambiguous.blockers[0]
+    assert ambiguous.path.exists()
+
+    process_table[101] = "start-owner-101"
+    assert _rtruntime.release(token)
 
 
 def test_stale_heartbeat_never_makes_a_live_owner_claimable(

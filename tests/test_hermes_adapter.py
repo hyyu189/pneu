@@ -187,24 +187,21 @@ def test_incomplete_roundtable_environment_is_a_noop(
     assert not context.injected
 
 
-def test_activation_prefers_managed_waiter_and_restarts_after_heartbeat(
+def test_activation_keeps_long_lived_waiter_without_heartbeat_restart(
     tmp_path, monkeypatch
 ):
     plugin = _load_plugin()
     project, waiter = _set_activation(monkeypatch, tmp_path, agent="hermes/review")
     blocking = FakeProcess()
-    popen = FakePopen(
-        [
-            ("rt-wait-inbox: heartbeat timeout after 45m\n", 0),
-            blocking,
-        ]
-    )
+    popen = FakePopen([blocking])
     monkeypatch.setattr(plugin.subprocess, "Popen", popen)
     context = FakeContext()
 
     plugin.register(context)
     context.hooks["on_session_start"]()
-    _wait_until(lambda: len(popen.calls) == 2)
+    assert blocking.communicating.wait(1)
+    time.sleep(0.05)
+    assert len(popen.calls) == 1
 
     command, kwargs = popen.calls[0]
     assert command == [str(waiter), "hermes/review"]

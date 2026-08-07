@@ -29,7 +29,6 @@ _REQUIRED_ENV = (
     "RT_LEASE_REVISION",
 )
 _MAIL_MARKER = "rt-wait-inbox: mail after "
-_HEARTBEAT_MARKER = "rt-wait-inbox: heartbeat timeout after "
 _SUPERSEDED_MARKER = "rt-wait-inbox: seat lease or watcher was superseded"
 _MAIL_DRAIN_POLL_SECONDS = 0.25
 _STOP_JOIN_SECONDS = 2.0
@@ -307,9 +306,6 @@ class _RoundtableBridge:
                 )
                 if outcome != "drained":
                     return
-                continue
-
-            if process.returncode == 0 and _HEARTBEAT_MARKER in output:
                 continue
 
             if _SUPERSEDED_MARKER in output:

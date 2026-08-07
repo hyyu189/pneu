@@ -939,7 +939,7 @@ def test_same_version_source_reinstall_rejects_different_input_tree(tmp_path):
 
 
 def test_install_030_beside_pre_migration_019_runtime(tmp_path):
-    assert VERSION == "1.0.0"
+    assert VERSION == "1.0.1"
     home = tmp_path / "home"
     home.mkdir()
     prefix = home / ".pneu"
@@ -991,12 +991,12 @@ def test_install_030_beside_pre_migration_019_runtime(tmp_path):
     )
 
     assert upgraded.returncode == 0, upgraded.stderr
-    assert os.readlink(current) == "versions/1.0.0"
+    assert os.readlink(current) == "versions/1.0.1"
     assert not (old_dir / "bin" / "_rtmigrate.py").exists()
-    assert (prefix / "versions" / "1.0.0" / "bin" / "_rtmigrate.py").is_file()
+    assert (prefix / "versions" / "1.0.1" / "bin" / "_rtmigrate.py").is_file()
     upgraded_manifest = json.loads(manifest_path.read_text())
     assert upgraded_manifest["versions"] == sorted(
-        [str(old_dir), str(prefix / "versions" / "1.0.0")]
+        [str(old_dir), str(prefix / "versions" / "1.0.1")]
     )
 
 

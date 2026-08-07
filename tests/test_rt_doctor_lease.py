@@ -4,6 +4,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,6 +276,34 @@ def test_doctor_distinguishes_registry_tombstone_and_orphan(
     assert "WARN registry-orphan:" in output
     assert f"uuid={orphan_uuid}" in output
     assert f"path={orphan}" in output
+
+
+def test_doctor_reports_retired_runtime_directory_without_deleting_it(
+    tmp_path, monkeypatch, capsys
+):
+    project = write_project(tmp_path / "retired", [("claude", "claude-code")])
+    registry = write_registry(tmp_path / "projects.json", [project])
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    token = _rtruntime.claim(project, "claude", "claude")
+    assert _rtruntime.release(token)
+    runtime_project = _rtruntime.seat_paths(project, "claude").project_dir
+
+    assert _rtlib.unregister_project(project, path=registry)
+    shutil.rmtree(project)
+    entries, _warnings = _rtlib.load_project_registry(registry)
+    report = doctor.Report()
+
+    doctor.report_orphaned_runtime_projects(report, entries)
+
+    output = capsys.readouterr().out
+    assert "WARN runtime-residue:" in output
+    assert f"runtime_dir={runtime_project}" in output
+    assert "registry=tombstoned" in output
+    assert "report-only advisory" in output
+    assert runtime_project.exists()
+    assert not report.failed
 
 
 def test_doctor_checks_owner_and_watcher_process_anchors(

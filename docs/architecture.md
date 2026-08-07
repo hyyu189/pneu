@@ -201,8 +201,9 @@ directory.
 
 Runtime directories and files are private to the local user and updates use a
 short host-local lock plus atomic replacement. Project-local Claude and Hermes
-markers such as `.armed-<pid>`, `.last-active`, and `.empty-beats` now live in
-the fenced lease record; old project-local markers are diagnostic-only.
+markers such as `.armed-<pid>` and `.last-active` now live in the fenced lease
+record; the historical `.empty-beats` field is diagnostic-only and is no longer
+advanced by the long-lived watcher. Old project-local markers are diagnostic-only.
 Codex binding, bridge PID, heartbeat, locks, and logs are also host-local. The
 optional cmux `runtime.json` and legacy operation locks follow the same
 placement principle, but will move in separate changes so they do not complicate
@@ -252,8 +253,11 @@ acknowledgement, or send operation revalidates all four launcher fields against
 the current active lease before touching project mail. Its host-local wake
 state also records the last pending filename generation and bounded attempt
 count, preventing one undrained generation from causing an infinite wake loop.
+An empty inbox does not expire the watcher: it renews its lease silently on a
+cadence below the 30-second health TTL and waits for mail without emitting a
+model wake.
 
-Hermes follows the same bounded contract through its lifecycle plugin. The
+Hermes follows the same long-lived contract through its lifecycle plugin. The
 plugin arms on the TUI's `on_session_reset` boundary, and delivery uses the
 session-key-fenced background-notification handshake. Re-arm is
 generation-scoped: a fresh waiter starts only after the exact triggered

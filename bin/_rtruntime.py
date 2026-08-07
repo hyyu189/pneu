@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import os
+import shutil
 import stat
 import subprocess
 import time
@@ -27,6 +28,11 @@ PROJECT_SCHEMA = "roundtable.runtime-project.v1"
 CODEX_LAUNCH_INTENT_SCHEMA = "roundtable.codex-launch-intent.v1"
 CODEX_LAUNCH_INTENT_NAME = "codex-launch-intent.json"
 DEFAULT_HEARTBEAT_TTL = 30.0
+# Watchers renew more frequently than the health TTL.  Keeping the renewal
+# interval at one third of the TTL leaves room for scheduler and filesystem
+# jitter while preserving the invariant that a dead watcher is stale within
+# one TTL.
+DEFAULT_HEARTBEAT_RENEWAL_INTERVAL = DEFAULT_HEARTBEAT_TTL / 3.0
 DEFAULT_CODEX_LAUNCH_THREAD_WINDOW = 300.0
 BIND_REQUEST_LOCK_NAME = ".codex-bind-requests.lock"
 UNCHANGED = object()
@@ -135,6 +141,15 @@ class SeatInspection:
     @property
     def record(self) -> dict[str, Any] | None:
         return self.token.record if self.token is not None else None
+
+
+@dataclass(frozen=True)
+class RuntimeReclaim:
+    """Result of a guarded attempt to retire one project's runtime directory."""
+
+    path: Path
+    removed: bool
+    blockers: tuple[str, ...] = ()
 
 
 def utc_now() -> str:
@@ -843,6 +858,164 @@ def inspect_host_harness_seats(
                     )
                 )
     return inspections
+
+
+def _validate_runtime_tree(path: Path) -> None:
+    """Validate one private runtime tree before a narrowly-scoped removal."""
+
+    _validate_read_path(path, directory=True)
+    try:
+        children = sorted(path.iterdir())
+    except OSError as error:
+        raise RuntimeStateError(f"cannot list runtime path {path}: {error}") from error
+    for child in children:
+        info = _path_info(child)
+        if info is None:
+            raise RuntimeStateError(f"runtime path disappeared while inspecting: {child}")
+        if stat.S_ISDIR(info.st_mode):
+            _validate_runtime_tree(child)
+        else:
+            _validate_read_path(child, directory=False)
+
+
+def reclaim_project_runtime(project: Path | str) -> RuntimeReclaim:
+    """Remove one retired project's runtime directory when every lease is stale.
+
+    The caller must perform the higher-level project/worktree safety checks.
+    This function only owns the exact hash-derived runtime directory.  A live
+    or ambiguous owner is an advisory retention result; malformed or unsafe
+    runtime state raises so callers fail closed instead of guessing.
+    """
+
+    canonical = canonical_project(project)
+    paths = seat_paths(canonical, "__runtime-reclaim__")
+    _validate_read_path(paths.runtime_root, directory=True)
+    if _path_info(paths.runtime_root) is None:
+        return RuntimeReclaim(paths.project_dir, False)
+    projects_dir = paths.runtime_root / "projects"
+    _validate_read_path(projects_dir, directory=True)
+    if _path_info(projects_dir) is None or _path_info(paths.project_dir) is None:
+        return RuntimeReclaim(paths.project_dir, False)
+
+    _validate_runtime_tree(paths.project_dir)
+    _validate_project_meta(paths, canonical)
+    _validate_read_path(paths.claim_lock, directory=False)
+
+    # Claim/reclaim serialization prevents a new launcher from publishing a
+    # replacement lease while the exact runtime directory is being retired.
+    with _locked(paths.claim_lock):
+        _validate_runtime_tree(paths.project_dir)
+        _validate_project_meta(paths, canonical)
+        records = _read_agent_records(paths, canonical)
+        blockers = []
+        for record in records:
+            liveness, detail = _owner_liveness(record)
+            if liveness != "stale":
+                blockers.append(
+                    f"agent={record.get('agentId', '<invalid>')} "
+                    f"harness={record.get('harness', '<invalid>')} {detail}"
+                )
+        if blockers:
+            return RuntimeReclaim(
+                paths.project_dir,
+                False,
+                tuple(sorted(blockers)),
+            )
+        try:
+            shutil.rmtree(paths.project_dir)
+        except OSError as error:
+            raise RuntimeStateError(
+                f"cannot reclaim retired runtime directory {paths.project_dir}: {error}"
+            ) from error
+    return RuntimeReclaim(paths.project_dir, True)
+
+
+def _runtime_project_meta(path: Path) -> tuple[str, str]:
+    meta_path = path / "project.json"
+    meta = _read_json(meta_path)
+    if meta is None:
+        raise RuntimeStateError(f"runtime project metadata is missing: {meta_path}")
+    project_root = meta.get("projectRoot")
+    digest = meta.get("projectHash")
+    if (
+        meta.get("schema") != PROJECT_SCHEMA
+        or not isinstance(project_root, str)
+        or not project_root
+        or not Path(project_root).is_absolute()
+        or "\0" in project_root
+        or not isinstance(digest, str)
+        or not digest
+    ):
+        raise RuntimeStateError(f"runtime project metadata is invalid: {meta_path}")
+    expected_digest = hashlib.sha256(project_root.encode("utf-8")).hexdigest()
+    if digest != expected_digest:
+        raise RuntimeStateError(f"runtime project metadata hash mismatch: {meta_path}")
+    return project_root, digest
+
+
+def orphaned_runtime_projects(
+    registry_entries: list[dict[str, Any]],
+) -> list[dict[str, str | Path]]:
+    """List missing-project runtime dirs eligible for a doctor advisory.
+
+    This is deliberately report-only.  It does not inspect or mutate leases and
+    never removes anything; callers decide how to display the advisory.
+    """
+
+    root = runtime_root()
+    _validate_read_path(root, directory=True)
+    if _path_info(root) is None:
+        return []
+    projects_dir = root / "projects"
+    _validate_read_path(projects_dir, directory=True)
+    if _path_info(projects_dir) is None:
+        return []
+    try:
+        project_dirs = sorted(projects_dir.iterdir())
+    except OSError as error:
+        raise RuntimeStateError(
+            f"cannot list runtime projects in {projects_dir}: {error}"
+        ) from error
+
+    entries_by_root = {
+        str(entry.get("root")): entry
+        for entry in registry_entries
+        if isinstance(entry, dict) and entry.get("root") is not None
+    }
+    result: list[dict[str, str | Path]] = []
+    for project_dir in project_dirs:
+        _validate_runtime_tree(project_dir)
+        project_root, digest = _runtime_project_meta(project_dir)
+        if project_dir.name != digest:
+            raise RuntimeStateError(
+                f"runtime project directory name does not match metadata: {project_dir}"
+            )
+        candidate = Path(project_root)
+        try:
+            os.stat(candidate)
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            raise RuntimeStateError(
+                f"cannot inspect runtime project root {candidate}: {error}"
+            ) from error
+        else:
+            continue
+        entry = entries_by_root.get(project_root)
+        if entry is None:
+            registry_state = "absent"
+        elif entry.get("status") == "tombstoned":
+            registry_state = "tombstoned"
+        else:
+            continue
+        result.append(
+            {
+                "runtime_dir": project_dir,
+                "project_root": candidate,
+                "registry_state": registry_state,
+            }
+        )
+    return result
 
 
 def claim(

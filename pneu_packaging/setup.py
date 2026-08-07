@@ -41,8 +41,9 @@ CODEX_LABELS = (
 )
 CODEX_RELOAD_MARKER_SCHEMA = "roundtable.codex-app-server-reload-required.v1"
 CODEX_RELOAD_MARKER_NAME = "codex-app-server-reload-required.json"
-# rt-wait-inbox can back off as far as 240 minutes. Claude Code otherwise
-# applies a ten-minute default timeout to async command hooks.
+# rt-wait-inbox is a long-lived async hook that renews its lease silently while
+# waiting for mail. Claude Code otherwise applies a ten-minute default timeout
+# to async command hooks.
 CLAUDE_HOOK_TIMEOUT_SECONDS = 15_000
 CODEX_HOOK_TIMEOUT_SECONDS = 5
 

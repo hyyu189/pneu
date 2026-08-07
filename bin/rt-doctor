@@ -42,7 +42,12 @@ from _rtlib import (
     locked_project_mailbox_checked,
     projects_registry_path,
 )
-from _rtruntime import RuntimeStateError, harness_lease_records, inspect_seat
+from _rtruntime import (
+    RuntimeStateError,
+    harness_lease_records,
+    inspect_seat,
+    orphaned_runtime_projects,
+)
 
 
 BIND_REQUEST_SCHEMA = "roundtable.codex-bind-request.v1"
@@ -1110,6 +1115,33 @@ def validate_binding_lease(
     return True
 
 
+def report_orphaned_runtime_projects(
+    report: Report,
+    entries: list[dict],
+) -> None:
+    """Report retired runtime directories without deleting any state."""
+
+    try:
+        orphans = orphaned_runtime_projects(entries)
+    except RuntimeStateError as error:
+        report.item(
+            "FAIL",
+            "runtime-residue",
+            f"cannot inspect host-local runtime project directories: {error}",
+            "repair the private runtime root before attempting cleanup",
+        )
+        return
+    for orphan in orphans:
+        report.item(
+            "WARN",
+            "runtime-residue",
+            f"runtime_dir={orphan['runtime_dir']} "
+            f"projectRoot={orphan['project_root']} "
+            f"registry={orphan['registry_state']} (report-only advisory)",
+            "inspect the exact runtime directory; rt-doctor never deletes it",
+        )
+
+
 def project_health_checks(
     report: Report,
     registry_path: Path,
@@ -1172,6 +1204,7 @@ def project_health_checks(
     }
     inspections, codex_instances = inspect_project_seats(report, registered)
     report_legacy_markers(report, registered, registry_path)
+    report_orphaned_runtime_projects(report, entries)
 
     try:
         state = json.loads(state_file.read_text())

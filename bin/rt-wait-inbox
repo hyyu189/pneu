@@ -2,7 +2,7 @@
 """Wait for resolved project mail while keeping host-local wake state fenced.
 
 The registry-pinned mailbox layout owns durable mail. Process identity,
-activity, heartbeat, and adaptive-backoff state belong to the currently
+activity, and heartbeat state belong to the currently
 claimed host-local seat in ``RT_RUNTIME_DIR``.
 """
 
@@ -15,7 +15,6 @@ import signal
 import sys
 import time
 from pathlib import Path
-from typing import Any
 
 from _rtlib import (
     ProjectLayoutLockTimeout,
@@ -25,6 +24,7 @@ from _rtlib import (
     not_project_message,
 )
 from _rtruntime import (
+    DEFAULT_HEARTBEAT_RENEWAL_INTERVAL,
     FenceRejected,
     RuntimeStateError,
     clear_wake,
@@ -34,10 +34,10 @@ from _rtruntime import (
 )
 
 
-DEFAULT_MINUTES = 45
-FLOOR_MINUTES = 240
-BACKOFF_AFTER = 6
-POLL_SECONDS = 5
+# The watcher is intentionally long-lived.  It scans mail at most every five
+# seconds and renews the lease on every scan; this is comfortably below the
+# ten-second renewal target and the 30-second health TTL in _rtruntime.
+POLL_SECONDS = min(5.0, DEFAULT_HEARTBEAT_RENEWAL_INTERVAL)
 LAYOUT_SCAN_TIMEOUT_SECONDS = 1.0
 GENERATION_POLL_SECONDS = 0.25
 
@@ -123,37 +123,6 @@ def _lease_environment(agent: str) -> tuple[str, str]:
             f"RT_FROM={launched_as!r} does not match requested agent {agent!r}"
         )
     return session_id, revision
-
-
-def _field(value: Any, name: str, default=None):
-    if hasattr(value, name):
-        return getattr(value, name)
-    for container_name in ("record", "state", "data"):
-        container = getattr(value, container_name, None)
-        if isinstance(container, dict) and name in container:
-            return container[name]
-    if isinstance(value, dict):
-        return value.get(name, default)
-    return default
-
-
-def _integer_field(value: Any, name: str, default: int = 0) -> int:
-    raw = _field(value, name, default)
-    if isinstance(raw, bool):
-        return default
-    try:
-        parsed = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return max(0, parsed)
-
-
-def _activity_stamp(value: Any):
-    for name in ("activity_revision", "activity_at", "last_activity_at"):
-        stamp = _field(value, name)
-        if stamp is not None:
-            return stamp
-    return None
 
 
 def _wake_mail(new_dir: Path) -> list[str]:
@@ -282,12 +251,6 @@ def _parse_minutes(raw: str | None) -> int | None:
     return value
 
 
-def _pick_max(explicit: int | None, empty_beats: int) -> int:
-    if explicit is not None:
-        return explicit
-    return FLOOR_MINUTES if empty_beats >= BACKOFF_AFTER else DEFAULT_MINUTES
-
-
 def _stop_hook_retry_exhausted(
     pending_at_stop: list[str],
     lease,
@@ -320,6 +283,9 @@ def run(
     claude_stop_hook: bool = False,
     stop_hook_active: bool = False,
 ) -> int:
+    # ``max-minutes`` remains accepted for launcher compatibility, but an
+    # armed watcher no longer expires merely because the inbox stayed empty.
+    del explicit_minutes
     project = _project_root()
     session_id, revision = _lease_environment(agent)
     # Validate before touching either the durable inbox or host-local runtime.
@@ -390,15 +356,13 @@ def run(
         ):
             _report_stop_hook_retry_exhausted()
             return 0
-        empty_beats = _integer_field(token, "empty_beats")
-        activity = _activity_stamp(token)
-        max_minutes = _pick_max(explicit_minutes, empty_beats)
-        ticks = 0
         mail = pending_at_stop
+        waited_seconds = 0
         superseded = False
 
-        while not mail and ticks < max_minutes * (60 // POLL_SECONDS):
+        while not mail:
             time.sleep(POLL_SECONDS)
+            waited_seconds += POLL_SECONDS
             try:
                 token = update_wake(
                     project,
@@ -410,21 +374,6 @@ def run(
             except FenceRejected:
                 superseded = True
                 break
-            current_activity = _activity_stamp(token)
-            activity_changed = current_activity != activity
-            if activity_changed:
-                activity = current_activity
-                ticks = 0
-                empty_beats = 0
-                max_minutes = _pick_max(explicit_minutes, empty_beats)
-                token = update_wake(
-                    project,
-                    agent,
-                    session_id,
-                    revision,
-                    empty_beats=0,
-                    expected_watcher_pid=watcher_pid,
-                )
             try:
                 candidate_mail, _candidate_acks = (
                     _mailbox_snapshot(project, agent, create=True)
@@ -433,8 +382,6 @@ def run(
                 # Do not count an exclusive migration as an empty heartbeat.
                 continue
             mail = candidate_mail
-            if not activity_changed:
-                ticks += 1
 
         if superseded:
             print("rt-wait-inbox: seat lease or watcher was superseded")
@@ -451,37 +398,14 @@ def run(
                 agent,
                 session_id,
                 revision,
-                empty_beats=0,
                 last_wake_messages=mail,
                 wake_attempts=attempts,
                 expected_watcher_pid=watcher_pid,
             )
-            print(f"rt-wait-inbox: mail after {ticks * POLL_SECONDS}s:")
+            print(f"rt-wait-inbox: mail after {waited_seconds:g}s:")
             print("\n".join(mail))
             if claude_hook:
                 print(_claude_drain_instructions(agent), file=sys.stderr)
-        else:
-            empty_beats += 1
-            update_wake(
-                project,
-                agent,
-                session_id,
-                revision,
-                empty_beats=empty_beats,
-                expected_watcher_pid=watcher_pid,
-            )
-            print(
-                "rt-wait-inbox: heartbeat timeout after "
-                f"{max_minutes}m (inbox empty; consecutive empty beats: "
-                f"{empty_beats})"
-            )
-            if claude_hook:
-                print(
-                    "Roundtable inbox heartbeat completed. The Stop hook will "
-                    "re-arm the watcher automatically; do not start another "
-                    "watcher yourself.",
-                    file=sys.stderr,
-                )
         try:
             _remaining_mail, acks = _mailbox_snapshot(
                 project,
@@ -497,8 +421,8 @@ def run(
             )
         # Claude Code's asyncRewake contract wakes an idle session only when
         # the background hook exits 2. Ordinary terminal/Hermes watchers keep
-        # their historical success exit so their native background-process
-        # notification path remains unchanged.
+        # their success exit after a mail generation; an empty inbox never
+        # reaches this point because the watcher renews silently in place.
         return 2 if claude_hook else 0
     except StopRequested:
         return 0
@@ -578,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
     if not 1 <= len(argv) <= 2:
         print(
             "usage: rt-wait-inbox [--claude-hook|--claude-stop-hook] "
-            "<agent> [max-minutes]",
+            "<agent> [legacy-max-minutes]",
             file=sys.stderr,
         )
         return 2
