@@ -640,22 +640,28 @@ def _validate_manifest_paths(prefix: Path, manifest: dict) -> None:
         if path.parent != prefix / "bin" or path.name not in TOOLS:
             raise InstallError(f"managed manifest file escapes owned paths: {path}")
 
-    skill_link = prefix / "skills" / "shared" / "pneu"
+    # A pre-1.0 install recorded the skill under the old product name; the
+    # migrating installer must recognize its own pre-rename assets.
+    skill_links = {
+        prefix / "skills" / "shared" / "pneu": str(
+            prefix / "current" / "share" / "pneu" / "skills" / "shared" / "pneu"
+        ),
+        prefix / "skills" / "shared" / "roundtable": str(
+            prefix
+            / "current"
+            / "share"
+            / "roundtable"
+            / "skills"
+            / "shared"
+            / "roundtable"
+        ),
+    }
     for raw_path, target in links.items():
         if not isinstance(raw_path, str) or not isinstance(target, str):
             raise InstallError("managed manifest has an invalid link entry")
         path = Path(raw_path).absolute()
-        if path == skill_link:
-            expected = str(
-                prefix
-                / "current"
-                / "share"
-                / "pneu"
-                / "skills"
-                / "shared"
-                / "pneu"
-            )
-            if target != expected:
+        if path in skill_links:
+            if target != skill_links[path]:
                 raise InstallError(
                     f"managed manifest has an invalid skill link target: {target}"
                 )
