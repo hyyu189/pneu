@@ -37,9 +37,9 @@ the lease-context variables `RT_PROJECT_ROOT`, `RT_SESSION_ID`, and
 the identity paired with that foreign lease. They arrive through the parent
 seat/shell environment, including tmux's captured server environment or a
 nested relaunch from an existing seat; they are not discovered from the
-project files. In the live check, `/Users/haiyangyu/quant` had no lease-context
+project files. In the live check, `~/quant` had no lease-context
 variables in its ordinary shell, while the active tmux environment held a
-complete Claude lease for `/Users/haiyangyu/Code/roundtable-product` and the
+complete Claude lease for `the roundtable-product checkout` and the
 process tree showed the quant seat launch wrappers.
 
 The guard is correct and remains fail-closed: keeping those values would let a
