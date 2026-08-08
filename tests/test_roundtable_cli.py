@@ -149,7 +149,8 @@ def test_guide_command_renders_ascii_mailroom_and_wake_model(tmp_path):
     assert "Claude  SessionStart/Stop hooks" in rendered
     assert "Hermes  the session-start plugin" in rendered
     assert "Codex   the app-server and Unix-socket notification bridge" in rendered
-    assert "Grok Build and OpenClaw use isolated" in rendered
+    assert "OpenClaw  the isolated Gateway seat" in rendered
+    assert "Grok Build the isolated ACP seat" in rendered
 
 
 def test_version_command_reports_manifest_prefix_and_current_target(
@@ -800,6 +801,58 @@ def test_selector_marks_configured_but_missing_harness_unavailable(
         "(starts with a visible automatic pneu activation turn)"
         in stderr.getvalue()
     )
+
+
+@pytest.mark.parametrize(
+    ("harness", "override"),
+    [
+        ("claude", "RT_CLAUDE_BIN"),
+        ("codex", "RT_CODEX_BIN"),
+        ("hermes", "RT_HERMES_BIN"),
+        ("openclaw", "RT_OPENCLAW_BIN"),
+        ("grok", "RT_GROK_BIN"),
+    ],
+)
+def test_harness_detection_accepts_present_executable_and_rejects_broken_symlink(
+    tmp_path, monkeypatch, harness, override
+):
+    executable = tmp_path / harness
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    monkeypatch.setenv(override, str(executable))
+
+    assert roundtable.harness_bin(harness) == executable.resolve()
+
+    executable.unlink()
+    executable.symlink_to(tmp_path / ("missing-" + harness))
+    with pytest.raises(roundtable.SelectionError):
+        roundtable.harness_bin(harness)
+
+
+def test_selector_shows_all_five_harnesses_and_plain_install_remedies(
+    tmp_path, monkeypatch
+):
+    project = write_project(tmp_path / "project", {"claude": ("claude-code", ["claude"])})
+    monkeypatch.setattr(
+        roundtable,
+        "harness_bin",
+        lambda harness: (_ for _ in ()).throw(
+            roundtable.SelectionError(f"rt-{harness}: executable not found")
+        ),
+    )
+    stderr = io.StringIO()
+
+    with pytest.raises(roundtable.OnboardingError, match="no launchable"):
+        roundtable.choose_seat(project, stdin=TTYInput(""), stderr=stderr)
+
+    rendered = stderr.getvalue()
+    for harness in ("claude", "codex", "hermes", "openclaw", "grok"):
+        assert f"unavailable: {harness}" in rendered
+    assert "missing executable `openclaw`" in rendered
+    assert "set RT_OPENCLAW_BIN" in rendered
 
 
 def test_direct_missing_harness_fails_before_setup(

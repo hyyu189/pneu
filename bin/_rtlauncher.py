@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import re
@@ -41,6 +42,20 @@ COMMANDS = {
     # Grok is launched through rt-grok-wake, not attached to a shared leader.
     "grok": ["grok"],
 }
+HARNESS_LABELS = {
+    "claude": "Claude Code",
+    "codex": "Codex",
+    "hermes": "Hermes",
+    "openclaw": "OpenClaw",
+    "grok": "Grok Build",
+}
+HARNESS_INSTALL_HINTS = {
+    "claude": "Install Claude Code from Anthropic, then run pneu again",
+    "codex": "Install Codex CLI from OpenAI, then run pneu again",
+    "hermes": "Install Hermes Agent, then run pneu again",
+    "openclaw": "Install OpenClaw using its vendor installer, then run pneu again",
+    "grok": "Install Grok Build using its vendor installer, then run pneu again",
+}
 EXECUTABLE_OVERRIDES = {
     "claude": "RT_CLAUDE_BIN",
     "hermes": "RT_HERMES_BIN",
@@ -77,6 +92,102 @@ class SelectionError(RuntimeError):
     pass
 
 
+_ADAPTER_MODULES = {}
+
+
+def _adapter_module(harness: str):
+    """Load the installed adapter module used by an optional harness resolver."""
+
+    relative = {
+        "openclaw": Path("integrations/openclaw/roundtable/__init__.py"),
+        "grok": Path("integrations/grok/roundtable/__init__.py"),
+    }[harness]
+    module = _ADAPTER_MODULES.get(harness)
+    if module is not None:
+        return module
+    version_root = Path(__file__).resolve().parent.parent
+    candidates = (
+        version_root / relative,
+        version_root / "share" / "pneu" / relative,
+    )
+    source = next((candidate for candidate in candidates if candidate.is_file()), None)
+    if source is None:
+        raise SelectionError(
+            f"rt-{harness}: the installed {HARNESS_LABELS[harness]} adapter is missing; "
+            "reinstall pneu before launching this seat"
+        )
+    module_name = f"_pneu_{harness}_resolver"
+    spec = importlib.util.spec_from_file_location(module_name, source)
+    if spec is None or spec.loader is None:
+        raise SelectionError(
+            f"rt-{harness}: cannot load the installed {HARNESS_LABELS[harness]} adapter; "
+            "reinstall pneu before launching this seat"
+        )
+    module = importlib.util.module_from_spec(spec)
+    # Dataclasses and other introspection helpers expect an executing module
+    # to be registered under its spec name.
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    _ADAPTER_MODULES[harness] = module
+    return module
+
+
+def _adapter_harness_bin(harness: str) -> Path:
+    resolver_name = {
+        "openclaw": "resolve_openclaw_bin",
+        "grok": "resolve_grok_bin",
+    }[harness]
+    try:
+        return Path(getattr(_adapter_module(harness), resolver_name)()).resolve()
+    except SelectionError:
+        raise
+    except (OSError, RuntimeError) as error:
+        raise SelectionError(f"rt-{harness}: {error}") from error
+
+
+def _candidate_paths(harness: str) -> list[Path]:
+    """Return the same visible executable locations used for menu diagnostics."""
+
+    override_name = EXECUTABLE_OVERRIDES.get(harness)
+    candidates: list[Path] = []
+    if override_name and os.environ.get(override_name):
+        candidates.append(Path(os.environ[override_name]).expanduser())
+    home = Path.home()
+    if harness == "codex":
+        code_home = os.environ.get("CODEX_HOME")
+        if code_home:
+            candidates.append(Path(code_home).expanduser() / "packages/standalone/current/codex")
+    candidates.extend(
+        (
+            home / ".local" / "bin" / COMMANDS[harness][0],
+            home / ".npm-global" / "bin" / COMMANDS[harness][0],
+        )
+    )
+    candidates.extend(
+        Path(directory).expanduser() / COMMANDS[harness][0]
+        for directory in os.environ.get("PATH", "").split(os.pathsep)
+        if directory
+    )
+    return candidates
+
+
+def harness_unavailable_detail(harness: str, error: str | Exception) -> str:
+    """Render a menu-safe explanation with the next action a user can take."""
+
+    binary = COMMANDS[harness][0]
+    override = EXECUTABLE_OVERRIDES.get(harness)
+    existing = next(
+        (candidate for candidate in _candidate_paths(harness) if os.path.lexists(candidate)),
+        None,
+    )
+    if existing is not None and not _executable(existing):
+        state = f"the {binary} executable at {existing} is missing or not executable"
+    else:
+        state = f"missing executable `{binary}` (it is not installed)"
+    override_hint = f"; or set {override} to its executable path" if override else ""
+    return f"{state}. {HARNESS_INSTALL_HINTS[harness]}{override_hint}."
+
+
 def _executable(path: Path) -> bool:
     return path.is_file() and os.access(path, os.X_OK)
 
@@ -105,6 +216,9 @@ def harness_bin(harness: str) -> Path:
             return codex_bin()
         except CodexRuntimeError as error:
             raise SelectionError(f"rt-codex: {error}") from error
+
+    if harness in {"openclaw", "grok"}:
+        return _adapter_harness_bin(harness)
 
     override_name = EXECUTABLE_OVERRIDES[harness]
     override = os.environ.get(override_name)
@@ -145,8 +259,8 @@ def harness_bin(harness: str) -> Path:
         if _executable(selected) and not _is_cmux_shim(selected):
             return selected
     raise SelectionError(
-        f"rt-{harness}: could not find a non-cmux {executable_name} executable; "
-        f"set {override_name}"
+        f"rt-{harness}: "
+        f"{harness_unavailable_detail(harness, 'executable not found')}"
     )
 
 
@@ -435,9 +549,11 @@ def scrub_inherited_seat_environment(harness: str) -> None:
         return
     for name in LEASE_ENV_NAMES:
         os.environ.pop(name, None)
+    inherited = ", ".join(LEASE_CONTEXT_ENV_NAMES)
     print(
-        f"rt-{harness}: advisory: ignoring Roundtable seat environment "
-        "inherited from the launching session",
+        f"rt-{harness}: this shell inherited {inherited} from another Roundtable "
+        "seat; clearing them before starting a new seat so mail cannot be sent "
+        "as the wrong agent",
         file=sys.stderr,
     )
 

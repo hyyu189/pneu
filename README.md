@@ -11,9 +11,10 @@ daemon, account, or network.
 ## The short version
 
 An agent sends a message with `rt-say`. The command atomically writes a file
-into the recipient's `new/` mailbox; that write is delivery. A Claude, Hermes,
-or Codex lifecycle adapter may wake the recipient. The recipient acts and runs
-`rt-ack`, which sends the quiet receipt and archives the message to `cur/`.
+into the recipient's `new/` mailbox; that write is delivery. A Claude Code,
+Codex, Hermes, OpenClaw, or Grok Build adapter may wake the recipient. The
+recipient acts and runs `rt-ack`, which sends the quiet receipt and archives
+the message to `cur/`.
 Offline seats keep their mail until they return.
 
 ```text
@@ -22,7 +23,7 @@ rt-say  ->  project mailbox: new/  ->  agent acts  ->  rt-ack  ->  cur/
 ```
 
 The `rt-*` names and `RT_*` environment variables are pneu's tool prefix and
-remain stable in 1.1.0. Project state remains under `.roundtable/`, and
+remain stable in 1.2.0. Project state remains under `.roundtable/`, and
 `roundtable.*` wire and registry schema identifiers are unchanged. `roundtable`
 is a silent compatibility alias for the primary `pneu` command.
 
@@ -33,8 +34,8 @@ wheel and locked dependencies but not Python; the host needs CPython 3.11
 through 3.14.
 
 ```bash
-tar -xzf pneu-1.1.0-macos.tar.gz
-cd pneu-1.1.0
+tar -xzf pneu-1.2.0-macos.tar.gz
+cd pneu-1.2.0
 ./install
 export PATH="$HOME/.local/bin:$PATH"
 pneu
@@ -84,11 +85,11 @@ archived directly and never acknowledged again.
 
 Wake-up is an adapter layered over delivery:
 
-- Claude uses asynchronous SessionStart/Stop lifecycle hooks.
-- Hermes uses its session-start plugin.
+- Claude Code uses asynchronous SessionStart/Stop lifecycle hooks.
 - Codex uses its app-server and Unix-socket bridge.
-- Grok Build and OpenClaw use isolated, fail-closed adapters whose support
-  claims require their own live credentialed gates.
+- Hermes uses its session-start plugin.
+- OpenClaw uses an isolated Gateway adapter.
+- Grok Build uses an isolated ACP adapter.
 
 cmux is optional. The core send, receive, acknowledge, recovery, and doctor
 paths work in ordinary terminals and do not inject keyboard input.
@@ -116,7 +117,7 @@ The repository records validation evidence and open promotion gates in
 [`docs/compatibility.md`](docs/compatibility.md). A supported platform/runtime
 claim requires a real end-to-end smoke test; version-number comparisons and
 fixtures alone do not establish support. Cross-host SSH, Linux service
-management, and multi-auth switching remain out of scope for 1.1.0.
+management, and multi-auth switching remain out of scope for 1.2.0.
 
 ## History
 

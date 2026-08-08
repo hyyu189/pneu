@@ -14,7 +14,9 @@ from pathlib import Path
 from _rtlauncher import (
     SelectionError,
     configured_sender_ids,
+    HARNESS_LABELS,
     harness_bin,
+    harness_unavailable_detail,
     project_at_or_above,
     run_onboarding_init,
 )
@@ -45,7 +47,7 @@ ALIASES = {
     "ack": "rt-ack",
     "worktree": "rt-worktree",
 }
-HARNESS_ORDER = ("claude", "codex", "hermes", "grok")
+HARNESS_ORDER = ("claude", "codex", "hermes", "openclaw", "grok")
 PROMPT_ATTEMPTS = 3
 
 HELP = """usage: pneu [command] [args...]
@@ -76,15 +78,15 @@ ASCII_GUIDE = """
 +------------------------------------------------------------------+
 | pneu = a local mailroom for coding-agent seats             |
 +------------------------------------------------------------------+
-| Claude       Codex       Hermes                                  |
-|    |           |            |                                    |
-|    +-----------+------------+                                    |
-|                |                                                 |
-|                v                                                 |
-|       project mailbox: new/  ->  cur/                            |
-|                |                                                 |
-|                v                                                 |
-|       the recipient agent works and acknowledges                 |
+| Claude Code  Codex  Hermes  OpenClaw  Grok Build                 |
+|       \\         |       |       |          /                     |
+|        +--------+-------+-------+---------+                      |
+|                         |                                        |
+|                         v                                        |
+|                project mailbox: new/  ->  cur/                   |
+|                         |                                        |
+|                         v                                        |
+|                the recipient agent works and acknowledges        |
 +------------------------------------------------------------------+
 
 Delivery and wake-up are separate:
@@ -93,17 +95,19 @@ Delivery and wake-up are separate:
   3. The agent acts, then rt-ack archives the message.
   4. If the agent is offline, the message waits in new/.
 
-Wake-up paths in this release:
+Five supported harnesses:
   Claude  SessionStart/Stop hooks arm and re-arm the tripwire.
   Hermes  the session-start plugin owns the tripwire lifecycle.
   Codex   the app-server and Unix-socket notification bridge wake the seat;
           the SessionStart hook binds the native thread to its lease.
+  OpenClaw  the isolated Gateway seat reads the durable mailbox.
+  Grok Build the isolated ACP seat reads the durable mailbox.
 
 Tripwire means "watch for mail and request a harness-native turn".
 It is not the mailbox and it is not keyboard injection.
 
-Grok Build and OpenClaw use isolated, fail-closed wake adapters; each remains
-subject to its own live credentialed E2E and release-artifact promotion gates.
+OpenClaw and Grok Build need their vendor command installed. If one is missing,
+the launcher names the command and tells you how to fix it.
 
 Tip: run `pneu guide` any time to show this tutorial again.
 """.lstrip()
@@ -617,21 +621,25 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
             ids = configured_sender_ids(root, harness)
         except SelectionError as error:
             raise OnboardingError(f"pneu: {error}") from error
-        if not ids:
-            continue
         try:
             harness_bin(harness)
         except SelectionError as error:
-            unavailable.append((harness, str(error)))
+            detail = harness_unavailable_detail(harness, error)
+            if ids:
+                unavailable.append((harness, detail))
+            else:
+                unavailable.append((harness, f"not configured in this project; {detail}"))
+            continue
+        if not ids:
+            unavailable.append(
+                (
+                    harness,
+                    f"not configured in this project; add a {harness} seat to "
+                    ".roundtable/agents.yaml",
+                )
+            )
             continue
         seats.extend((harness, agent_id) for agent_id in ids)
-    if not seats:
-        detail = " | ".join(f"{name}: {error}" for name, error in unavailable)
-        raise OnboardingError(
-            f"pneu: no launchable configured harness seats in {root}"
-            + (f"; {detail}" if detail else "")
-        )
-
     print("Choose a harness seat:", file=stderr)
     for index, (harness, agent_id) in enumerate(seats, 1):
         activation_hint = (
@@ -644,7 +652,16 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
             file=stderr,
         )
     for harness, detail in unavailable:
-        print(f"  unavailable: {harness} — {detail}", file=stderr)
+        print(
+            f"  unavailable: {harness} ({HARNESS_LABELS[harness]}) — {detail}",
+            file=stderr,
+        )
+    if not seats:
+        detail = " | ".join(f"{name}: {error}" for name, error in unavailable)
+        raise OnboardingError(
+            f"pneu: no launchable configured harness seats in {root}"
+            + (f"; {detail}" if detail else "")
+        )
     def parse_selection(raw):
         try:
             selected = int(raw)

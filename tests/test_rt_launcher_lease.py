@@ -377,7 +377,7 @@ def test_launch_scrubs_full_inherited_seat_environment(
         },
     }
     assert (
-        "rt-hermes: advisory: ignoring Roundtable seat environment inherited"
+        "rt-hermes: this shell inherited RT_PROJECT_ROOT, RT_SESSION_ID, RT_LEASE_REVISION"
         in capsys.readouterr().err
     )
 

@@ -15,6 +15,7 @@ real vendor session can wake.
 | Claude Code | Global skill link; owned asynchronous SessionStart/Stop watchers; absolute lease-fenced mail permissions; plan/apply/status/remove tests; two sequential installed-RC8 development-host wake generations | Clean-account real send-to-wake-to-drain/ack repeat |
 | Hermes | Global skill link; packaged lifecycle plugin; marked plugin enablement; plan/apply/status/remove tests; two sequential RC7 development-host wake generations | RC8 artifact and clean-account plugin/wake repeat |
 | Codex | Shared executable resolver; global skill link; owned SessionStart auto-bind hook; owned app-server and wake plist generation; fail-closed service preflight tests; development-host cutover and thread/lease identity spike | Clean-account repeat and real send-to-wake-to-drain/ack |
+| OpenClaw | Isolated Gateway adapter; fenced lease and identity checks; project-scoped state and loopback Gateway protocol tests | Clean-account/terminal-matrix repeat before public support promotion |
 | Grok Build `0.2.118` | Isolated stdlib ACP supervisor; fenced lease and identity checks; bounded HOME/XDG/GROK_HOME/TMP/log state; exact mail-only permission policy; child-death recovery; focused fault, mutation, soak, three-seat interop, refreshed-credential two-generation E2E, and extracted release-artifact smoke | Clean-account/terminal-matrix repeat and an explicit vendor-supported token-refresh/preflight contract before public support promotion |
 
 The Codex plist files are written but not loaded by setup. This is an
@@ -118,6 +119,19 @@ configuration must select its identity explicitly, for example
 and does not require a cmux surface, so it works in ordinary terminal apps.
 The cmux topology commands remain optional integration tools; full tmux support
 is not claimed until its end-to-end gate passes.
+
+### Ctrl-C and terminal prompts
+
+The launcher replaces itself with the selected harness executable. When you
+run `pneu`, `rt-claude`, `rt-codex`, `rt-hermes`, `rt-openclaw`, or `rt-grok`
+from an existing interactive shell, that shell remains the parent and returns
+to its prompt when the harness exits, including after Ctrl-C. The launcher does
+not create or manage tmux windows or panes.
+
+If a tmux window was created with the launcher itself as the window command,
+there is no parent shell for the window to return to; the window can therefore
+close or show its exit status after Ctrl-C. Start the launcher from a shell in
+that window, or make the window command run a shell that invokes the launcher.
 
 ## Claude lifecycle and unattended drain
 
