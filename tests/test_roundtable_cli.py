@@ -907,3 +907,21 @@ def test_first_project_onboarding_explains_non_git_topology(
     assert f"This folder is not a pneu project yet: {folder}" in output
     assert "[durable mailboxes]" in output
     assert "Git is optional" in output
+
+
+def test_unavailable_detail_distinguishes_broken_from_absent(tmp_path, monkeypatch):
+    """A broken/non-executable binary names its path; true absence says not installed."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path / "bin"))
+    monkeypatch.delenv("RT_HERMES_BIN", raising=False)
+    (tmp_path / "bin").mkdir()
+
+    absent = roundtable.harness_unavailable_detail("hermes", "executable not found")
+    assert "not installed" in absent
+    assert "RT_HERMES_BIN" in absent
+
+    broken = tmp_path / "bin" / "hermes"
+    broken.symlink_to(tmp_path / "missing-hermes-target")
+    present = roundtable.harness_unavailable_detail("hermes", "executable not found")
+    assert "missing or not executable" in present
+    assert str(broken) in present
