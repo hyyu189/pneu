@@ -91,6 +91,10 @@ Wake-up is an adapter layered over delivery:
 - OpenClaw uses an isolated Gateway adapter.
 - Grok Build uses an isolated ACP adapter.
 
+Project-anchored `rt-claude` launches enable Remote Control as
+`<agent>@<project-name>` by default; pass `--remote-control` to choose the name
+or set `RT_CLAUDE_NO_RC=1` to opt out.
+
 cmux is optional. The core send, receive, acknowledge, recovery, and doctor
 paths work in ordinary terminals and do not inject keyboard input.
 

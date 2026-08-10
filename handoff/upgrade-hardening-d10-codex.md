@@ -34,6 +34,21 @@ Source directive: `20260810T011007Z-claude-to-codex-74095`; implementation brief
 - Package and app-server client versions are `1.2.1`; README and package
   artifact expectations match.
 
+## D10.6 Claude Remote Control identity
+
+Project-anchored `rt-claude` launches now append
+`--remote-control <agent>@<project-name>` so claude.ai/code and Claude mobile
+show the pneu seat identity. A caller-supplied `--remote-control` (including
+the `--remote-control=<name>` form) is preserved without a duplicate, and
+`RT_CLAUDE_NO_RC=1` disables the default. Unanchored Claude and every other
+harness remain unchanged.
+
+Installed Claude Code `2.1.226` accepted both
+`--resume <id> --remote-control <name> --help` and
+`--continue --remote-control <name> --help` with exit zero. This confirms the
+constructed option composition without creating or resuming a user session.
+The launch regression covers both resume shapes as complete command vectors.
+
 ## Operator registry recommendation
 
 Keep the current repaired tombstoned registry path. The product fix now permits
@@ -47,14 +62,18 @@ backups.
 - Regression-first D10 slice: 13 expected failures plus one existing pass
   before production changes; `14 passed` after the fixes.
 - Affected-module suite: `417 passed`.
+- D10.6 launcher and cross-harness focused suite: `37 passed`.
 - Six explicit mutants (registry refresh, periodic boundary, residue,
   primer advisory, resume shape, tombstone drift): all were killed (`7 failed`
   because the resume test spans two boundary versions); restoration rerun was
   `7 passed`, with identical pre/post diff checksum.
-- Full suite: `974 passed, 1 skipped`.
+- The D10.6 default-injection mutant was killed by both installed-CLI resume
+  command shapes (`2 failed`); restoration rerun was `2 passed`, again with an
+  identical pre/post diff checksum.
+- Final full suite: `978 passed, 1 skipped`.
 - `python -m compileall -q bin pneu_packaging scripts tests`: passed under the
   shared `general` environment.
-- `scripts/check_public_safety.py`: passed over 152 tracked files and full
+- `scripts/check_public_safety.py`: passed over 153 tracked files and full
   reachable history.
 - `git diff --check`: passed.
 

@@ -217,6 +217,9 @@ Claude, the system reminder prints the package-managed absolute paths for
 only lease-validated maildir commands, not a PATH lookalike or the legacy
 keyboard route. Ordinary users and agents should not start or kill watcher
 processes themselves.
+Project-anchored `rt-claude` launches name Remote Control
+`<agent>@<project-name>` by default; an explicit `--remote-control` wins and
+`RT_CLAUDE_NO_RC=1` disables it.
 
 **Arming (Hermes)** — the setup-owned plugin starts the fenced watcher at
 Hermes session start and injects a user-visible pneu notice when mail

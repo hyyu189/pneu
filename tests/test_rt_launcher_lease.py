@@ -112,7 +112,12 @@ def test_anchored_launcher_claims_seat_and_exports_lease_environment(
     assert calls == [(project, "claude", "claude")]
     assert observed == {
         "program": str(fake_binary),
-        "command": [str(fake_binary), "--resume"],
+        "command": [
+            str(fake_binary),
+            "--resume",
+            "--remote-control",
+            "claude@project",
+        ],
         "environment": {
             "RT_PROJECT_ROOT": str(project),
             "RT_FROM": "claude",
@@ -122,8 +127,12 @@ def test_anchored_launcher_claims_seat_and_exports_lease_environment(
     }
 
 
+@pytest.mark.parametrize(
+    "resume_argv",
+    (["--resume", "native-thread"], ["--continue"]),
+)
 def test_resume_shaped_launch_reuses_same_process_lease_and_exports_record(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, resume_argv
 ):
     project = write_project(
         tmp_path / "project", agent_id="claude", harness="claude-code"
@@ -169,11 +178,16 @@ def test_resume_shaped_launch_reuses_same_process_lease_and_exports_record(
     monkeypatch.setattr(_rtlauncher.os, "execv", fake_execv)
 
     with pytest.raises(ExecCalled):
-        _rtlauncher.launch("claude", ["--resume", "native-thread"])
+        _rtlauncher.launch("claude", resume_argv)
 
     record_path = _rtruntime.seat_paths(project, "claude").lease
     record = json.loads(record_path.read_text())
-    assert observed["command"] == [str(fake_binary), "--resume", "native-thread"]
+    assert observed["command"] == [
+        str(fake_binary),
+        *resume_argv,
+        "--remote-control",
+        "claude@project",
+    ]
     assert observed["environment"]["RT_SESSION_ID"] == record["sessionId"]
     assert observed["environment"]["RT_LEASE_REVISION"] == record["revision"]
     assert observed["environment"]["RT_SESSION_ID"] == token.session_id
@@ -218,8 +232,38 @@ def test_bare_claude_launcher_forces_a_fresh_native_chat(tmp_path, monkeypatch):
 
     assert observed == {
         "program": str(fake_binary),
-        "command": [str(fake_binary), "--session-id", native_session_id],
+        "command": [
+            str(fake_binary),
+            "--session-id",
+            native_session_id,
+            "--remote-control",
+            "claude@project",
+        ],
     }
+
+
+@pytest.mark.parametrize(
+    "argv",
+    (
+        ["--remote-control", "caller-name", "--resume", "native-thread"],
+        ["--remote-control=caller-name", "--continue"],
+    ),
+)
+def test_caller_remote_control_name_is_not_overridden(argv, tmp_path, monkeypatch):
+    project = tmp_path / "project"
+
+    assert _rtlauncher.claude_remote_control_args(project, "claude", argv) == []
+
+
+def test_claude_remote_control_can_be_disabled_or_lacks_unanchored_identity(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "project"
+    monkeypatch.setenv("RT_CLAUDE_NO_RC", "1")
+
+    assert _rtlauncher.claude_remote_control_args(project, "claude", []) == []
+    monkeypatch.delenv("RT_CLAUDE_NO_RC")
+    assert _rtlauncher.claude_remote_control_args(None, "claude", []) == []
 
 
 def test_unanchored_bare_claude_preserves_native_startup_mode(

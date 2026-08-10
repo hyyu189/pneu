@@ -520,6 +520,30 @@ def print_codex_primer_skip_advisory(argv: list[str]) -> None:
     )
 
 
+def claude_remote_control_args(
+    root: Path | None,
+    agent_id: str | None,
+    argv: list[str],
+) -> list[str]:
+    """Name an anchored Claude Remote Control session after its pneu seat."""
+
+    if root is None or not agent_id or os.environ.get("RT_CLAUDE_NO_RC") == "1":
+        return []
+    try:
+        separator = argv.index("--")
+    except ValueError:
+        option_argv = argv
+    else:
+        option_argv = argv[:separator]
+    if any(
+        argument == "--remote-control"
+        or argument.startswith("--remote-control=")
+        for argument in option_argv
+    ):
+        return []
+    return ["--remote-control", f"{agent_id}@{root.name}"]
+
+
 def anchor_codex_project(root: Path, argv: list[str]) -> list[str]:
     """Make the selected project the explicit native Codex working root.
 
@@ -941,7 +965,8 @@ def launch(harness: str, argv: list[str]) -> int:
         # surface instead of creating a chat.  That surface does not run the
         # claimed seat's SessionStart hook, so it cannot own the inbox
         # tripwire.  Roundtable's bare-seat contract is a fresh addressable
-        # chat; explicit native arguments remain untouched.
+        # chat. Explicit native launch modes remain intact; the managed Remote
+        # Control identity is composed below unless the caller opts out.
         command.extend(["--session-id", str(uuid.uuid4())])
     if harness == "hermes" and not argv:
         command.append("--tui")
@@ -949,6 +974,9 @@ def launch(harness: str, argv: list[str]) -> int:
         print_codex_primer_skip_advisory(argv)
         command.extend(append_codex_seat_overrides(codex_argv))
         command.extend(codex_seat_primer_args(argv))
+    elif harness == "claude":
+        command.extend(argv)
+        command.extend(claude_remote_control_args(root, agent_id, argv))
     else:
         command.extend(argv)
     command[0] = str(executable)
