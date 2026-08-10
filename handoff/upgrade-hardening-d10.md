@@ -66,6 +66,23 @@ fails after the very upgrade handoff exists to serve.
   invocation uses an argument the pinned floor↔current CLI surface does
   not accept (condition-level, not string-cosmetic).
 
+## D10.5 — tombstoned registry rows must not fail-closed live operations
+
+Live failure (found while dispatching this very batch): the tombstoned
+`quant` row's recorded path now resolves through the compat symlink to
+`~/quant-lab/quant`, and the registry drift check rejected the WHOLE
+registry ("registered path drifted"), blocking `rt-worktree add` for every
+project. A retired row's path drift is history, not a live hazard.
+
+- Scope the drift/identity validation to active rows; tombstoned rows get
+  at most a report-only advisory.
+- Regression test: a tombstoned row whose path is now a symlink elsewhere
+  must not block registry loads or worktree operations.
+- The operator repair applied today (repointing the tombstoned row's path;
+  backup at ~/Documents/Workspace/backups/projects.yaml.pre-quant-path-fix)
+  can be reverted once the validator is fixed, or kept — state which in
+  your handoff.
+
 ## Constraints and release
 
 - Full suite + compileall + public-safety green; mutation checks on new
