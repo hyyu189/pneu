@@ -1132,13 +1132,22 @@ def report_orphaned_runtime_projects(
         )
         return
     for orphan in orphans:
+        canonical = orphan.get("canonical_project_root")
+        canonical_detail = (
+            f" canonicalProjectRoot={canonical}"
+            if canonical is not None
+            and str(canonical) != str(orphan["project_root"])
+            else ""
+        )
         report.item(
             "WARN",
             "runtime-residue",
             f"runtime_dir={orphan['runtime_dir']} "
             f"projectRoot={orphan['project_root']} "
-            f"registry={orphan['registry_state']} (report-only advisory)",
-            "inspect the exact runtime directory; rt-doctor never deletes it",
+            f"registry={orphan['registry_state']}"
+            f"{canonical_detail} reason={orphan['reason']} "
+            "(report-only advisory)",
+            str(orphan["cleanup"]),
         )
 
 

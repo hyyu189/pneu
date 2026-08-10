@@ -495,11 +495,29 @@ def codex_seat_primer_args(argv: list[str]) -> list[str]:
     source — the host runtime record is.
     """
 
-    if argv:
-        return []
-    if os.environ.get("RT_CODEX_NO_PRIMER") == "1":
+    if codex_primer_skip_reason(argv) is not None:
         return []
     return ["--", CODEX_SEAT_PRIMER]
+
+
+def codex_primer_skip_reason(argv: list[str]) -> str | None:
+    if argv:
+        return "native arguments were supplied"
+    if os.environ.get("RT_CODEX_NO_PRIMER") == "1":
+        return "RT_CODEX_NO_PRIMER=1"
+    return None
+
+
+def print_codex_primer_skip_advisory(argv: list[str]) -> None:
+    reason = codex_primer_skip_reason(argv)
+    if reason is None:
+        return
+    print(
+        "rt-codex: IMPORTANT: Codex activation primer skipped because "
+        f"{reason}. This seat will not arm or bind until its first turn; "
+        "interact with it once (or resume it) to arm.",
+        file=sys.stderr,
+    )
 
 
 def anchor_codex_project(root: Path, argv: list[str]) -> list[str]:
@@ -928,6 +946,7 @@ def launch(harness: str, argv: list[str]) -> int:
     if harness == "hermes" and not argv:
         command.append("--tui")
     if harness == "codex" and root is not None:
+        print_codex_primer_skip_advisory(argv)
         command.extend(append_codex_seat_overrides(codex_argv))
         command.extend(codex_seat_primer_args(argv))
     else:

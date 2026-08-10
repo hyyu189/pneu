@@ -306,6 +306,37 @@ def test_doctor_reports_retired_runtime_directory_without_deleting_it(
     assert not report.failed
 
 
+def test_doctor_reports_migrated_symlink_runtime_with_safe_cleanup(
+    tmp_path, monkeypatch, capsys
+):
+    old_root = write_project(tmp_path / "old-root", [("codex", "codex")])
+    registry = write_registry(tmp_path / "projects.json", [old_root])
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    token = _rtruntime.claim(old_root, "codex", "codex")
+    assert _rtruntime.release(token)
+    runtime_project = _rtruntime.seat_paths(old_root, "codex").project_dir
+    assert _rtlib.unregister_project(old_root, path=registry)
+    new_root = tmp_path / "new-root"
+    old_root.rename(new_root)
+    old_root.symlink_to(new_root, target_is_directory=True)
+    entries, _warnings = _rtlib.load_project_registry(registry)
+
+    report = doctor.Report()
+    doctor.report_orphaned_runtime_projects(report, entries)
+
+    output = capsys.readouterr().out
+    assert f"runtime_dir={runtime_project}" in output
+    assert f"projectRoot={old_root}" in output
+    assert f"canonicalProjectRoot={new_root}" in output
+    assert "registry=tombstoned" in output
+    assert "move this exact directory out of" in output
+    assert str(runtime / "projects") in output
+    assert runtime_project.exists()
+    assert not report.failed
+
+
 def test_doctor_checks_owner_and_watcher_process_anchors(
     tmp_path, monkeypatch, capsys
 ):

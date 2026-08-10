@@ -77,6 +77,10 @@ BIND_REQUESTS_DIRNAME = "codex-bind-requests"
 BIND_REQUEST_MAX_BYTES = 64 * 1024
 BIND_REQUEST_SOURCES = frozenset({"startup", "resume", "clear"})
 BRIDGE_BUILD_FINGERPRINT = wake_bridge_build_fingerprint()
+# The normal bridge poll is five seconds. Reparse at least once per poll-sized
+# heartbeat interval even when a replace/write preserves the registry stat
+# tuple; mtime/size changes still trigger an immediate refresh.
+REGISTRY_REFRESH_SECONDS = 5.0
 INTERRUPTED_BREAKER_LIMIT = 3
 HUMAN_DECISION_METHODS = frozenset(
     {
@@ -1013,6 +1017,7 @@ def _validated_bind_request(
     path: Path,
     payload: dict,
     allowed_projects: set[str],
+    refresh_allowed_projects=None,
 ) -> tuple[Path, str, str, str, str]:
     if payload.get("schema") != BIND_REQUEST_SCHEMA:
         raise MalformedBindRequest("bind request schema is invalid")
@@ -1045,6 +1050,9 @@ def _validated_bind_request(
         raise MalformedBindRequest(str(error)) from error
     if raw_project != str(project):
         raise MalformedBindRequest("bind request projectRoot is not canonical")
+    if str(project) not in allowed_projects and refresh_allowed_projects is not None:
+        allowed_projects.clear()
+        allowed_projects.update(refresh_allowed_projects())
     if str(project) not in allowed_projects:
         raise IdentityError(f"bind request project is not registered: {project}")
     identity = "\0".join(
@@ -1144,6 +1152,7 @@ def drain_bind_requests(
     *,
     requests_dir: Path | None = None,
     quarantined_projects: set[str] | None = None,
+    refresh_registry: bool = False,
 ) -> set[str]:
     """Validate and CAS-apply SessionStart requests outside the hook call."""
     queue = bind_requests_dir() if requests_dir is None else Path(requests_dir)
@@ -1174,6 +1183,12 @@ def drain_bind_requests(
                 project=str(candidate),
                 error=str(error),
             )
+
+    def refresh_allowed_projects() -> set[str]:
+        refreshed = discover_projects([], warn=True)
+        projects[:] = refreshed
+        return {str(project) for project in refreshed}
+
     changed: set[str] = set()
     for path in entries:
         if path.name.startswith("."):
@@ -1187,7 +1202,12 @@ def drain_bind_requests(
                 roundtable_session_id,
                 lease_revision,
                 thread_id,
-            ) = _validated_bind_request(path, payload, allowed_projects)
+            ) = _validated_bind_request(
+                path,
+                payload,
+                allowed_projects,
+                refresh_allowed_projects if refresh_registry else None,
+            )
             source = payload["source"]
             with seat_shared_guard(
                 project,
@@ -2340,6 +2360,7 @@ class WakeBridge:
             self.store,
             self.projects,
             quarantined_projects=self.bind_quarantined,
+            refresh_registry=self.auto_discover,
         )
         for project in rebound:
             self.resumed.pop(project, None)
@@ -2391,6 +2412,21 @@ def registry_stamp() -> tuple[int, int] | None:
     except OSError:
         return None
     return info.st_mtime_ns, info.st_size
+
+
+def registry_refresh_due(
+    *,
+    explicit: bool,
+    current_stamp: tuple[int, int] | None,
+    previous_stamp: tuple[int, int] | None,
+    now: float,
+    last_refresh: float,
+) -> bool:
+    return (
+        explicit
+        or current_stamp != previous_stamp
+        or now - last_refresh >= REGISTRY_REFRESH_SECONDS
+    )
 
 
 def acquire_singleton(lock: Path):
@@ -2574,8 +2610,7 @@ def handoff_command(args) -> int:
             shlex.quote(str(project)),
             "&&",
             "rt-codex",
-            "--resume",
-            shlex.quote(thread_id),
+            *(shlex.quote(part) for part in codex_resume_launcher_args(thread_id)),
         )
     )
     print(
@@ -2589,6 +2624,12 @@ def handoff_command(args) -> int:
         f"--thread-id {shlex.quote(thread_id)}"
     )
     return 0
+
+
+def codex_resume_launcher_args(thread_id: str) -> tuple[str, str]:
+    """Return the resume subcommand shape shared by Codex 0.144.6 and 0.147.0."""
+
+    return "resume", thread_id
 
 
 def unbind_command(args) -> int:
@@ -2627,6 +2668,7 @@ def run_command(args) -> int:
     signal.signal(signal.SIGINT, stop)
     store = StateStore(args.state_file)
     last_registry_stamp = registry_stamp() if not args.project else None
+    last_registry_refresh = time.monotonic()
     client = None
     backoff = 1.0
     exit_code = 0
@@ -2651,11 +2693,19 @@ def run_command(args) -> int:
                 messages = []
                 while not stopping:
                     current_stamp = registry_stamp() if not args.project else None
-                    if args.project or current_stamp != last_registry_stamp:
+                    refresh_checked_at = time.monotonic()
+                    if registry_refresh_due(
+                        explicit=bool(args.project),
+                        current_stamp=current_stamp,
+                        previous_stamp=last_registry_stamp,
+                        now=refresh_checked_at,
+                        last_refresh=last_registry_refresh,
+                    ):
                         refreshed_projects = discover_projects(
                             args.project, warn=True
                         )
                         last_registry_stamp = current_stamp
+                        last_registry_refresh = refresh_checked_at
                     else:
                         refreshed_projects = bridge.projects
                     if refreshed_projects != bridge.projects:

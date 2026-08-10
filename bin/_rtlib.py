@@ -33,6 +33,7 @@ PROJECT_LAYOUTS = frozenset({"local", "central"})
 PROJECT_STATUSES = frozenset({"active", "tombstoned"})
 ORPHAN_WARNING_PREFIX = "orphan: "
 ROW_RUNTIME_WARNING_PREFIX = "row-runtime: "
+TOMBSTONED_ROW_WARNING_PREFIX = "tombstoned-row: "
 LAYOUT_LOCK_TIMEOUT_SECONDS = 10.0
 LAYOUT_LOCK_POLL_SECONDS = 0.05
 REGISTRY_LOCK_TIMEOUT_SECONDS = 10.0
@@ -670,7 +671,9 @@ def _structural_registry_warnings(warnings):
     return [
         warning
         for warning in warnings
-        if not warning.startswith(ORPHAN_WARNING_PREFIX)
+        if not warning.startswith(
+            (ORPHAN_WARNING_PREFIX, TOMBSTONED_ROW_WARNING_PREFIX)
+        )
     ]
 
 
@@ -1286,10 +1289,20 @@ def _parse_v2_entries(document, path):
                 raise ProjectRegistryError(f"{label} is not a mapping")
             project_uuid = _canonical_uuid(raw.get("uuid"), label)
             entry_label = f"{label} uuid={project_uuid}"
+            status_value = raw.get("status")
+            if status_value not in PROJECT_STATUSES:
+                raise ProjectRegistryError(
+                    f"{entry_label} has unsupported status {status_value!r}"
+                )
             root, path_warning = _v2_registered_path(
                 raw.get("path"),
                 entry_label,
             )
+            if status_value == "tombstoned" and path_warning is not None:
+                path_warning = (
+                    TOMBSTONED_ROW_WARNING_PREFIX
+                    + path_warning.removeprefix(ROW_RUNTIME_WARNING_PREFIX)
+                )
             name = raw.get("name")
             if (
                 not isinstance(name, str)
@@ -1305,11 +1318,6 @@ def _parse_v2_entries(document, path):
             if layout not in PROJECT_LAYOUTS:
                 raise ProjectRegistryError(
                     f"{entry_label} has unsupported layout {layout!r}"
-                )
-            status_value = raw.get("status")
-            if status_value not in PROJECT_STATUSES:
-                raise ProjectRegistryError(
-                    f"{entry_label} has unsupported status {status_value!r}"
                 )
             registered_at = _entry_timestamp(
                 raw,

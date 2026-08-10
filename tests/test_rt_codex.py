@@ -1327,6 +1327,39 @@ def test_wake_heartbeat_reports_loaded_bridge_build(tmp_path):
     assert payload["bridgeBuildFingerprint"].startswith("sha256:")
 
 
+def test_registry_refresh_due_on_stamp_change_or_periodic_heartbeat():
+    unchanged = (10, 20)
+
+    assert wake.registry_refresh_due(
+        explicit=False,
+        current_stamp=(11, 20),
+        previous_stamp=unchanged,
+        now=100.0,
+        last_refresh=99.0,
+    )
+    assert not wake.registry_refresh_due(
+        explicit=False,
+        current_stamp=unchanged,
+        previous_stamp=unchanged,
+        now=100.0,
+        last_refresh=100.0 - wake.REGISTRY_REFRESH_SECONDS + 0.001,
+    )
+    assert wake.registry_refresh_due(
+        explicit=False,
+        current_stamp=unchanged,
+        previous_stamp=unchanged,
+        now=100.0,
+        last_refresh=100.0 - wake.REGISTRY_REFRESH_SECONDS,
+    )
+    assert wake.registry_refresh_due(
+        explicit=True,
+        current_stamp=unchanged,
+        previous_stamp=unchanged,
+        now=100.0,
+        last_refresh=100.0,
+    )
+
+
 def test_wake_run_backs_off_without_repairing_daemon(tmp_path, monkeypatch):
     project = write_project(tmp_path / "project")
     repair_calls = []

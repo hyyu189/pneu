@@ -961,15 +961,15 @@ def inspect_host_harness_seats(
             raise RuntimeStateError(
                 f"runtime project metadata is invalid: {meta_path}"
             )
-        canonical = canonical_project(project_root)
-        if (
-            str(canonical) != project_root
-            or project_hash(canonical) != digest
-            or project_dir.name != digest
-        ):
+        if project_dir.name != digest:
             raise RuntimeStateError(
                 f"runtime project metadata mismatch at {meta_path}"
             )
+        canonical, _canonical_digest = _canonical_runtime_project(
+            project_dir,
+            project_root,
+            digest,
+        )
 
         paths = seat_paths(canonical, f"__inspect-{selected_harness}__", root=root)
         if paths.project_dir != project_dir:
@@ -1091,6 +1091,33 @@ def _runtime_project_meta(path: Path) -> tuple[str, str]:
     return project_root, digest
 
 
+def _runtime_residue_cleanup(project_dir: Path, project_root: str) -> str:
+    projects_dir = project_dir.parent
+    return (
+        f"after closing any seat launched from {project_root} and verifying no "
+        "live or ambiguous owner remains, move this exact directory out of "
+        f"{projects_dir} into a backup: {project_dir}; then rerun rt-doctor"
+    )
+
+
+def _canonical_runtime_project(
+    project_dir: Path,
+    project_root: str,
+    digest: str,
+) -> tuple[Path, str]:
+    canonical = canonical_project(project_root)
+    canonical_digest = hashlib.sha256(str(canonical).encode("utf-8")).hexdigest()
+    if str(canonical) != project_root or canonical_digest != digest:
+        raise RuntimeStateError(
+            f"stale migrated-project runtime residue at {project_dir}: recorded "
+            f"projectRoot {project_root} now canonicalizes to {canonical}, so "
+            f"recorded projectHash {digest} does not match canonical project "
+            f"hash {canonical_digest}; "
+            f"{_runtime_residue_cleanup(project_dir, project_root)}"
+        )
+    return canonical, canonical_digest
+
+
 def orphaned_runtime_projects(
     registry_entries: list[dict[str, Any]],
 ) -> list[dict[str, str | Path]]:
@@ -1129,28 +1156,52 @@ def orphaned_runtime_projects(
                 f"runtime project directory name does not match metadata: {project_dir}"
             )
         candidate = Path(project_root)
+        root_missing = False
+        canonical: Path | None = None
+        canonical_drift = False
         try:
             os.stat(candidate)
         except FileNotFoundError:
-            pass
+            root_missing = True
         except OSError as error:
             raise RuntimeStateError(
                 f"cannot inspect runtime project root {candidate}: {error}"
             ) from error
         else:
-            continue
+            canonical = canonical_project(candidate)
+            canonical_digest = hashlib.sha256(
+                str(canonical).encode("utf-8")
+            ).hexdigest()
+            canonical_drift = (
+                str(canonical) != project_root or canonical_digest != digest
+            )
         entry = entries_by_root.get(project_root)
         if entry is None:
             registry_state = "absent"
         elif entry.get("status") == "tombstoned":
             registry_state = "tombstoned"
         else:
+            registry_state = "active"
+        reasons = []
+        if root_missing and registry_state in {"absent", "tombstoned"}:
+            reasons.append("recorded project root is missing")
+        if registry_state == "tombstoned":
+            reasons.append("registry entry is tombstoned")
+        if canonical_drift:
+            reasons.append(
+                f"recorded projectRoot canonicalizes to {canonical}, whose "
+                "canonical project hash differs from the recorded runtime hash"
+            )
+        if not reasons:
             continue
         result.append(
             {
                 "runtime_dir": project_dir,
                 "project_root": candidate,
                 "registry_state": registry_state,
+                "canonical_project_root": canonical,
+                "reason": "; ".join(reasons),
+                "cleanup": _runtime_residue_cleanup(project_dir, project_root),
             }
         )
     return result

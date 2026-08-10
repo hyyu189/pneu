@@ -893,7 +893,9 @@ def _codex_launch_fixture(tmp_path, monkeypatch, user_argv, extra_env=None):
     return observed["command"]
 
 
-def test_bare_codex_launch_appends_the_seat_primer(tmp_path, monkeypatch):
+def test_bare_codex_launch_appends_the_seat_primer(
+    tmp_path, monkeypatch, capsys
+):
     command = _codex_launch_fixture(tmp_path, monkeypatch, [])
 
     # The primer is the exact no-action activation text, one argv element,
@@ -904,9 +906,12 @@ def test_bare_codex_launch_appends_the_seat_primer(tmp_path, monkeypatch):
         "[roundtable] Seat activation turn. Do not call tools, inspect "
         "files, or modify the workspace. Reply exactly: ready."
     )
+    assert "activation primer skipped" not in capsys.readouterr().err
 
 
-def test_explicit_codex_arguments_disable_the_primer(tmp_path, monkeypatch):
+def test_explicit_codex_arguments_disable_the_primer(
+    tmp_path, monkeypatch, capsys
+):
     command = _codex_launch_fixture(
         tmp_path, monkeypatch, ["--model", "gpt-5.6"]
     )
@@ -914,6 +919,11 @@ def test_explicit_codex_arguments_disable_the_primer(tmp_path, monkeypatch):
     assert _rtlauncher.CODEX_SEAT_PRIMER not in command
     assert command[-2:] != ["--", _rtlauncher.CODEX_SEAT_PRIMER]
     assert "--model" in command and "gpt-5.6" in command
+    advisory = capsys.readouterr().err
+    assert "IMPORTANT: Codex activation primer skipped" in advisory
+    assert "native arguments were supplied" in advisory
+    assert "will not arm or bind until its first turn" in advisory
+    assert "interact with it once (or resume it)" in advisory
 
 
 def test_user_prompt_literals_stay_untouched_without_a_primer(
@@ -928,10 +938,16 @@ def test_user_prompt_literals_stay_untouched_without_a_primer(
     assert _rtlauncher.CODEX_SEAT_PRIMER not in command
 
 
-def test_rt_codex_no_primer_disables_the_bare_primer(tmp_path, monkeypatch):
+def test_rt_codex_no_primer_disables_the_bare_primer(
+    tmp_path, monkeypatch, capsys
+):
     command = _codex_launch_fixture(
         tmp_path, monkeypatch, [], extra_env={"RT_CODEX_NO_PRIMER": "1"}
     )
 
     assert _rtlauncher.CODEX_SEAT_PRIMER not in command
     assert "--" not in command
+    advisory = capsys.readouterr().err
+    assert "IMPORTANT: Codex activation primer skipped" in advisory
+    assert "RT_CODEX_NO_PRIMER=1" in advisory
+    assert "will not arm or bind until its first turn" in advisory

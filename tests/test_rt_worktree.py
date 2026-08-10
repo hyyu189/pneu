@@ -202,6 +202,25 @@ def test_remove_full_cycle_deletes_merged_branch(lab):
     assert git(base, "show-ref", "--verify", "refs/heads/wt/demo", check=False).returncode != 0
 
 
+def test_tombstoned_symlink_drift_does_not_block_worktree_add(lab):
+    tmp_path, base, _registry, _runtime = lab
+    created = run_tool("add", "retired", "--repo", str(base), "--yes", cwd=base)
+    assert created.returncode == 0, created.stderr
+    removed = run_tool("remove", "retired", "--yes", cwd=base)
+    assert removed.returncode == 0, removed.stderr
+    retired = tmp_path / "retired"
+    relocated = tmp_path / "relocated-retired"
+    relocated.mkdir()
+    retired.symlink_to(relocated, target_is_directory=True)
+
+    added = run_tool("add", "next", "--repo", str(base), "--yes", cwd=base)
+
+    assert added.returncode == 0, added.stderr
+    assert (tmp_path / "next" / ".roundtable" / "project.json").is_file()
+    assert "tombstoned-row:" in added.stderr
+    assert "registered path drifted" in added.stderr
+
+
 def test_remove_keep_branch_retains_unmerged_branch(lab):
     tmp_path, base, registry, _runtime = lab
     created = run_tool("add", "demo", "--repo", str(base), "--yes", cwd=base)

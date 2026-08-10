@@ -1,3 +1,4 @@
+import argparse
 import importlib.machinery
 import importlib.util
 import io
@@ -772,12 +773,37 @@ def test_rt_codex_wake_handoff_clears_only_stale_claim_and_prints_resume(
     output = capsys.readouterr().out
     assert result == 0
     assert "handoff prepared" in output
-    assert "rt-codex --resume thread-1" in output
+    assert "rt-codex resume thread-1" in output
+    assert "rt-codex --resume" not in output
     assert not _rtruntime.seat_paths(project, "codex").project_dir.joinpath(
         "codex-launch-intent.json"
     ).exists()
     persisted = wake.StateStore(state_path)
     assert str(project) not in persisted.bindings
+
+
+@pytest.mark.parametrize("version", [(0, 144, 6), (0, 147, 0)])
+def test_handoff_resume_invocation_matches_pinned_cli_surfaces(version):
+    """Parse the constructed launch path with both captured CLI grammars."""
+
+    parser = argparse.ArgumentParser(prog=f"codex-{version}", add_help=False)
+    parser.add_argument("--remote")
+    parser.add_argument("-C", "--cd")
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    resume = subcommands.add_parser("resume", add_help=False)
+    resume.add_argument("session_id")
+    command = [
+        "--remote",
+        "unix://",
+        "-C",
+        "/project",
+        *wake.codex_resume_launcher_args("thread-1"),
+    ]
+
+    parsed = parser.parse_args(command)
+
+    assert parsed.command == "resume"
+    assert parsed.session_id == "thread-1"
 
 
 def test_rt_codex_wake_handoff_refuses_a_live_seat_without_mutation(

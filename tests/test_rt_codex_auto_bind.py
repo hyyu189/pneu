@@ -559,6 +559,50 @@ def test_bridge_validates_and_auto_binds_current_fenced_request(tmp_path):
     assert inspection.token.native_session_id == "thread-1"
 
 
+def test_unknown_bind_refreshes_registry_before_rejecting(tmp_path):
+    initial = write_project(tmp_path / "initial")
+    projects = [initial]
+    late = write_project(tmp_path / "registered-after-bridge-start")
+    environment, token = claim_environment(tmp_path, late)
+    assert run_hook(hook_payload(late, "thread-late"), environment).returncode == 0
+    queue = tmp_path / "runtime" / "codex-bind-requests"
+    store = wake.StateStore(tmp_path / "wake-state.json")
+
+    changed = wake.drain_bind_requests(
+        Client(late, ["thread-late"]),
+        store,
+        projects,
+        requests_dir=queue,
+        refresh_registry=True,
+    )
+
+    assert changed == {str(late)}
+    assert projects == [initial, late]
+    assert store.bindings[str(late)]["roundtableSessionId"] == token.session_id
+    assert list(queue.iterdir()) == []
+
+
+def test_known_bind_does_not_need_registry_refresh(tmp_path, monkeypatch):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+    assert run_hook(hook_payload(project), environment).returncode == 0
+    monkeypatch.setattr(
+        wake,
+        "discover_projects",
+        lambda *_args, **_kwargs: pytest.fail("known bind re-read the registry"),
+    )
+
+    changed = wake.drain_bind_requests(
+        Client(project, ["thread-1"]),
+        wake.StateStore(tmp_path / "wake-state.json"),
+        [project],
+        requests_dir=tmp_path / "runtime" / "codex-bind-requests",
+        refresh_registry=True,
+    )
+
+    assert changed == {str(project)}
+
+
 def test_malformed_thread_read_is_rejected_without_crashing_bridge(tmp_path):
     project = write_project(tmp_path / "project")
     environment, _token = claim_environment(tmp_path, project)

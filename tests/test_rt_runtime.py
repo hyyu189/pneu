@@ -401,6 +401,65 @@ def test_reclaim_project_runtime_preserves_live_or_ambiguous_leases(
     assert _rtruntime.release(token)
 
 
+def test_host_scan_names_migrated_runtime_residue_and_manual_remedy(
+    tmp_path, runtime
+):
+    old_root = project(tmp_path, "old-root")
+    token = _rtruntime.claim(old_root, "codex", "codex")
+    assert _rtruntime.release(token)
+    runtime_project = _rtruntime.seat_paths(old_root, "codex").project_dir
+    new_root = tmp_path / "new-root"
+    old_root.rename(new_root)
+    old_root.symlink_to(new_root, target_is_directory=True)
+
+    with pytest.raises(_rtruntime.RuntimeStateError) as captured:
+        _rtruntime.inspect_host_harness_seats("codex")
+
+    detail = str(captured.value)
+    assert str(runtime_project) in detail
+    assert str(old_root) in detail and str(new_root) in detail
+    assert "canonical project hash" in detail
+    assert "move this exact directory out of" in detail
+    assert "after closing any seat launched from" in detail
+    assert runtime_project.exists()
+
+
+def test_orphan_advisory_includes_existing_tombstoned_runtime(tmp_path, runtime):
+    root = project(tmp_path, "retired-but-present")
+    token = _rtruntime.claim(root, "claude", "claude")
+    assert _rtruntime.release(token)
+    runtime_project = _rtruntime.seat_paths(root, "claude").project_dir
+
+    residues = _rtruntime.orphaned_runtime_projects(
+        [{"root": root, "status": "tombstoned"}]
+    )
+
+    assert len(residues) == 1
+    assert residues[0]["runtime_dir"] == runtime_project
+    assert residues[0]["registry_state"] == "tombstoned"
+    assert "registry entry is tombstoned" in residues[0]["reason"]
+
+
+def test_orphan_advisory_includes_unregistered_canonical_hash_drift(
+    tmp_path, runtime
+):
+    old_root = project(tmp_path, "old-root")
+    token = _rtruntime.claim(old_root, "claude", "claude")
+    assert _rtruntime.release(token)
+    runtime_project = _rtruntime.seat_paths(old_root, "claude").project_dir
+    new_root = tmp_path / "new-root"
+    old_root.rename(new_root)
+    old_root.symlink_to(new_root, target_is_directory=True)
+
+    residues = _rtruntime.orphaned_runtime_projects([])
+
+    assert len(residues) == 1
+    assert residues[0]["runtime_dir"] == runtime_project
+    assert residues[0]["registry_state"] == "absent"
+    assert "canonical project hash" in residues[0]["reason"]
+    assert residues[0]["canonical_project_root"] == new_root
+
+
 def test_reply_expectation_duration_and_ack_clear_are_fenced(
     tmp_path, runtime, process_table
 ):

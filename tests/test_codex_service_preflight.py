@@ -16,6 +16,7 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtcodex
+from _rtruntime import RuntimeStateError
 
 
 @contextmanager
@@ -883,6 +884,38 @@ def test_reload_status_blocks_any_active_host_codex_lease(monkeypatch):
 
     assert observed.state == _rtcodex.SERVICE_RELOAD_DEFERRED_BUSY
     assert "codex-build@/project is active_unhealthy" in observed.detail
+
+
+def test_reload_status_preserves_migrated_runtime_cleanup_remedy(monkeypatch):
+    monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+    runtime_dir = Path("/runtime/projects/old-hash")
+
+    def fail_with_residue(_harness):
+        raise RuntimeStateError(
+            f"stale migrated-project runtime residue at {runtime_dir}: recorded "
+            "projectRoot /old now canonicalizes to /new, so the canonical "
+            "project hash changed; after verifying no live or ambiguous owner "
+            "remains, move this exact directory out of /runtime/projects"
+        )
+
+    monkeypatch.setattr(
+        _rtcodex,
+        "inspect_host_harness_seats",
+        fail_with_residue,
+    )
+
+    observed = _rtcodex._reload_status(
+        "version mismatch",
+        cli_version=(0, 147, 0),
+        daemon={},
+        app_plist="current",
+        wake_plist="current",
+    )
+
+    assert observed.state == _rtcodex.SERVICE_RELOAD_DEFERRED_BUSY
+    assert str(runtime_dir) in observed.detail
+    assert "projectRoot /old now canonicalizes to /new" in observed.detail
+    assert "move this exact directory out of /runtime/projects" in observed.detail
 
 
 def test_service_path_symlink_and_permission_drift_fail_closed(tmp_path, monkeypatch):

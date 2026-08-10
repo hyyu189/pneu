@@ -269,6 +269,12 @@ lease. Its state machine is deliberately narrower than a generic repair tool:
 | `unsupported` | Stop because the selected Codex release is below the floor or its identity-proven daemon failed the live protocol probe |
 | `unsafe` | Stop on foreign plist/socket ownership, permissions, malformed runtime state, or non-liveness protocol failure |
 
+Runtime directories whose recorded project root was migrated through a
+compatibility symlink remain a manual, fail-closed cleanup case. The preflight
+names the exact stale directory, the old and canonical roots, and the action
+that clears the refusal; `rt-doctor` reports the same residue without deleting
+it, including tombstoned registry rows whose old path still exists.
+
 Every launch takes one host-wide repair lock plus the install setup-state lock
 and re-runs the inspection inside them. The final `ready` observation and
 project-seat claim happen before those locks are released, so a concurrent
@@ -310,6 +316,16 @@ require a one-time `/hooks` trust review, and pneu does not bypass that
 decision. The manual
 `rt-codex-wake bind /absolute/project/path` command remains a diagnostic
 fallback.
+
+`rt-codex-wake handoff` prints `rt-codex resume <thread-id>`. The positional
+`resume` subcommand is accepted by both the pinned `0.144.6` floor and the
+live-checked `0.147.0` CLI; the removed legacy `--resume` flag is never emitted.
+
+In registry-backed mode the bridge re-reads the current registry before it
+rejects an otherwise unknown bind request. It also refreshes the watched
+project set every five-second bridge heartbeat interval even when the registry
+stat tuple appears unchanged, so newly active projects are added and
+tombstoned projects are removed without a bridge restart.
 
 The first fresh `startup` request whose UUIDv7 creation time falls inside the
 current lease's launch window wins, even when Codex defers that hook until a
