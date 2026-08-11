@@ -472,6 +472,40 @@ def test_claude_permissions_preserve_preexisting_rules_on_remove(
     assert json.loads(path.read_text()) == original
 
 
+def test_claude_remove_refuses_enabled_project_rc_hosts(
+    installation: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home, prefix = installation
+    monkeypatch.setenv("RT_PROJECTS_FILE", str(prefix / "projects.yaml"))
+    code, result = _run(
+        capsys, home, prefix, "apply", "--harness", "claude"
+    )
+    assert code == 0, result
+    settings = home / ".claude" / "settings.json"
+    before = settings.read_bytes()
+    state = prefix / "rc-hosts" / "00000000-0000-0000-0000-000000000001.json"
+    state.parent.mkdir()
+    state.write_text("{}\n")
+
+    code, refused = _run(
+        capsys, home, prefix, "remove", "--harness", "claude"
+    )
+
+    assert code == 2
+    assert "pneu rc-host disable" in refused["error"]
+    assert refused["writes"] is False
+    assert settings.read_bytes() == before
+    assert (prefix / "harness-setup.json").is_file()
+
+    state.unlink()
+    code, removed = _run(
+        capsys, home, prefix, "remove", "--harness", "claude"
+    )
+    assert code == 0, removed
+
+
 def test_claude_legacy_stop_and_permissions_upgrade_in_place(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],

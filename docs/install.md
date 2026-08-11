@@ -363,6 +363,40 @@ current fenced lease. A clean-account repeat and the real
 send-to-wake-to-drain/ack path remain release promotion gates even though the
 configuration and queueing paths are automated and tested.
 
+## Project phone access
+
+Claude mobile/web worktree spawn is an explicit project trait, not part of
+global harness setup. From an initialized, registered Git project with exactly
+one Claude seat:
+
+```bash
+pneu rc-host enable
+pneu rc-host status
+pneu rc-host disable
+```
+
+Before enablement, open `claude` once in that exact directory and accept its
+workspace trust dialog. A missing trust decision is reported before any file
+or LaunchAgent mutation. Enablement then adds only owned WorktreeCreate and
+WorktreeRemove groups to the project's untracked
+`.claude/settings.local.json` and loads one UUID-named per-project LaunchAgent.
+It does not modify global hook settings. The native Remote Control server runs
+in worktree-spawn mode and uses the pneu seat/project name on the phone session
+list.
+
+The create hook routes through `pneu worktree add`: its default tree is
+`<repo-parent>/<repo-name>-worktree/<name>`, the new project is registered,
+and the hook returns exactly one absolute path. The main checkout never moves
+into this container. A custom WorktreeCreate hook means Claude does not process
+`.worktreeinclude`; any extra file copy must be a separate explicit step.
+Removal uses the normal live-seat and registry fences and leaves a blocked tree
+in place with an advisory.
+
+Any native `claude rc` started in an enabled project sees these project-local
+hooks. A never-enabled project keeps native behavior. Phone-spawned sessions
+are adopted only in exact registered pneu projects and never displace a live
+or ambiguous lease.
+
 ## Offline release install
 
 A generated release archive includes a `wheels/` directory containing the
@@ -405,6 +439,7 @@ shell outside Codex:
 
 ```bash
 roundtable-setup status
+pneu rc-host disable  # repeat from every project where phone access is enabled
 roundtable-setup remove --unload-codex
 roundtable-uninstall
 ```
@@ -415,6 +450,11 @@ is inside Codex. It first verifies setup ownership, asks `launchctl` about only
 either one only when loaded, and then deletes its managed plist files. A
 Claude/Hermes-only setup uses plain `roundtable-setup remove` and never invokes
 `launchctl`.
+
+Claude onboarding removal and package uninstall both refuse while any
+per-project rc-host state remains. This keeps the project hooks and running
+phone host reversible through the still-installed command instead of orphaning
+them.
 
 From an unpacked release, `./uninstall` can replace the last command. The
 package uninstaller refuses to proceed while

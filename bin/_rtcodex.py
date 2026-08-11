@@ -1605,7 +1605,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "roundtable_rt_codex_wake",
                     "title": "Roundtable Codex wake bridge",
-                    "version": "1.2.1",
+                    "version": "1.3.0",
                 },
                 # excludeTurns and bounded turn-history paging use the
                 # experimental API; supported releases are validated

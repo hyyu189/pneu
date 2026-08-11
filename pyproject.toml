@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pneu"
-version = "1.2.1"
+version = "1.3.0"
 description = "Durable local maildir coordination for coding agents"
 readme = "README.md"
 requires-python = ">=3.11,<3.15"
@@ -40,12 +40,13 @@ roundtable-uninstall = "pneu_packaging.cli:uninstall_main"
 [tool.setuptools]
 include-package-data = false
 packages = ["pneu_packaging"]
-py-modules = ["_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtruntime"]
+py-modules = ["_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtrchost", "_rtruntime"]
 script-files = [
   "bin/_rtcodex.py",
   "bin/_rtlauncher.py",
   "bin/_rtlib.py",
   "bin/_rtmigrate.py",
+  "bin/_rtrchost.py",
   "bin/_rtruntime.py",
   "bin/pneu",
   "bin/roundtable",
@@ -64,6 +65,7 @@ script-files = [
   "bin/rt-grok",
   "bin/rt-grok-wake",
   "bin/rt-projects",
+  "bin/rt-rc-host",
   "bin/rt-refresh",
   "bin/rt-resolve",
   "bin/rt-say",

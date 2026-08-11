@@ -118,11 +118,12 @@ def test_dry_run_restates_without_mutating(lab):
     assert "new branch: wt/demo" in result.stdout
     assert "future address: codex@demo" in result.stdout
     assert "dry-run: no changes made" in result.stdout
-    assert not (tmp_path / "demo").exists()
+    assert f"target path: {tmp_path / 'repo-worktree' / 'demo'}" in result.stdout
+    assert not (tmp_path / "repo-worktree").exists()
     assert not registry.exists()
 
 
-def test_pty_confirmation_retries_then_creates_default_sibling(lab):
+def test_pty_confirmation_retries_then_creates_default_container(lab):
     tmp_path, base, registry, runtime = lab
     env = os.environ.copy()
     env.update(
@@ -136,7 +137,9 @@ def test_pty_confirmation_retries_then_creates_default_sibling(lab):
     assert returncode == 0, output
     assert "please try again" in output
     assert "worktree added:" in output
-    assert (tmp_path / "demo" / ".roundtable" / "project.json").is_file()
+    assert (
+        tmp_path / "repo-worktree" / "demo" / ".roundtable" / "project.json"
+    ).is_file()
 
 
 def test_name_collision_is_checked_before_target_mutation(lab):
@@ -164,7 +167,7 @@ def test_remove_refuses_active_unhealthy_owned_seat(lab):
     tmp_path, base, registry, runtime = lab
     created = run_tool("add", "demo", "--repo", str(base), "--yes", cwd=base)
     assert created.returncode == 0, created.stderr
-    target = tmp_path / "demo"
+    target = tmp_path / "repo-worktree" / "demo"
 
     sys.path.insert(0, str(ROOT / "bin"))
     from _rtruntime import claim, release
@@ -183,7 +186,7 @@ def test_remove_full_cycle_deletes_merged_branch(lab):
     tmp_path, base, registry, runtime = lab
     created = run_tool("add", "demo", "--repo", str(base), "--yes", cwd=base)
     assert created.returncode == 0, created.stderr
-    target = tmp_path / "demo"
+    target = tmp_path / "repo-worktree" / "demo"
     sys.path.insert(0, str(ROOT / "bin"))
     from _rtruntime import claim, release, seat_paths
 
@@ -208,7 +211,7 @@ def test_tombstoned_symlink_drift_does_not_block_worktree_add(lab):
     assert created.returncode == 0, created.stderr
     removed = run_tool("remove", "retired", "--yes", cwd=base)
     assert removed.returncode == 0, removed.stderr
-    retired = tmp_path / "retired"
+    retired = tmp_path / "repo-worktree" / "retired"
     relocated = tmp_path / "relocated-retired"
     relocated.mkdir()
     retired.symlink_to(relocated, target_is_directory=True)
@@ -216,7 +219,9 @@ def test_tombstoned_symlink_drift_does_not_block_worktree_add(lab):
     added = run_tool("add", "next", "--repo", str(base), "--yes", cwd=base)
 
     assert added.returncode == 0, added.stderr
-    assert (tmp_path / "next" / ".roundtable" / "project.json").is_file()
+    assert (
+        tmp_path / "repo-worktree" / "next" / ".roundtable" / "project.json"
+    ).is_file()
     assert "tombstoned-row:" in added.stderr
     assert "registered path drifted" in added.stderr
 
@@ -225,7 +230,7 @@ def test_remove_keep_branch_retains_unmerged_branch(lab):
     tmp_path, base, registry, _runtime = lab
     created = run_tool("add", "demo", "--repo", str(base), "--yes", cwd=base)
     assert created.returncode == 0, created.stderr
-    target = tmp_path / "demo"
+    target = tmp_path / "repo-worktree" / "demo"
     (target / "README.md").write_text("unmerged change\n")
     git(target, "add", "README.md")
     git(target, "commit", "-qm", "unmerged")

@@ -178,6 +178,33 @@ interaction, resume, or restart. Mail is still durable and diagnostics expose
 the unhealthy adapter; fully autonomous recovery from those failures is a
 post-P0 improvement.
 
+## Claude project phone host
+
+Version 1.3.0 adds an opt-in per-project Remote Control host for Claude
+mobile/web worktree spawn. The locally inspected Claude Code 2.1.227 CLI
+exposes `remote-control --spawn worktree`, explicit server/session naming, and
+default anchor-session creation. Claude's documented WorktreeCreate contract
+requires the hook's final non-empty stdout line to be the created path; hook
+failure or empty output fails creation. Project workspace trust is required
+before project hooks run, and `.worktreeinclude` is not processed while a
+custom WorktreeCreate hook is active. See the official
+[hooks reference](https://code.claude.com/docs/en/hooks),
+[worktree guide](https://code.claude.com/docs/en/worktrees), and
+[Remote Control guide](https://code.claude.com/docs/en/remote-control).
+
+Pneu encodes those boundaries by installing WorktreeCreate/WorktreeRemove
+only in an enabled project's untracked `.claude/settings.local.json`, never in
+global settings. Enablement is blocked before mutation when that exact project
+lacks an accepted trust record. The create hook uses the registered pneu
+worktree path and rejects zero or multiple stdout paths. SessionStart adoption
+is limited to exact registered projects and reuses only the same live native
+session; different live or ambiguous ownership is left untouched.
+
+Unit/integration, private-source mutation, and PTY launcher tests cover these
+conditions. Release support remains pending one real phone-side spawn,
+registration, message round trip, live-seat removal refusal, and clean disable
+on Ocean's device. The inspected CLI and fixtures are not that acceptance.
+
 ## Wake latency and zero-turn sessions
 
 Watcher arming belongs to the harness-native lifecycle hooks. A model turn

@@ -306,7 +306,7 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
             "-c",
             (
                 "import _rtcodex, _rtlauncher, _rtlib, _rtmigrate, "
-                "_rtruntime; "
+                "_rtrchost, _rtruntime; "
                 "print(_rtcodex.ROUND_ROOT)"
             ),
         ],
@@ -838,6 +838,46 @@ def test_uninstall_refuses_to_leave_managed_harness_config_broken(
     assert removed.returncode == 0, removed.stderr
 
 
+def test_uninstall_refuses_enabled_project_rc_hosts(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    prefix = home / ".pneu"
+    link_dir = home / ".local" / "bin"
+    installed = run_script(
+        INSTALL,
+        "--prefix",
+        str(prefix),
+        "--link-dir",
+        str(link_dir),
+        home=home,
+    )
+    assert installed.returncode == 0, installed.stderr
+    state = prefix / "rc-hosts" / "00000000-0000-0000-0000-000000000001.json"
+    state.parent.mkdir()
+    state.write_text("{}\n")
+
+    refused = run_script(
+        UNINSTALL,
+        "--prefix",
+        str(prefix),
+        home=home,
+    )
+
+    assert refused.returncode == 1
+    assert "pneu rc-host disable" in refused.stderr
+    assert (prefix / "install-manifest.json").is_file()
+    assert state.is_file()
+
+    state.unlink()
+    removed = run_script(
+        UNINSTALL,
+        "--prefix",
+        str(prefix),
+        home=home,
+    )
+    assert removed.returncode == 0, removed.stderr
+
+
 @pytest.mark.parametrize(
     ("relative", "expected"),
     [
@@ -938,8 +978,8 @@ def test_same_version_source_reinstall_rejects_different_input_tree(tmp_path):
     assert (prefix / "install-manifest.json").read_bytes() == manifest_before
 
 
-def test_install_030_beside_pre_migration_019_runtime(tmp_path):
-    assert VERSION == "1.2.1"
+def test_install_current_beside_pre_migration_019_runtime(tmp_path):
+    assert VERSION == "1.3.0"
     home = tmp_path / "home"
     home.mkdir()
     prefix = home / ".pneu"
@@ -991,12 +1031,12 @@ def test_install_030_beside_pre_migration_019_runtime(tmp_path):
     )
 
     assert upgraded.returncode == 0, upgraded.stderr
-    assert os.readlink(current) == "versions/1.2.1"
+    assert os.readlink(current) == "versions/1.3.0"
     assert not (old_dir / "bin" / "_rtmigrate.py").exists()
-    assert (prefix / "versions" / "1.2.1" / "bin" / "_rtmigrate.py").is_file()
+    assert (prefix / "versions" / "1.3.0" / "bin" / "_rtmigrate.py").is_file()
     upgraded_manifest = json.loads(manifest_path.read_text())
     assert upgraded_manifest["versions"] == sorted(
-        [str(old_dir), str(prefix / "versions" / "1.2.1")]
+        [str(old_dir), str(prefix / "versions" / "1.3.0")]
     )
 
 
