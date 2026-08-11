@@ -279,8 +279,17 @@ def workspace_trusted(project: Path, *, home: Path | None = None) -> bool:
     if value is None:
         return False
     projects = value.get("projects")
-    record = projects.get(str(project)) if isinstance(projects, dict) else None
-    return isinstance(record, dict) and record.get("hasTrustDialogAccepted") is True
+    if not isinstance(projects, dict):
+        return False
+    # Claude Code honors a trust acceptance recorded on any ancestor
+    # directory, so an exact-path probe alone reports false negatives for
+    # projects that never received their own dialog.
+    candidate = Path(project).expanduser().absolute()
+    for directory in (candidate, *candidate.parents):
+        record = projects.get(str(directory))
+        if isinstance(record, dict) and record.get("hasTrustDialogAccepted") is True:
+            return True
+    return False
 
 
 def trust_remedy(project: Path) -> str:

@@ -937,8 +937,53 @@ def test_pty_single_card_enters_through_last_used_seat(
     assert "> Codex — codex" in rendered
     assert "active worktrees: 2" in rendered
     assert "unread mail: claude=0 codex=0" in rendered
-    assert "phone access: off  [p]" in rendered
-    assert "Enter launch · p phone access · w worktrees · ? guide · q quit" in rendered
+    assert "Claude phone connection: off  [p]" in rendered
+    assert (
+        "↑↓/1-9 select · Enter launch · p Claude phone · w worktrees · "
+        "? guide · q quit" in rendered
+    )
+
+
+def test_pty_card_arrow_keys_move_cursor_when_sequence_arrives_in_one_burst(
+    tmp_path, isolated_registry, fake_commands, monkeypatch
+):
+    project = write_project(
+        tmp_path / "project",
+        {
+            "claude": ("claude-code", ["claude"]),
+            "codex": ("codex", ["codex"]),
+        },
+    )
+    register_project(project, isolated_registry)
+    launcher_state = project / ".roundtable" / "launcher.json"
+    launcher_state.write_text(
+        json.dumps(
+            {
+                "schema": roundtable.LAUNCHER_STATE_SCHEMA,
+                "welcomePending": False,
+                "lastSeat": "claude:claude",
+            }
+        )
+    )
+    monkeypatch.setattr(roundtable, "_active_worktree_count", lambda _root: 0)
+    monkeypatch.setattr(
+        roundtable,
+        "_unread_by_seat",
+        lambda _root, seats: [(agent, 0) for _harness, agent in seats],
+    )
+    monkeypatch.setattr(roundtable, "_phone_access_on", lambda _root: False)
+
+    # A real terminal delivers the whole "\x1b[B" escape sequence in one
+    # write; the reader must not lose the suffix to Python-side buffering.
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project, stdin=stdin, stderr=stderr
+        ),
+        b"\x1b[B\n",
+    )
+
+    assert selected == ("codex", "codex")
+    assert "> Codex — codex" in rendered
 
 
 def test_pty_card_phone_toggle_redraws_in_place(
@@ -954,7 +999,7 @@ def test_pty_card_phone_toggle_redraws_in_place(
 
     def toggle(_root):
         state["enabled"] = True
-        return "phone access enabled"
+        return "Claude phone connection enabled"
 
     monkeypatch.setattr(roundtable, "_toggle_phone_access", toggle)
     selected, rendered = run_with_pty(
@@ -965,8 +1010,8 @@ def test_pty_card_phone_toggle_redraws_in_place(
     )
 
     assert selected == ("claude", "claude")
-    assert "phone access: off  [p]" in rendered
-    assert "phone access: on  [p]" in rendered
+    assert "Claude phone connection: off  [p]" in rendered
+    assert "Claude phone connection: on  [p]" in rendered
     assert rendered.count("\x1b[2J\x1b[H") >= 2
 
 
@@ -997,9 +1042,9 @@ def test_pty_first_run_welcome_single_enter_skips_both_offers(
     )
 
     assert continued is True
-    assert "Enter continue · ? guide · p phone access · q quit" in rendered
-    assert "only Claude mobile/web remote sessions for this project" in rendered
-    assert "desktop seats and other harnesses are untouched" in rendered
+    assert "Enter continue · ? guide · p Claude phone · q quit" in rendered
+    assert "affects only Claude mobile/web" in rendered
+    assert "harnesses are untouched" in rendered
     assert json.loads(launcher_state.read_text())["welcomePending"] is False
 
 

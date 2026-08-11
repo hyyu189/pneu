@@ -764,11 +764,15 @@ def _rich_card_available(stdin, stderr) -> bool:
 
 
 def _read_card_key(stdin) -> str:
+    # Read raw bytes from the descriptor: buffered text reads slurp a whole
+    # escape sequence into the Python-side buffer, leaving the descriptor
+    # empty so a readiness probe for the suffix always times out.
     descriptor = stdin.fileno()
     previous = termios.tcgetattr(descriptor)
     try:
         tty.setcbreak(descriptor, when=termios.TCSANOW)
-        character = stdin.read(1)
+        first = os.read(descriptor, 1)
+        character = first.decode("utf-8", "replace")
         if character in {"\r", "\n"}:
             return "enter"
         if character == "\x1b":
@@ -777,7 +781,10 @@ def _read_card_key(stdin) -> str:
                 ready, _write, _error = select.select([descriptor], [], [], 0.05)
                 if not ready:
                     break
-                suffix += stdin.read(1)
+                chunk = os.read(descriptor, 1)
+                if not chunk:
+                    break
+                suffix += chunk.decode("utf-8", "replace")
             return {"[A": "up", "[B": "down"}.get(suffix, "unknown")
         return character.lower()
     finally:
@@ -857,8 +864,15 @@ def _render_seat_card(
     ) or "none"
     print(f"active worktrees: {_active_worktree_count(root)}", file=stderr)
     print(f"unread mail: {unread}", file=stderr)
-    print(f"phone access: {'on' if _phone_access_on(root) else 'off'}  [p]", file=stderr)
-    print("Enter launch · p phone access · w worktrees · ? guide · q quit", file=stderr)
+    print(
+        f"Claude phone connection: {'on' if _phone_access_on(root) else 'off'}  [p]",
+        file=stderr,
+    )
+    print(
+        "↑↓/1-9 select · Enter launch · p Claude phone · w worktrees · "
+        "? guide · q quit",
+        file=stderr,
+    )
     if notice:
         print(notice, file=stderr)
     stderr.flush()
@@ -893,8 +907,12 @@ def _toggle_phone_access(root: Path) -> str:
     action = "disable" if _phone_access_on(root) else "enable"
     code, detail = _run_card_command("rt-rc-host", [action], root)
     if code == 0:
-        return f"phone access {action}d"
-    return detail.splitlines()[-1] if detail else f"phone access {action} failed"
+        return f"Claude phone connection {action}d"
+    return (
+        detail.splitlines()[-1]
+        if detail
+        else f"Claude phone connection {action} failed"
+    )
 
 
 def show_first_run_welcome(root: Path, *, stdin, stderr) -> bool:
@@ -907,13 +925,14 @@ def show_first_run_welcome(root: Path, *, stdin, stderr) -> bool:
         print(f"Welcome to pneu — {root.name}", file=stderr)
         print("Local agent seats share durable project mailboxes.", file=stderr)
         print("Tutorial now? no  [?]", file=stderr)
-        print("Phone access now? no  [p]", file=stderr)
+        print("Claude phone connection now? no  [p]", file=stderr)
         print(
-            "Phone access affects only Claude mobile/web remote sessions for "
-            "this project; desktop seats and other harnesses are untouched.",
+            "The Claude phone connection affects only Claude mobile/web "
+            "remote sessions for this project; desktop seats and other "
+            "harnesses are untouched.",
             file=stderr,
         )
-        print("Enter continue · ? guide · p phone access · q quit", file=stderr)
+        print("Enter continue · ? guide · p Claude phone · q quit", file=stderr)
         if notice:
             print(notice, file=stderr)
         stderr.flush()

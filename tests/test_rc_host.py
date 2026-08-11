@@ -162,6 +162,43 @@ def test_trust_gate_has_plain_remedy_and_makes_no_partial_changes(rc_lab):
     assert _rtrchost.load_state_for_project(project) is None
 
 
+def test_trust_accepted_on_ancestor_directory_satisfies_the_gate(rc_lab):
+    project, home, _launch_agents, _launch_state = rc_lab
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(project.parent): {"hasTrustDialogAccepted": True},
+                    str(project): {"hasTrustDialogAccepted": False},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _rtrchost.workspace_trusted(project, home=home) is True
+
+    enabled = _rtrchost.enable(project, home=home)
+    assert enabled.healthy
+
+
+def test_trust_records_without_any_true_ancestor_stay_untrusted(rc_lab):
+    project, home, _launch_agents, _launch_state = rc_lab
+    (home / ".claude.json").write_text(
+        json.dumps(
+            {
+                "projects": {
+                    str(project.parent): {"hasTrustDialogAccepted": False},
+                    str(project / "nested"): {"hasTrustDialogAccepted": True},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _rtrchost.workspace_trusted(project, home=home) is False
+
+
 def test_disable_refuses_hook_drift_before_unloading_or_mutating(rc_lab):
     project, home, launch_agents, launch_state = rc_lab
     enabled = _rtrchost.enable(project, home=home)

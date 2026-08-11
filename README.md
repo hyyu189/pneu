@@ -74,8 +74,9 @@ their names for script compatibility, as do every `rt-*` command. The
 compatibility alias emits no rename warning.
 
 On a full TTY, `pneu` presents one compact seat card with the last-used seat
-selected, three status lines, and in-place phone access controls. A single
-Enter launches that seat. Line-oriented and non-TTY streams retain the
+selected, three status lines, and in-place Claude phone connection controls.
+Arrow keys or digits move the selection, and a single Enter launches that
+seat. Line-oriented and non-TTY streams retain the
 numbered selector for script compatibility; the full guide appears only with
 `?` or `pneu guide`.
 
