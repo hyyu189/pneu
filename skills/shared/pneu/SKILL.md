@@ -6,7 +6,7 @@ description: >-
   rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
   routing, or cmux surface-routing bugs. Do not use merely because a repo
   contains .roundtable/agents.yaml.
-version: 8.2.1
+version: 8.3.0
 author: pneu contributors
 license: MIT
 platforms: [macos]
@@ -56,6 +56,7 @@ For removal, never orphan a loaded Codex job. Ask the human to run this from a
 normal terminal outside Codex:
 
 ```bash
+pneu rc-host disable  # from every project where phone access is enabled
 roundtable-setup remove --unload-codex
 roundtable-uninstall
 ```
@@ -98,18 +99,30 @@ only creates files the repository does not carry.
 | `pneu worktree add NAME [options]` | Create a Git sibling worktree, bootstrap its pneu registry identity, and print its `codex@NAME` launch route. |
 | `pneu worktree list` | List registered siblings in the current Git-derived group with branch, UUID, and seat status. |
 | `pneu worktree remove NAME [--keep-branch]` | Refuse active/ambiguous seats, unbind Codex, tombstone the registry row, remove the worktree, and delete only a merged branch. |
+| `pneu rc-host enable\|disable\|status` | Expert project-only Claude mobile/web worktree-spawn host; requires accepted workspace trust. |
 | `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit. |
 | `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: where does cmux think an agent sits. Not part of sending. |
 
 Run them from a project root (a dir with `.roundtable/agents.yaml`). Outside
 one, set `ROUNDTABLE_PROJECT_DIR` or `RT_FALLBACK_PROJECT`.
 
+On a full TTY, bare `pneu` uses one seat card with the last-used seat selected,
+exactly three status lines (active worktrees, unread mail, phone access), and
+`Enter`, `p`, `w`, `?`, and `q` hotkeys. A new project's one-time welcome puts
+the tutorial and phone offers on the same card; one Enter skips both, and phone
+copy must say it affects only Claude mobile/web sessions for this project.
+Line-oriented or non-TTY streams keep the numbered selector. The full tutorial
+appears only via `?` or `pneu guide`.
+
 ## Worktree lifecycle
 
 `pneu worktree add <name>` resolves the Git common directory from the
 current repository (or `--repo PATH`), so any sibling worktree shares one
-derived group key. The default target is `../<name>` beside the current repo
-root; `--path PATH` may select another path outside that worktree. Before any
+derived group key. The default target is
+`<repo-parent>/<repo-name>-worktree/<name>`; pneu creates that container on
+demand, and `--path PATH` remains the explicit escape hatch. The main checkout
+never migrates into the container, and the container holds only pneu-created
+trees. Before any
 mutation the command restates the repository, current branch and commit,
 group key, target, new `wt/<name>` branch, and future `codex@<name>` address.
 `--dry-run` prints that restatement without changing anything; `--yes` is the
@@ -120,6 +133,37 @@ same group. It refuses active, unhealthy-but-owned, or ambiguous seat state,
 then unbinds any Codex binding, tombstones the registry row, and removes the
 linked worktree. A branch is deleted only after it is merged; pass
 `--keep-branch` to retain it.
+
+## Claude project phone access
+
+`pneu rc-host enable` is a project-anchored expert opt-in. It first verifies
+that the human has opened Claude in this exact project and accepted the native
+workspace trust dialog. If not, it performs no writes and gives the one-line
+remedy. On success it owns one per-project LaunchAgent running Claude Remote
+Control in worktree-spawn mode plus WorktreeCreate/WorktreeRemove hook groups
+in only this project's untracked `.claude/settings.local.json`. Never copy
+those hooks to global Claude settings.
+
+Enablement is a project trait: every native `claude rc` started in the enabled
+project routes worktree lifecycle through those hooks. There is no wrapped
+`pneu claude rc`; a project never enabled retains native behavior. The phone
+access toggle affects only Claude mobile/web remote sessions for this project;
+desktop seats and other harnesses are untouched.
+
+WorktreeCreate routes through `pneu worktree add`, uses the managed container,
+registers the new project/mailbox, and must print exactly one absolute path.
+Empty successful output is a hard failure, never a fallback. WorktreeRemove
+routes through the ordinary fail-closed removal path and leaves a tree in
+place when any live or ambiguous seat blocks removal. Claude does not process
+`.worktreeinclude` while a custom WorktreeCreate hook is active; arrange any
+extra copy/bootstrap step separately.
+
+The global Claude SessionStart hook may adopt an otherwise unleased session
+only when its cwd resolves to one exact active registered pneu project with one
+Claude seat. It claims the seat without displacing active or ambiguous
+ownership, persists the fence into Claude's environment file, and treats
+resume/compact repeats for the same native session as idempotent. Direct or
+phone sessions outside registered projects stay entirely native.
 
 Launch dedicated sessions with `rt-codex`, `rt-claude`, or `rt-hermes`. When
 called outside a project on a TTY they offer registered projects, project
@@ -135,7 +179,8 @@ its own. `rt-codex` additionally
 injects the `--remote` flag and fenced session environment that its native wake
 bridge requires. Direct vendor launch commands do not establish the complete
 lease context required for automatic wake; use the `rt-*` launchers for the
-supported path.
+supported desktop path. The registered-project SessionStart adoption above is
+the narrow exception for direct or phone-spawned Claude sessions.
 
 ## Delivery: maildir + native wake (v2, sole path since 2026-07-17)
 

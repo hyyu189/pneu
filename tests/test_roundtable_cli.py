@@ -3,7 +3,11 @@ import importlib.util
 import io
 import json
 import os
+import pty
+import select
 import sys
+import threading
+import tty
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -34,6 +38,43 @@ roundtable = load_script()
 class TTYInput(io.StringIO):
     def isatty(self):
         return True
+
+
+def run_with_pty(callback, input_bytes: bytes):
+    master, slave = pty.openpty()
+    tty.setcbreak(slave)
+    stdin = os.fdopen(os.dup(slave), "r", encoding="utf-8", buffering=1)
+    stderr = os.fdopen(os.dup(slave), "w", encoding="utf-8", buffering=1)
+    output = bytearray()
+    stopped = threading.Event()
+
+    def drain_master():
+        while not stopped.is_set():
+            ready, _write, _error = select.select([master], [], [], 0.05)
+            if not ready:
+                continue
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            output.extend(chunk)
+
+    reader = threading.Thread(target=drain_master, daemon=True)
+    reader.start()
+    os.write(master, input_bytes)
+    try:
+        result = callback(stdin, stderr)
+        stderr.flush()
+    finally:
+        stdin.close()
+        stderr.close()
+        os.close(slave)
+        stopped.set()
+        reader.join(timeout=1)
+    os.close(master)
+    return result, output.decode(errors="replace")
 
 
 def write_project(path: Path, seats=None) -> Path:
@@ -200,7 +241,7 @@ def test_project_menu_reprompts_after_invalid_numeric_input(
     assert "please try again" in stderr.getvalue()
 
 
-def test_interactive_onboarding_prints_guide_before_menu(
+def test_line_oriented_onboarding_does_not_auto_print_the_full_guide(
     tmp_path, isolated_registry, fake_commands
 ):
     home = tmp_path / "home"
@@ -218,7 +259,8 @@ def test_interactive_onboarding_prints_guide_before_menu(
     )
 
     assert result == 2
-    assert "pneu = a local mailroom for coding-agent seats" in stderr.getvalue()
+    assert "pneu = a local mailroom for coding-agent seats" not in stderr.getvalue()
+    assert "Choose a pneu project:" in stderr.getvalue()
 
 
 def test_interactive_onboarding_ctrl_c_is_a_clean_cancellation(
@@ -853,6 +895,128 @@ def test_selector_shows_all_five_harnesses_and_plain_install_remedies(
         assert f"unavailable: {harness}" in rendered
     assert "missing executable `openclaw`" in rendered
     assert "set RT_OPENCLAW_BIN" in rendered
+
+
+def test_pty_single_card_enters_through_last_used_seat(
+    tmp_path, isolated_registry, fake_commands, monkeypatch
+):
+    project = write_project(
+        tmp_path / "project",
+        {
+            "claude": ("claude-code", ["claude"]),
+            "codex": ("codex", ["codex"]),
+        },
+    )
+    register_project(project, isolated_registry)
+    launcher_state = project / ".roundtable" / "launcher.json"
+    launcher_state.write_text(
+        json.dumps(
+            {
+                "schema": roundtable.LAUNCHER_STATE_SCHEMA,
+                "welcomePending": False,
+                "lastSeat": "codex:codex",
+            }
+        )
+    )
+    monkeypatch.setattr(roundtable, "_active_worktree_count", lambda _root: 2)
+    monkeypatch.setattr(
+        roundtable,
+        "_unread_by_seat",
+        lambda _root, seats: [(agent, 0) for _harness, agent in seats],
+    )
+    monkeypatch.setattr(roundtable, "_phone_access_on", lambda _root: False)
+
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project, stdin=stdin, stderr=stderr
+        ),
+        b"\n",
+    )
+
+    assert selected == ("codex", "codex")
+    assert "> Codex — codex" in rendered
+    assert "active worktrees: 2" in rendered
+    assert "unread mail: claude=0 codex=0" in rendered
+    assert "phone access: off  [p]" in rendered
+    assert "Enter launch · p phone access · w worktrees · ? guide · q quit" in rendered
+
+
+def test_pty_card_phone_toggle_redraws_in_place(
+    tmp_path, isolated_registry, fake_commands, monkeypatch
+):
+    project = write_project(
+        tmp_path / "project",
+        {"claude": ("claude-code", ["claude"])},
+    )
+    register_project(project, isolated_registry)
+    state = {"enabled": False}
+    monkeypatch.setattr(roundtable, "_phone_access_on", lambda _root: state["enabled"])
+
+    def toggle(_root):
+        state["enabled"] = True
+        return "phone access enabled"
+
+    monkeypatch.setattr(roundtable, "_toggle_phone_access", toggle)
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project, stdin=stdin, stderr=stderr
+        ),
+        b"p\n",
+    )
+
+    assert selected == ("claude", "claude")
+    assert "phone access: off  [p]" in rendered
+    assert "phone access: on  [p]" in rendered
+    assert rendered.count("\x1b[2J\x1b[H") >= 2
+
+
+def test_pty_first_run_welcome_single_enter_skips_both_offers(
+    tmp_path, isolated_registry, fake_commands
+):
+    project = write_project(
+        tmp_path / "project",
+        {"claude": ("claude-code", ["claude"])},
+    )
+    register_project(project, isolated_registry)
+    launcher_state = project / ".roundtable" / "launcher.json"
+    launcher_state.write_text(
+        json.dumps(
+            {
+                "schema": roundtable.LAUNCHER_STATE_SCHEMA,
+                "welcomePending": True,
+                "lastSeat": None,
+            }
+        )
+    )
+
+    continued, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.show_first_run_welcome(
+            project, stdin=stdin, stderr=stderr
+        ),
+        b"\n",
+    )
+
+    assert continued is True
+    assert "Enter continue · ? guide · p phone access · q quit" in rendered
+    assert "only Claude mobile/web remote sessions for this project" in rendered
+    assert "desktop seats and other harnesses are untouched" in rendered
+    assert json.loads(launcher_state.read_text())["welcomePending"] is False
+
+
+def test_non_tty_output_keeps_numbered_selector_fallback(
+    tmp_path, isolated_registry, fake_commands
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    stdin = TTYInput("1\n")
+    stderr = io.StringIO()
+
+    assert not roundtable._rich_card_available(stdin, stderr)
+    selected = roundtable.choose_seat(project, stdin=stdin, stderr=stderr)
+
+    assert selected == ("codex", "codex")
+    assert "1) codex — codex" in stderr.getvalue()
+    assert "\x1b[2J" not in stderr.getvalue()
 
 
 def test_direct_missing_harness_fails_before_setup(

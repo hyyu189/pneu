@@ -171,10 +171,13 @@ Before tagging or attaching the archive to a public release:
 5. standalone Codex passes that same acceptance before support is claimed;
 6. Grok Build passes the credentialed two-generation ACP adapter E2E and
    extracted-artifact smoke;
-7. the same harness acceptance passes in Terminal.app, iTerm2, and Ghostty;
-8. the five-minute judge path creates or adopts a non-Git directory, launches
+7. the 1.3.0 Claude rc-host passes a live phone-side worktree spawn on Ocean's
+   device, registers and addresses that session, refuses removal while its
+   seat is live, and disables without leaving project hooks or a LaunchAgent;
+8. the same harness acceptance passes in Terminal.app, iTerm2, and Ghostty;
+9. the five-minute judge path creates or adopts a non-Git directory, launches
    a project-anchored harness, and completes one visible message round trip;
-9. `README.md`, `docs/compatibility.md`, provenance, and Devpost copy describe
+10. `README.md`, `docs/compatibility.md`, provenance, and Devpost copy describe
    only the gates that actually passed.
 
 At this release-candidate stage, RC5's npm live host cutover, cold start,

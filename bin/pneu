@@ -6,9 +6,13 @@ from __future__ import annotations
 import os
 import json
 import re
+import select
 import shutil
 import subprocess
 import sys
+import termios
+import time
+import tty
 from pathlib import Path
 
 from _rtlauncher import (
@@ -28,6 +32,7 @@ from _rtlib import (
     load_project_registry,
     resolve_project_mailbox_checked,
 )
+from _rtrchost import RCHostError, load_state_for_project
 
 
 ALIASES = {
@@ -46,9 +51,11 @@ ALIASES = {
     "inbox": "rt-inbox",
     "ack": "rt-ack",
     "worktree": "rt-worktree",
+    "rc-host": "rt-rc-host",
 }
 HARNESS_ORDER = ("claude", "codex", "hermes", "openclaw", "grok")
 PROMPT_ATTEMPTS = 3
+LAUNCHER_STATE_SCHEMA = "roundtable.launcher-state.v1"
 
 HELP = """usage: pneu [command] [args...]
 
@@ -72,6 +79,7 @@ commands:
   inbox      Read a durable inbox
   ack        Acknowledge a durable message
   worktree   Add, list, or remove a registered Git worktree project
+  rc-host    Enable, disable, or inspect this project's Claude phone host
 """
 
 ASCII_GUIDE = """
@@ -613,7 +621,9 @@ def choose_project(
         ) from error
 
 
-def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
+def seat_inventory(
+    root: Path,
+) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     seats = []
     unavailable: list[tuple[str, str]] = []
     for harness in HARNESS_ORDER:
@@ -640,6 +650,11 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
             )
             continue
         seats.extend((harness, agent_id) for agent_id in ids)
+    return seats, unavailable
+
+
+def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
+    seats, unavailable = seat_inventory(root)
     print("Choose a harness seat:", file=stderr)
     for index, (harness, agent_id) in enumerate(seats, 1):
         activation_hint = (
@@ -680,6 +695,305 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
     )
 
 
+def _launcher_state_path(root: Path) -> Path:
+    return root / ".roundtable" / "launcher.json"
+
+
+def _read_launcher_state(root: Path) -> dict:
+    path = _launcher_state_path(root)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {
+            "schema": LAUNCHER_STATE_SCHEMA,
+            "welcomePending": False,
+            "lastSeat": None,
+        }
+    except OSError as error:
+        raise OnboardingError(f"pneu: cannot inspect launcher state {path}: {error}") from error
+    if path.is_symlink() or not path.is_file():
+        raise OnboardingError(f"pneu: launcher state is not a regular file: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise OnboardingError(f"pneu: cannot read launcher state {path}: {error}") from error
+    if not isinstance(value, dict) or value.get("schema") != LAUNCHER_STATE_SCHEMA:
+        raise OnboardingError(f"pneu: launcher state has an invalid schema: {path}")
+    pending = value.get("welcomePending")
+    last = value.get("lastSeat")
+    if not isinstance(pending, bool) or (last is not None and not isinstance(last, str)):
+        raise OnboardingError(f"pneu: launcher state is malformed: {path}")
+    return value
+
+
+def _write_launcher_state(root: Path, value: dict) -> None:
+    path = _launcher_state_path(root)
+    if path.is_symlink():
+        raise OnboardingError(f"pneu: refusing symlinked launcher state: {path}")
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    payload = (json.dumps(value, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    descriptor = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise OnboardingError(f"pneu: cannot update launcher state {path}: {error}") from error
+
+
+def _rich_card_available(stdin, stderr) -> bool:
+    try:
+        return bool(stdin.isatty() and stderr.isatty())
+    except (AttributeError, OSError):
+        return False
+
+
+def _read_card_key(stdin) -> str:
+    descriptor = stdin.fileno()
+    previous = termios.tcgetattr(descriptor)
+    try:
+        tty.setcbreak(descriptor, when=termios.TCSANOW)
+        character = stdin.read(1)
+        if character in {"\r", "\n"}:
+            return "enter"
+        if character == "\x1b":
+            suffix = ""
+            for _index in range(2):
+                ready, _write, _error = select.select([descriptor], [], [], 0.05)
+                if not ready:
+                    break
+                suffix += stdin.read(1)
+            return {"[A": "up", "[B": "down"}.get(suffix, "unknown")
+        return character.lower()
+    finally:
+        termios.tcsetattr(descriptor, termios.TCSANOW, previous)
+
+
+def _active_worktree_count(root: Path) -> int:
+    try:
+        entries, _warnings = load_project_registry()
+    except ProjectRegistryError:
+        return 0
+    current = next(
+        (
+            entry
+            for entry in active_project_entries(entries, available_only=True)
+            if Path(entry["root"]).expanduser().resolve() == root
+        ),
+        None,
+    )
+    if not isinstance(current, dict):
+        return 0
+    group = current.get("group")
+    return sum(
+        1
+        for entry in active_project_entries(entries, available_only=True)
+        if entry.get("group") == group
+        and Path(entry["root"]).expanduser().resolve() != root
+    )
+
+
+def _unread_by_seat(root: Path, seats: list[tuple[str, str]]) -> list[tuple[str, int]]:
+    try:
+        mailbox = resolve_project_mailbox_checked(root)
+    except ProjectRegistryError:
+        return [(agent, 0) for _harness, agent in seats]
+    counts = []
+    for _harness, agent in seats:
+        directory = mailbox.inbox_dir / agent / "new"
+        try:
+            count = sum(
+                1
+                for path in directory.iterdir()
+                if not path.name.startswith((".", "ack-"))
+            )
+        except FileNotFoundError:
+            count = 0
+        counts.append((agent, count))
+    return counts
+
+
+def _phone_access_on(root: Path) -> bool:
+    try:
+        return load_state_for_project(root) is not None
+    except RCHostError:
+        return False
+
+
+def _render_seat_card(
+    root: Path,
+    seats: list[tuple[str, str]],
+    unavailable: list[tuple[str, str]],
+    cursor: int,
+    *,
+    stderr,
+    notice: str = "",
+) -> None:
+    print("\x1b[2J\x1b[H", end="", file=stderr)
+    print(f"pneu — {root.name}", file=stderr)
+    print("seats", file=stderr)
+    for index, (harness, agent) in enumerate(seats):
+        marker = ">" if index == cursor else " "
+        print(f" {marker} {HARNESS_LABELS[harness]} — {agent}", file=stderr)
+    for harness, detail in unavailable:
+        print(f"   unavailable: {HARNESS_LABELS[harness]} — {detail}", file=stderr)
+    unread = " ".join(
+        f"{agent}={count}" for agent, count in _unread_by_seat(root, seats)
+    ) or "none"
+    print(f"active worktrees: {_active_worktree_count(root)}", file=stderr)
+    print(f"unread mail: {unread}", file=stderr)
+    print(f"phone access: {'on' if _phone_access_on(root) else 'off'}  [p]", file=stderr)
+    print("Enter launch · p phone access · w worktrees · ? guide · q quit", file=stderr)
+    if notice:
+        print(notice, file=stderr)
+    stderr.flush()
+
+
+def _run_card_command(name: str, arguments: list[str], root: Path) -> tuple[int, str]:
+    target = sibling(name)
+    try:
+        result = subprocess.run(
+            [str(target), *arguments],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as error:
+        return 2, str(error)
+    detail = (result.stderr or result.stdout).strip()
+    return result.returncode, detail
+
+
+def _show_reference(text: str, *, stdin, stderr) -> None:
+    print("\x1b[2J\x1b[H", end="", file=stderr)
+    print(text, end="" if text.endswith("\n") else "\n", file=stderr)
+    print("Press Enter to return.", file=stderr, flush=True)
+    while _read_card_key(stdin) != "enter":
+        pass
+
+
+def _toggle_phone_access(root: Path) -> str:
+    action = "disable" if _phone_access_on(root) else "enable"
+    code, detail = _run_card_command("rt-rc-host", [action], root)
+    if code == 0:
+        return f"phone access {action}d"
+    return detail.splitlines()[-1] if detail else f"phone access {action} failed"
+
+
+def show_first_run_welcome(root: Path, *, stdin, stderr) -> bool:
+    state = _read_launcher_state(root)
+    if not state.get("welcomePending"):
+        return True
+    notice = ""
+    while True:
+        print("\x1b[2J\x1b[H", end="", file=stderr)
+        print(f"Welcome to pneu — {root.name}", file=stderr)
+        print("Local agent seats share durable project mailboxes.", file=stderr)
+        print("Tutorial now? no  [?]", file=stderr)
+        print("Phone access now? no  [p]", file=stderr)
+        print(
+            "Phone access affects only Claude mobile/web remote sessions for "
+            "this project; desktop seats and other harnesses are untouched.",
+            file=stderr,
+        )
+        print("Enter continue · ? guide · p phone access · q quit", file=stderr)
+        if notice:
+            print(notice, file=stderr)
+        stderr.flush()
+        key = _read_card_key(stdin)
+        if key == "?":
+            _show_reference(ASCII_GUIDE, stdin=stdin, stderr=stderr)
+            continue
+        if key == "p":
+            notice = _toggle_phone_access(root)
+            if not _phone_access_on(root):
+                continue
+        if key == "q":
+            state["welcomePending"] = False
+            _write_launcher_state(root, state)
+            return False
+        if key not in {"enter", "p"}:
+            continue
+        state["welcomePending"] = False
+        _write_launcher_state(root, state)
+        return True
+
+
+def choose_seat_card(
+    root: Path,
+    *,
+    stdin,
+    stderr,
+) -> tuple[str, str] | None:
+    seats, unavailable = seat_inventory(root)
+    if not seats:
+        detail = " | ".join(f"{name}: {error}" for name, error in unavailable)
+        raise OnboardingError(
+            f"pneu: no launchable configured harness seats in {root}"
+            + (f"; {detail}" if detail else "")
+        )
+    state = _read_launcher_state(root)
+    last = state.get("lastSeat")
+    keys = [f"{harness}:{agent}" for harness, agent in seats]
+    cursor = keys.index(last) if last in keys else 0
+    notice = ""
+    while True:
+        _render_seat_card(
+            root,
+            seats,
+            unavailable,
+            cursor,
+            stderr=stderr,
+            notice=notice,
+        )
+        notice = ""
+        key = _read_card_key(stdin)
+        if key == "up":
+            cursor = (cursor - 1) % len(seats)
+        elif key == "down":
+            cursor = (cursor + 1) % len(seats)
+        elif key.isdigit() and 1 <= int(key) <= len(seats):
+            cursor = int(key) - 1
+        elif key == "p":
+            notice = _toggle_phone_access(root)
+        elif key == "w":
+            code, detail = _run_card_command("rt-worktree", ["list"], root)
+            _show_reference(
+                detail or f"pneu worktree list exited {code}",
+                stdin=stdin,
+                stderr=stderr,
+            )
+        elif key == "?":
+            _show_reference(ASCII_GUIDE, stdin=stdin, stderr=stderr)
+        elif key == "q":
+            return None
+        elif key == "enter":
+            return seats[cursor]
+
+
+def remember_last_seat(root: Path, harness: str, agent: str) -> None:
+    state = _read_launcher_state(root)
+    state["lastSeat"] = f"{harness}:{agent}"
+    _write_launcher_state(root, state)
+
+
 def project_ready_recovery(error, root: Path) -> OnboardingError:
     return OnboardingError(
         f"{error}; project already created at {root}; run pneu again "
@@ -699,7 +1013,6 @@ def onboard(
     exec_runner=os.execv,
     chdir_runner=os.chdir,
 ) -> int:
-    print(ASCII_GUIDE, end="", file=stderr)
     root = None
     try:
         root = choose_project(
@@ -709,7 +1022,15 @@ def onboard(
             stderr=stderr,
             init_runner=init_runner,
         )
-        harness, agent_id = choose_seat(root, stdin=stdin, stderr=stderr)
+        if _rich_card_available(stdin, stderr):
+            if not show_first_run_welcome(root, stdin=stdin, stderr=stderr):
+                return 0
+            selected = choose_seat_card(root, stdin=stdin, stderr=stderr)
+            if selected is None:
+                return 0
+            harness, agent_id = selected
+        else:
+            harness, agent_id = choose_seat(root, stdin=stdin, stderr=stderr)
         ensure_harness_setup(
             harness,
             home=home,
@@ -718,6 +1039,7 @@ def onboard(
             environ=environ,
             setup_runner=setup_runner,
         )
+        remember_last_seat(root, harness, agent_id)
         environ["RT_FROM"] = agent_id
         chdir_runner(root)
         return execute(f"rt-{harness}", [], exec_runner=exec_runner)

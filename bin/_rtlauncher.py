@@ -72,6 +72,7 @@ CONFIG_HARNESSES = {
 CMUX_SHIM_PARTS = frozenset({"cmux-cli-shims"})
 CMUX_WRAPPER_NAMES = frozenset({"cmux-claude-wrapper", "cmux-codex-wrapper"})
 AGENT_ID_RE = re.compile(r"^[a-z0-9#_-]+$")
+HERMES_PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 LEASE_ENV_NAMES = (
     "RT_PROJECT_ROOT",
     "RT_FROM",
@@ -85,6 +86,39 @@ CODEX_TOOL_ENV_NAMES = (
     *LEASE_ENV_NAMES,
     "RT_RUNTIME_DIR",
     "RT_CODEX_RUNTIME_DIR",
+)
+CODEX_CLI_OPTIONS_WITH_VALUES = frozenset(
+    {
+        "-c",
+        "--config",
+        "--enable",
+        "--disable",
+        "--remote",
+        "--remote-auth-token-env",
+        "-i",
+        "--image",
+        "-m",
+        "--model",
+        "--local-provider",
+        "-p",
+        "--profile",
+        "-s",
+        "--sandbox",
+        "-C",
+        "--cd",
+        "--add-dir",
+        "-a",
+        "--ask-for-approval",
+    }
+)
+CODEX_SHORT_OPTIONS_WITH_ATTACHED_VALUES = (
+    "-c",
+    "-i",
+    "-m",
+    "-p",
+    "-s",
+    "-C",
+    "-a",
 )
 
 
@@ -261,6 +295,95 @@ def harness_bin(harness: str) -> Path:
     raise SelectionError(
         f"rt-{harness}: "
         f"{harness_unavailable_detail(harness, 'executable not found')}"
+    )
+
+
+def _hermes_root() -> Path:
+    """Mirror Hermes' POSIX root selection without importing its environment."""
+
+    native_root = (Path.home() / ".hermes").expanduser()
+    configured = os.environ.get("HERMES_HOME", "").strip()
+    if not configured:
+        return native_root
+    selected = Path(configured).expanduser()
+    try:
+        selected.resolve(strict=False).relative_to(native_root.resolve(strict=False))
+        return native_root
+    except (OSError, RuntimeError, ValueError):
+        pass
+    if selected.parent.name == "profiles":
+        return selected.parent.parent
+    return selected
+
+
+def _hermes_profile(argv: list[str]) -> str | None:
+    """Return an explicit Hermes profile selector when one is present."""
+
+    try:
+        end = argv.index("--")
+    except ValueError:
+        option_argv = argv
+    else:
+        option_argv = argv[:end]
+    for index, argument in enumerate(option_argv):
+        if argument.startswith("--profile="):
+            profile = argument.partition("=")[2] or None
+            break
+        if argument in {"--profile", "-p"}:
+            profile = (
+                option_argv[index + 1]
+                if index + 1 < len(option_argv)
+                else None
+            )
+            break
+    else:
+        return None
+    if profile is None or not HERMES_PROFILE_RE.fullmatch(profile):
+        raise SelectionError(
+            f"rt-hermes: invalid Hermes profile {profile!r}; expected "
+            "^[a-z0-9][a-z0-9_-]{0,63}$"
+        )
+    return profile
+
+
+def hermes_credential_paths(argv: list[str]) -> tuple[Path, ...]:
+    """Return the credential stores read by the installed Hermes flow.
+
+    Hermes treats the active ``auth.json`` as the profile source of truth and
+    also reads a cross-profile Nous OAuth store.  This preflight deliberately
+    checks presence only; Hermes remains responsible for parsing and refresh.
+    """
+
+    root = _hermes_root()
+    configured_home = os.environ.get("HERMES_HOME", "").strip()
+    active_home = Path(configured_home).expanduser() if configured_home else root
+    profile = _hermes_profile(argv)
+    if profile:
+        active_home = root / "profiles" / profile
+    shared_override = os.environ.get("HERMES_SHARED_AUTH_DIR", "").strip()
+    shared = (
+        Path(shared_override).expanduser()
+        if shared_override
+        else root / "shared"
+    )
+    candidates = (active_home / "auth.json", shared / "nous_auth.json")
+    return tuple(dict.fromkeys(path.resolve(strict=False) for path in candidates))
+
+
+def preflight_hermes_credentials(argv: list[str]) -> None:
+    if os.environ.get("RT_HERMES_SKIP_AUTH_CHECK") == "1":
+        return
+    candidates = hermes_credential_paths(argv)
+    if any(path.is_file() for path in candidates):
+        return
+    rendered = ", ".join(str(path) for path in candidates)
+    raise SelectionError(
+        "rt-hermes: Hermes credential files are missing "
+        f"(checked {rendered}). Run `hermes` once outside pneu to complete "
+        "the browser login, then relaunch the seat. This preflight checks "
+        "file presence only; a present-but-stale credential can still fail "
+        "inside Hermes itself. Set RT_HERMES_SKIP_AUTH_CHECK=1 only to bypass "
+        "this check intentionally."
     )
 
 
@@ -642,6 +765,101 @@ def preflight_codex_services(*, ready_action=None) -> None:
         raise SelectionError(f"rt-codex: {error}") from error
 
 
+def _codex_option_end(argv: list[str], index: int) -> int:
+    """Return the index after one supported Codex option and its value."""
+
+    argument = argv[index]
+    if argument in CODEX_CLI_OPTIONS_WITH_VALUES:
+        if index + 1 >= len(argv):
+            raise SelectionError(
+                f"rt-codex: option {argument} is missing its value"
+            )
+        return index + 2
+    if argument.startswith("--") and "=" in argument:
+        return index + 1
+    if any(
+        argument.startswith(prefix) and argument != prefix
+        for prefix in CODEX_SHORT_OPTIONS_WITH_ATTACHED_VALUES
+    ):
+        return index + 1
+    return index + 1
+
+
+def codex_resume_thread_id(argv: list[str]) -> str | None:
+    """Return the explicit thread ID from any supported resume CLI shape."""
+
+    index = 0
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--":
+            return None
+        if argument.startswith("-"):
+            index = _codex_option_end(argv, index)
+            continue
+        if argument != "resume":
+            return None
+        index += 1
+        break
+    else:
+        return None
+
+    while index < len(argv):
+        argument = argv[index]
+        if argument == "--":
+            index += 1
+            break
+        if argument.startswith("-"):
+            index = _codex_option_end(argv, index)
+            continue
+        return argument
+    if index < len(argv) and argv[index]:
+        return argv[index]
+    raise SelectionError(
+        "rt-codex: resumed Roundtable seats require an explicit thread ID "
+        "as `rt-codex resume <thread-id>` so its recorded project can be "
+        "validated before the seat is claimed; use native `codex resume` "
+        "for the picker or --last flow"
+    )
+
+
+def preflight_codex_resume(project: Path, argv: list[str]) -> None:
+    """Read and validate an explicit resume target before publishing a lease."""
+
+    thread_id = codex_resume_thread_id(argv)
+    if thread_id is None:
+        return
+    try:
+        from _rtcodex import (
+            DEFAULT_SOCKET,
+            AppServerClient,
+            CodexRuntimeError,
+            require_thread_project_cwd,
+        )
+
+        client = AppServerClient(DEFAULT_SOCKET)
+        try:
+            result = client.request(
+                "thread/read",
+                {"threadId": thread_id, "includeTurns": False},
+            )
+        finally:
+            client.close()
+        if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
+            raise CodexRuntimeError("thread/read returned an invalid thread")
+        thread = result["thread"]
+        if thread.get("id") != thread_id:
+            raise CodexRuntimeError(
+                f"thread/read returned {thread.get('id')!r}, expected {thread_id!r}"
+            )
+        require_thread_project_cwd(
+            project,
+            thread,
+            expected_thread_id=thread_id,
+        )
+    except (CodexRuntimeError, OSError, TimeoutError) as error:
+        raise SelectionError(f"rt-codex: resume refused: {error}") from error
+
+
 def project_at_or_above(start: Path) -> Path | None:
     current = start.expanduser().resolve()
     for candidate in (current, *current.parents):
@@ -902,6 +1120,10 @@ def launch(harness: str, argv: list[str]) -> int:
     if root is not None or harness in {"codex", "openclaw", "grok"}:
         normalize_runtime_environment()
     executable = harness_bin(harness)
+    if harness == "hermes" and root is not None:
+        # Authentication recovery requires a browser login outside the Hermes
+        # TUI, so refuse before a Roundtable seat lease can be stranded.
+        preflight_hermes_credentials(argv)
     codex_argv = (
         anchor_codex_project(root, argv)
         if harness == "codex" and root is not None
@@ -913,6 +1135,7 @@ def launch(harness: str, argv: list[str]) -> int:
         # The final READY recheck and claim share the host repair lock, so a
         # concurrent reload cannot slip between them.
         def claim_and_arm_codex():
+            preflight_codex_resume(root, argv)
             token = claim_launch_seat(root, harness, agent_id)
             try:
                 arm_codex_launch_intent(token)

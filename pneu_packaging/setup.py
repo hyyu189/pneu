@@ -107,6 +107,51 @@ def _absolute(path: str | Path) -> Path:
     return Path(os.path.abspath(os.path.expanduser(str(path))))
 
 
+def _enabled_rc_host_states(prefix: Path) -> list[Path]:
+    configured = os.environ.get("RT_PROJECTS_FILE")
+    registry = _absolute(configured) if configured else prefix / "projects.yaml"
+    directory = registry.parent / "rc-hosts"
+    try:
+        directory_info = directory.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise SetupError(f"cannot inspect rc-host state {directory}: {error}") from error
+    if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(
+        directory_info.st_mode
+    ):
+        raise SetupError(f"refusing unsafe rc-host state directory: {directory}")
+    if directory_info.st_uid != os.getuid():
+        raise SetupError(f"rc-host state directory is not user-owned: {directory}")
+
+    states: list[Path] = []
+    for path in sorted(directory.iterdir()):
+        if path.suffix != ".json":
+            continue
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise SetupError(f"cannot inspect rc-host state {path}: {error}") from error
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise SetupError(f"refusing unsafe rc-host state file: {path}")
+        if info.st_uid != os.getuid():
+            raise SetupError(f"rc-host state file is not user-owned: {path}")
+        states.append(path)
+    return states
+
+
+def _require_rc_hosts_disabled(prefix: Path) -> None:
+    states = _enabled_rc_host_states(prefix)
+    if not states:
+        return
+    rendered = ", ".join(str(path) for path in states)
+    raise SetupError(
+        "Claude phone access is still enabled for one or more projects; run "
+        "`pneu rc-host disable` from each enabled project before removing "
+        f"Claude onboarding ({rendered})"
+    )
+
+
 def _lexists(path: Path) -> bool:
     return os.path.lexists(path)
 
@@ -2646,6 +2691,8 @@ def _remove(
     value = copy.deepcopy(manifest)
     owned = value["harnesses"]
     selected_owned = [harness for harness in harnesses if harness in owned]
+    if "claude" in selected_owned:
+        _require_rc_hosts_disabled(prefix)
 
     # Drift is checked for all owned fragments before removing any of them.
     for harness in selected_owned:
@@ -2728,6 +2775,8 @@ def _preflight_remove(
         return
     owned = manifest["harnesses"]
     selected_owned = [harness for harness in harnesses if harness in owned]
+    if "claude" in selected_owned:
+        _require_rc_hosts_disabled(prefix)
     for harness in harnesses:
         if harness in owned:
             _validate_record(

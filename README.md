@@ -23,7 +23,7 @@ rt-say  ->  project mailbox: new/  ->  agent acts  ->  rt-ack  ->  cur/
 ```
 
 The `rt-*` names and `RT_*` environment variables are pneu's tool prefix and
-remain stable in 1.2.1. Project state remains under `.roundtable/`, and
+remain stable in 1.3.0. Project state remains under `.roundtable/`, and
 `roundtable.*` wire and registry schema identifiers are unchanged. `roundtable`
 is a silent compatibility alias for the primary `pneu` command.
 
@@ -34,8 +34,8 @@ wheel and locked dependencies but not Python; the host needs CPython 3.11
 through 3.14.
 
 ```bash
-tar -xzf pneu-1.2.1-macos.tar.gz
-cd pneu-1.2.1
+tar -xzf pneu-1.3.0-macos.tar.gz
+cd pneu-1.3.0
 ./install
 export PATH="$HOME/.local/bin:$PATH"
 pneu
@@ -60,7 +60,9 @@ pneu guide                   show the local mailroom model
 pneu setup                   preview harness setup (read-only)
 pneu setup apply             apply owned harness setup
 pneu doctor                  diagnose the current project and seat
-pneu worktree add NAME       create a registered sibling project
+pneu worktree add NAME       create a registered tree in ../<repo>-worktree/
+pneu rc-host enable          enable project-only Claude phone worktree spawn
+pneu rc-host status          inspect this project's phone host
 rt-say AGENT KIND "MESSAGE" durable local or sibling delivery
 rt-inbox -f json             inspect waiting mail
 rt-ack MESSAGE_ID            acknowledge and archive handled mail
@@ -70,6 +72,12 @@ The explicit tool forms remain available: `roundtable-init`,
 `roundtable-setup`, `roundtable-smoke`, and `roundtable-uninstall` retain
 their names for script compatibility, as do every `rt-*` command. The
 compatibility alias emits no rename warning.
+
+On a full TTY, `pneu` presents one compact seat card with the last-used seat
+selected, three status lines, and in-place phone access controls. A single
+Enter launches that seat. Line-oriented and non-TTY streams retain the
+numbered selector for script compatibility; the full guide appears only with
+`?` or `pneu guide`.
 
 ## Architecture
 
@@ -106,6 +114,28 @@ For dispatches or questions that need an answer, `rt-say --expect-reply 30m ...`
 adds a durable one-shot sender alarm: a quiet acknowledgement clears it, while
 an unanswered deadline wakes the sender once through the existing watcher.
 
+### Managed worktrees and project phone access
+
+`pneu worktree add NAME` creates
+`<repo-parent>/<repo-name>-worktree/NAME` by default. The container is created
+on demand and holds only pneu-created linked trees; the main checkout never
+migrates into it. `--path` remains the explicit escape hatch.
+
+`pneu rc-host enable` is an expert, project-anchored opt-in for Claude mobile
+or web worktree spawn. It first requires an already accepted Claude workspace
+trust decision, then owns one per-project LaunchAgent and only that project's
+untracked `.claude/settings.local.json` WorktreeCreate/WorktreeRemove hooks.
+It never installs those hooks globally. Once enabled, phone access is a
+project trait, so a native `claude rc` started in that project sees the same
+hooks; projects that were never enabled keep native behavior. Disable it with
+`pneu rc-host disable` before removing Claude onboarding or uninstalling pneu.
+
+The create hook must return exactly one absolute registered worktree path;
+empty output is an error. Claude does not process `.worktreeinclude` while a
+custom WorktreeCreate hook is active, so copy or bootstrap any extra files in
+another explicit workflow. Phone-spawned SessionStart events are adopted only
+inside exact registered projects and never replace another live lease.
+
 ### Installation and migration
 
 Pneu installs versioned command trees under `~/.pneu`, with `current` selecting
@@ -121,7 +151,10 @@ The repository records validation evidence and open promotion gates in
 [`docs/compatibility.md`](docs/compatibility.md). A supported platform/runtime
 claim requires a real end-to-end smoke test; version-number comparisons and
 fixtures alone do not establish support. Cross-host SSH, Linux service
-management, and multi-auth switching remain out of scope for 1.2.1.
+management, and multi-auth switching remain out of scope for 1.3.0. The
+project phone-host path remains a release candidate until its required live
+phone-side smoke passes; fixtures and CLI inspection alone are not a support
+claim.
 
 ## History
 

@@ -10,7 +10,7 @@ core.
 | Layer | Responsibility | Required for delivery |
 | --- | --- | --- |
 | Product core | Project config and identity, atomic maildir delivery, ledger, inbox, acknowledgement, and drain state | Yes |
-| Harness adapters | Codex app-server wake; Claude hooks; Hermes lifecycle plugin; isolated Grok ACP supervisor; isolated OpenClaw Gateway supervisor | Only for automatic wake; offline delivery still succeeds |
+| Harness adapters | Codex app-server wake; Claude lifecycle hooks and optional project rc-host; Hermes lifecycle plugin; isolated Grok ACP supervisor; isolated OpenClaw Gateway supervisor | Only for automatic wake or phone spawn; offline delivery still succeeds |
 | Terminal integrations | Optional workspace topology, surface diagnostics, project navigation, and notifications | No |
 
 The data path is:
@@ -64,8 +64,12 @@ roundtable-init
   -> optional Git initialization only when requested
 
 pneu
-  -> compact project-first menu; registered roots expand in a second level
+  -> project-first selection, then one TTY seat/status card
   -> configured harness-seat selector, then the fenced rt-* launcher
+
+pneu rc-host enable
+  -> one trusted project's local worktree hooks + UUID-named LaunchAgent
+  -> native Claude mobile/web worktree spawn through pneu lifecycle fences
 ```
 
 `roundtable-setup` defaults to a read-only plan. `apply` links the one installed
@@ -83,6 +87,15 @@ verify ownership and fail closed on drift. A Codex-selected removal also fails
 closed until an operator outside Codex explicitly supplies `--unload-codex`;
 that path inspects and bootouts only the two owned labels before deleting their
 plist files.
+
+The optional Claude rc-host is deliberately outside global setup ownership.
+It is enabled per project only after native workspace trust, writes owned hook
+groups solely to the project's untracked `.claude/settings.local.json`, and
+records its UUID-keyed ownership beside the project registry. Empty
+WorktreeCreate output is a hard failure. Disabling verifies hook/plist state,
+unloads that exact job, and removes only its recorded fragments. Global Claude
+onboarding removal and package uninstall refuse while any rc-host remains so
+the reversal command cannot be removed first.
 
 `roundtable-init --here` configures an existing directory without replacing
 user documents. `roundtable-init NAME` creates a new directory. Git is not a
@@ -109,6 +122,13 @@ target's current basename, and only then reads the target worktree's own
 acknowledgements; return receipts route by that UUID rather than repeating the
 mutable project name.
 
+Pneu-created Git trees use
+`<repo-parent>/<repo-name>-worktree/<name>` by default. The container is not a
+replacement location for the main checkout and holds only pneu-created trees;
+an explicit `--path` remains possible. Because a custom Claude WorktreeCreate
+hook owns the creation result, `.worktreeinclude` is not processed on this
+path.
+
 ## P0 state placement and session ownership
 
 pneu separates project facts from facts that are meaningful only on one
@@ -120,6 +140,7 @@ host:
 | Stable worktree identity and registry metadata | ignored `<project>/.roundtable/project.json` plus `~/.pneu/projects.yaml` | Durable worktree and host state |
 | Inbox `new/`, `cur/`, and `tmp/`; message ledger and acknowledgements | Registry-selected local or central mail root (new/upgraded entries initially use `<project>/.roundtable/`) | Durable delivery state |
 | Current session lease, owner PID and process fingerprint, wake-adapter PID, activity and heartbeat | `~/.pneu/.runtime/` | Host-local ephemeral state |
+| Enabled Claude project rc-host ownership, plist digest, and last phone registration | registry-adjacent `rc-hosts/<project-uuid>.json`; plist under `~/Library/LaunchAgents/` | Durable host/project trait until explicit disable |
 | Optional terminal topology, navigation handles, and adapter diagnostics | `~/.pneu/.runtime/adapters/` | Host-local ephemeral state |
 
 Maildir `tmp/` is the deliberate exception to the simple durable/ephemeral

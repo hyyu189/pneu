@@ -34,6 +34,45 @@ def load_doctor():
 doctor = load_doctor()
 
 
+def test_doctor_reports_each_rc_host_on_one_report_only_line(monkeypatch, capsys):
+    monkeypatch.setattr(
+        doctor,
+        "iter_states",
+        lambda: [{"projectName": "alpha"}, {"projectName": "beta"}],
+    )
+    values = iter(
+        [
+            SimpleNamespace(
+                healthy=True,
+                loaded=True,
+                process_alive=True,
+                pid=101,
+                last_registration={
+                    "at": "2026-08-10T12:00:00.000Z",
+                    "projectRoot": "/tmp/alpha-worktree/phone",
+                },
+            ),
+            SimpleNamespace(
+                healthy=False,
+                loaded=False,
+                process_alive=False,
+                pid=None,
+                last_registration=None,
+            ),
+        ]
+    )
+    monkeypatch.setattr(doctor, "status_from_state", lambda _state: next(values))
+
+    doctor.report_rc_hosts()
+
+    lines = capsys.readouterr().out.splitlines()
+    assert len(lines) == 2
+    assert lines[0].startswith("OK rc-host[alpha]: launchd=loaded process=alive pid=101")
+    assert "last-registration=2026-08-10T12:00:00.000Z" in lines[0]
+    assert lines[1].startswith("WARN rc-host[beta]: launchd=not-loaded process=not-running")
+    assert "last-registration=never" in lines[1]
+
+
 def _registered_project(path: Path, registry: Path) -> Path:
     project = path.resolve()
     state = project / ".roundtable"

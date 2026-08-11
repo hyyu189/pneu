@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 
-VERSION = "1.2.1"
+VERSION = "1.3.0"
 MANIFEST_SCHEMA = "roundtable.install.v1"
 MANAGED_MARKER = ".roundtable-managed.json"
 
@@ -12,6 +12,7 @@ MANAGED_HELPERS = (
     "_rtlauncher.py",
     "_rtlib.py",
     "_rtmigrate.py",
+    "_rtrchost.py",
     "_rtruntime.py",
 )
 
@@ -44,6 +45,7 @@ TOOLS = (
     "rt-grok",
     "rt-grok-wake",
     "rt-projects",
+    "rt-rc-host",
     "rt-refresh",
     "rt-resolve",
     "rt-say",

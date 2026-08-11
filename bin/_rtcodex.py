@@ -15,6 +15,7 @@ import os
 import plistlib
 import secrets
 import select
+import shlex
 import shutil
 import socket
 import stat
@@ -45,6 +46,84 @@ class RpcError(CodexRuntimeError):
 
 class UnsupportedVersion(CodexRuntimeError):
     pass
+
+
+def require_thread_project_cwd(
+    project: Path,
+    thread: dict,
+    *,
+    expected_thread_id: str | None = None,
+) -> Path:
+    """Prove that a persisted Codex thread belongs to one seat project.
+
+    Codex persists its thread cwd independently from Roundtable's seat lease.
+    Both paths must therefore be resolved through the filesystem before they
+    are compared: this accepts honest symlink aliases while refusing stale
+    paths left behind by moved or renamed worktrees.
+    """
+
+    try:
+        seat_project = project.expanduser().resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CodexRuntimeError(
+            f"Codex seat project cannot be canonicalized: {project} ({error})"
+        ) from error
+    if not seat_project.is_dir():
+        raise CodexRuntimeError(
+            f"Codex seat project is not a directory: {seat_project}"
+        )
+
+    thread_id = expected_thread_id or thread.get("id")
+    rendered_thread_id = (
+        thread_id if isinstance(thread_id, str) and thread_id else "<thread-id>"
+    )
+    raw_cwd = thread.get("cwd")
+    rendered_cwd = raw_cwd if isinstance(raw_cwd, str) and raw_cwd else "<missing>"
+    reanchor = (
+        "rt-codex-wake reanchor "
+        f"{shlex.quote(str(seat_project))} --thread-id "
+        f"{shlex.quote(rendered_thread_id)}"
+    )
+    remedies = (
+        "Resume this thread in its own project (restore that path first if it "
+        f"moved), or explicitly re-anchor it with `{reanchor}`."
+    )
+
+    if not isinstance(raw_cwd, str) or not raw_cwd:
+        raise CodexRuntimeError(
+            f"Codex thread {rendered_thread_id} recorded cwd {rendered_cwd}; "
+            f"the selected seat project is {seat_project}. {remedies}"
+        )
+    try:
+        recorded = Path(raw_cwd).expanduser()
+        if not recorded.is_absolute():
+            raise ValueError("recorded cwd is not absolute")
+        thread_cwd = recorded.resolve(strict=True)
+    except FileNotFoundError as error:
+        raise CodexRuntimeError(
+            f"Codex thread {rendered_thread_id} recorded cwd {rendered_cwd}, "
+            f"but that path no longer exists; the selected seat project is "
+            f"{seat_project}. {remedies}"
+        ) from error
+    except (OSError, RuntimeError, ValueError) as error:
+        raise CodexRuntimeError(
+            f"Codex thread {rendered_thread_id} recorded cwd {rendered_cwd}, "
+            f"which cannot be canonicalized ({error}); the selected seat "
+            f"project is {seat_project}. {remedies}"
+        ) from error
+    if not thread_cwd.is_dir():
+        raise CodexRuntimeError(
+            f"Codex thread {rendered_thread_id} recorded cwd {rendered_cwd}, "
+            f"which canonicalizes to non-directory {thread_cwd}; the selected "
+            f"seat project is {seat_project}. {remedies}"
+        )
+    if thread_cwd != seat_project:
+        raise CodexRuntimeError(
+            f"Codex thread {rendered_thread_id} recorded cwd {rendered_cwd} "
+            f"(canonical {thread_cwd}), but the selected seat project is "
+            f"{seat_project}. {remedies}"
+        )
+    return thread_cwd
 
 
 class CodexDaemonReloadRequired(CodexRuntimeError):
@@ -1605,7 +1684,7 @@ class AppServerClient:
                 "clientInfo": {
                     "name": "roundtable_rt_codex_wake",
                     "title": "Roundtable Codex wake bridge",
-                    "version": "1.2.1",
+                    "version": "1.3.0",
                 },
                 # excludeTurns and bounded turn-history paging use the
                 # experimental API; supported releases are validated

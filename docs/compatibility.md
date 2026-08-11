@@ -97,7 +97,14 @@ to a cmux wrapper.
 With no native Hermes arguments, the pneu seat launches as
 `hermes --tui`. Any explicit arguments are passed through unchanged, preserving
 oneshot, headless, and management modes; callers can request `--tui` alongside
-resume or other native arguments when desired.
+resume or other native arguments when desired. An anchored seat is not claimed
+until one of the installed Hermes credential stores exists: the active
+profile's `auth.json` or the shared Nous store (normally
+`~/.hermes/shared/nous_auth.json`). The check is presence-only, so stale
+credentials still surface through Hermes itself. Missing files name the native
+`hermes` browser-login recovery; `RT_HERMES_SKIP_AUTH_CHECK=1` bypasses only
+this preflight. Unanchored Hermes remains available for that recovery without
+publishing a Roundtable lease.
 
 The packaged Hermes plugin starts its fenced inbox watcher from the TUI's
 initial `on_session_reset` event, before the user has sent a first prompt, and
@@ -177,6 +184,33 @@ re-wake. After either event the watcher can remain unarmed until a later normal
 interaction, resume, or restart. Mail is still durable and diagnostics expose
 the unhealthy adapter; fully autonomous recovery from those failures is a
 post-P0 improvement.
+
+## Claude project phone host
+
+Version 1.3.0 adds an opt-in per-project Remote Control host for Claude
+mobile/web worktree spawn. The locally inspected Claude Code 2.1.227 CLI
+exposes `remote-control --spawn worktree`, explicit server/session naming, and
+default anchor-session creation. Claude's documented WorktreeCreate contract
+requires the hook's final non-empty stdout line to be the created path; hook
+failure or empty output fails creation. Project workspace trust is required
+before project hooks run, and `.worktreeinclude` is not processed while a
+custom WorktreeCreate hook is active. See the official
+[hooks reference](https://code.claude.com/docs/en/hooks),
+[worktree guide](https://code.claude.com/docs/en/worktrees), and
+[Remote Control guide](https://code.claude.com/docs/en/remote-control).
+
+Pneu encodes those boundaries by installing WorktreeCreate/WorktreeRemove
+only in an enabled project's untracked `.claude/settings.local.json`, never in
+global settings. Enablement is blocked before mutation when that exact project
+lacks an accepted trust record. The create hook uses the registered pneu
+worktree path and rejects zero or multiple stdout paths. SessionStart adoption
+is limited to exact registered projects and reuses only the same live native
+session; different live or ambiguous ownership is left untouched.
+
+Unit/integration, private-source mutation, and PTY launcher tests cover these
+conditions. Release support remains pending one real phone-side spawn,
+registration, message round trip, live-seat removal refusal, and clean disable
+on Ocean's device. The inspected CLI and fixtures are not that acceptance.
 
 ## Wake latency and zero-turn sessions
 
@@ -320,6 +354,15 @@ fallback.
 `rt-codex-wake handoff` prints `rt-codex resume <thread-id>`. The positional
 `resume` subcommand is accepted by both the pinned `0.144.6` floor and the
 live-checked `0.147.0` CLI; the removed legacy `--resume` flag is never emitted.
+Before that explicit resume shape claims a Roundtable seat, the launcher reads
+the target thread and requires its persisted cwd to resolve to the selected
+project. Manual bind, stale-fence adoption, and handoff share that strict
+comparison. Existing symlink aliases resolve to the same identity; missing,
+moved, or different worktrees fail closed with both paths and two remedies.
+`rt-codex-wake reanchor PROJECT --thread-id THREAD_ID` is the named explicit
+operator path change: it resumes with an app-server cwd override and validates
+the returned thread. Picker and `--last` resumes cannot publish a Roundtable
+seat because their thread identity is unknown before native launch.
 
 In registry-backed mode the bridge re-reads the current registry before it
 rejects an otherwise unknown bind request. It also refreshes the watched

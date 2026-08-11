@@ -379,6 +379,7 @@ def test_launch_scrubs_full_inherited_seat_environment(
 
     clear_lease_environment(monkeypatch)
     monkeypatch.setenv("RT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("RT_HERMES_SKIP_AUTH_CHECK", "1")
     monkeypatch.setenv("RT_PROJECT_ROOT", "/foreign/project")
     monkeypatch.setenv("RT_FROM", "claude")
     monkeypatch.setenv("RT_SESSION_ID", "foreign-session")
@@ -447,6 +448,7 @@ def test_launch_preserves_explicit_rt_from_without_lease_context(
 
     clear_lease_environment(monkeypatch)
     monkeypatch.setenv("RT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("RT_HERMES_SKIP_AUTH_CHECK", "1")
     monkeypatch.setenv("RT_FROM", "hermes-review")
     monkeypatch.setattr(
         _rtlauncher, "choose_launch_cwd", lambda _harness: project

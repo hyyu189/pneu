@@ -67,6 +67,43 @@ def _harness_setup_manifest_path(prefix: Path) -> Path:
     return prefix / "harness-setup.json"
 
 
+def _enabled_rc_host_states(prefix: Path) -> list[Path]:
+    configured = os.environ.get("RT_PROJECTS_FILE")
+    registry = (
+        Path(os.path.abspath(os.path.expanduser(configured)))
+        if configured
+        else prefix / "projects.yaml"
+    )
+    directory = registry.parent / "rc-hosts"
+    try:
+        directory_info = directory.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError as error:
+        raise InstallError(f"cannot inspect rc-host state {directory}: {error}") from error
+    if stat.S_ISLNK(directory_info.st_mode) or not stat.S_ISDIR(
+        directory_info.st_mode
+    ):
+        raise InstallError(f"refusing unsafe rc-host state directory: {directory}")
+    if directory_info.st_uid != os.getuid():
+        raise InstallError(f"rc-host state directory is not user-owned: {directory}")
+
+    states: list[Path] = []
+    for path in sorted(directory.iterdir()):
+        if path.suffix != ".json":
+            continue
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise InstallError(f"cannot inspect rc-host state {path}: {error}") from error
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise InstallError(f"refusing unsafe rc-host state file: {path}")
+        if info.st_uid != os.getuid():
+            raise InstallError(f"rc-host state file is not user-owned: {path}")
+        states.append(path)
+    return states
+
+
 def _lexists(path: Path) -> bool:
     return os.path.lexists(path)
 
@@ -1391,6 +1428,14 @@ def uninstall_main(argv: list[str] | None = None) -> int:
                 "harness onboarding is still installed; run "
                 "`roundtable-setup remove` before removing the commands "
                 f"({setup_manifest})"
+            )
+        rc_host_states = _enabled_rc_host_states(prefix)
+        if rc_host_states:
+            rendered = ", ".join(str(path) for path in rc_host_states)
+            raise InstallError(
+                "Claude phone access is still enabled for one or more projects; "
+                "run `pneu rc-host disable` from each enabled project before "
+                f"uninstalling ({rendered})"
             )
 
         conflicts = _uninstall_preflight(prefix, manifest)

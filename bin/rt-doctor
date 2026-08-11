@@ -48,6 +48,7 @@ from _rtruntime import (
     inspect_seat,
     orphaned_runtime_projects,
 )
+from _rtrchost import RCHostError, iter_states, status_from_state
 
 
 BIND_REQUEST_SCHEMA = "roundtable.codex-bind-request.v1"
@@ -74,6 +75,35 @@ class Report:
         print(f"  fix: {fix}")
         if level == "FAIL":
             self.failed = True
+
+
+def report_rc_hosts() -> None:
+    """Print one report-only health line for each enabled phone host."""
+
+    try:
+        states = iter_states()
+    except RCHostError as error:
+        print(f"WARN rc-host: state inventory unavailable: {error}")
+        return
+    for state in states:
+        name = state.get("projectName", "unknown")
+        try:
+            value = status_from_state(state)
+        except (RCHostError, OSError) as error:
+            print(f"WARN rc-host[{name}]: health unavailable: {error}")
+            continue
+        registration = value.last_registration or {}
+        registered_at = registration.get("at") or "never"
+        registered_project = registration.get("projectRoot") or "none"
+        level = "OK" if value.healthy else "WARN"
+        process = (
+            f"alive pid={value.pid}" if value.process_alive else "not-running"
+        )
+        print(
+            f"{level} rc-host[{name}]: launchd={'loaded' if value.loaded else 'not-loaded'} "
+            f"process={process} last-registration={registered_at} "
+            f"project={registered_project}"
+        )
 
 
 def socket_check(path: Path) -> tuple[bool, str]:
@@ -1657,6 +1687,7 @@ def main() -> int:
             report, args.registry, state_file, args.socket, rpc_ok
         )
         report_hook_trust(report, args.registry, args.socket, rpc_ok)
+        report_rc_hosts()
     finally:
         if previous_runtime is None:
             os.environ.pop("RT_RUNTIME_DIR", None)

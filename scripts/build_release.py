@@ -185,6 +185,7 @@ REQUIRED_PROJECT_ROOT_FILES = frozenset(
         "_rtlauncher.py",
         "_rtlib.py",
         "_rtmigrate.py",
+        "_rtrchost.py",
         "_rtruntime.py",
     }
 )
@@ -211,6 +212,7 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "_rtlauncher.py",
         "_rtlib.py",
         "_rtmigrate.py",
+        "_rtrchost.py",
         "_rtruntime.py",
         "pneu",
         "roundtable",
@@ -229,6 +231,7 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "rt-grok",
         "rt-grok-wake",
         "rt-projects",
+        "rt-rc-host",
         "rt-refresh",
         "rt-resolve",
         "rt-say",

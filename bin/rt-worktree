@@ -163,7 +163,7 @@ def _validate_name(name: str) -> str:
 
 def _target_path(name: str, raw: str | Path | None, *, repo: Repository, cwd: Path) -> Path:
     target = (
-        repo.root.parent / name
+        repo.root.parent / f"{repo.root.name}-worktree" / name
         if raw is None
         else _absolute_input(raw, cwd=cwd)
     )
@@ -183,9 +183,35 @@ def _target_path(name: str, raw: str | Path | None, *, repo: Repository, cwd: Pa
         raise WorktreeError(
             f"target path must be a sibling outside the repository worktree: {target}"
         )
-    if not target.parent.is_dir():
+    if raw is not None and not target.parent.is_dir():
         raise WorktreeError(f"target parent directory does not exist: {target.parent}")
+    if raw is None and os.path.lexists(target.parent):
+        if target.parent.is_symlink() or not target.parent.is_dir():
+            raise WorktreeError(
+                f"managed worktree container is not a plain directory: {target.parent}"
+            )
     return target
+
+
+def _prepare_managed_container(target: Path, *, enabled: bool) -> bool:
+    """Create the default container after confirmation, never during preflight."""
+
+    if not enabled:
+        return False
+    container = target.parent
+    if os.path.lexists(container):
+        if container.is_symlink() or not container.is_dir():
+            raise WorktreeError(
+                f"managed worktree container is not a plain directory: {container}"
+            )
+        return False
+    try:
+        container.mkdir(mode=0o755)
+    except OSError as error:
+        raise WorktreeError(
+            f"cannot create managed worktree container {container}: {error}"
+        ) from error
+    return True
 
 
 def _validate_branch(repo: Repository, branch: str) -> None:
@@ -400,20 +426,28 @@ def _worktree_add(args, *, cwd: Path, stdin, stdout, stderr) -> int:
     _validate_branch(repo, branch)
     _validate_from(repo, args.from_branch)
 
-    _restatement(
-        "add",
-        repo,
-        name=name,
-        target=target,
-        branch=branch,
-        stdout=stdout,
-    )
+    if not args.porcelain_path:
+        _restatement(
+            "add",
+            repo,
+            name=name,
+            target=target,
+            branch=branch,
+            stdout=stdout,
+        )
     if args.dry_run:
+        if args.porcelain_path:
+            print(target, file=stdout)
+            return 0
         print("dry-run: no changes made", file=stdout)
         return 0
     if not _require_confirmation(stdin=stdin, stderr=stderr, yes=args.yes):
         return 1
 
+    container_created = _prepare_managed_container(
+        target,
+        enabled=args.path is None,
+    )
     worktree_created = False
     git_arguments = ["worktree", "add", str(target), "-b", branch]
     if args.from_branch is not None:
@@ -436,8 +470,16 @@ def _worktree_add(args, *, cwd: Path, stdin, stdout, stderr) -> int:
                     f"inspect {target}"
                     + (f": {detail}" if detail else "")
                 ) from None
+        if container_created:
+            try:
+                target.parent.rmdir()
+            except OSError:
+                pass
         raise
 
+    if args.porcelain_path:
+        print(target, file=stdout)
+        return 0
     print("worktree added:", file=stdout)
     print(f"  path: {target}", file=stdout)
     print(f"  branch: {branch}", file=stdout)
@@ -726,6 +768,7 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--repo", metavar="PATH")
     add.add_argument("--dry-run", action="store_true")
     add.add_argument("--yes", action="store_true")
+    add.add_argument("--porcelain-path", action="store_true", help=argparse.SUPPRESS)
 
     remove = subparsers.add_parser("remove", help="retire a registered sibling worktree")
     remove.add_argument("name")
