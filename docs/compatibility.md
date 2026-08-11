@@ -97,7 +97,14 @@ to a cmux wrapper.
 With no native Hermes arguments, the pneu seat launches as
 `hermes --tui`. Any explicit arguments are passed through unchanged, preserving
 oneshot, headless, and management modes; callers can request `--tui` alongside
-resume or other native arguments when desired.
+resume or other native arguments when desired. An anchored seat is not claimed
+until one of the installed Hermes credential stores exists: the active
+profile's `auth.json` or the shared Nous store (normally
+`~/.hermes/shared/nous_auth.json`). The check is presence-only, so stale
+credentials still surface through Hermes itself. Missing files name the native
+`hermes` browser-login recovery; `RT_HERMES_SKIP_AUTH_CHECK=1` bypasses only
+this preflight. Unanchored Hermes remains available for that recovery without
+publishing a Roundtable lease.
 
 The packaged Hermes plugin starts its fenced inbox watcher from the TUI's
 initial `on_session_reset` event, before the user has sent a first prompt, and
@@ -347,6 +354,15 @@ fallback.
 `rt-codex-wake handoff` prints `rt-codex resume <thread-id>`. The positional
 `resume` subcommand is accepted by both the pinned `0.144.6` floor and the
 live-checked `0.147.0` CLI; the removed legacy `--resume` flag is never emitted.
+Before that explicit resume shape claims a Roundtable seat, the launcher reads
+the target thread and requires its persisted cwd to resolve to the selected
+project. Manual bind, stale-fence adoption, and handoff share that strict
+comparison. Existing symlink aliases resolve to the same identity; missing,
+moved, or different worktrees fail closed with both paths and two remedies.
+`rt-codex-wake reanchor PROJECT --thread-id THREAD_ID` is the named explicit
+operator path change: it resumes with an app-server cwd override and validates
+the returned thread. Picker and `--last` resumes cannot publish a Roundtable
+seat because their thread identity is unknown before native launch.
 
 In registry-backed mode the bridge re-reads the current registry before it
 rejects an otherwise unknown bind request. It also refreshes the watched

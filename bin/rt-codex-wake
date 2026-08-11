@@ -48,6 +48,7 @@ from _rtcodex import (
     require_default_socket,
     require_supported_daemon,
     require_supported_version,
+    require_thread_project_cwd,
     wake_bridge_build_fingerprint,
     wake_plist,
 )
@@ -1095,19 +1096,28 @@ def project_config_has_codex(project: Path) -> bool:
     return project_matches
 
 
-def validate_thread(project: Path, thread: dict, expected_id: str | None = None) -> dict:
+def validate_thread(
+    project: Path,
+    thread: dict,
+    expected_id: str | None = None,
+    *,
+    check_cwd: bool = True,
+) -> dict:
     if not project_config_has_codex(project):
         raise IdentityError(f"agents.yaml does not configure agents.codex.harness=codex: {project}")
     if expected_id and thread.get("id") != expected_id:
         raise IdentityError(
             f"thread id mismatch: expected {expected_id}, got {thread.get('id')}"
         )
-    try:
-        thread_cwd = Path(thread["cwd"]).expanduser().resolve()
-    except (KeyError, TypeError, OSError, RuntimeError, ValueError) as error:
-        raise IdentityError(f"thread has invalid cwd: {error}") from error
-    if thread_cwd != project:
-        raise IdentityError(f"thread cwd mismatch: {thread_cwd} != {project}")
+    if check_cwd:
+        try:
+            require_thread_project_cwd(
+                project,
+                thread,
+                expected_thread_id=expected_id,
+            )
+        except CodexRuntimeError as error:
+            raise IdentityError(str(error)) from error
     # A local embedded TUI reports `cli`; a TUI attached through --remote is
     # serialized as `vscode`. Depending on how the interactive turn reached
     # app-server, threadSource may be either `user` or absent. For explicit
@@ -2626,6 +2636,54 @@ def handoff_command(args) -> int:
     return 0
 
 
+def reanchor_command(args) -> int:
+    """Explicitly move one persisted Codex thread onto a chosen project cwd."""
+
+    project = canonical_project(Path(args.project or os.getcwd()))
+    thread_id = args.thread_id or os.environ.get("CODEX_THREAD_ID")
+    if not thread_id:
+        raise IdentityError(
+            "CODEX_THREAD_ID is unavailable; pass --thread-id for the thread "
+            "that should be re-anchored"
+        )
+    require_supported_version()
+    require_supported_daemon(args.socket)
+    client = AppServerClient(args.socket)
+    try:
+        before = read_thread(client, thread_id)
+        # Re-anchoring is the explicit exception to the cwd equality gate, not
+        # an exception to root-thread, interactive-source, or project identity.
+        validate_thread(
+            project,
+            before,
+            thread_id,
+            check_cwd=False,
+        )
+        result = client.request(
+            "thread/resume",
+            {
+                "threadId": thread_id,
+                "cwd": str(project),
+                "excludeTurns": True,
+            },
+        )
+        if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
+            raise IdentityError("thread/resume returned an invalid thread")
+        validate_thread(project, result["thread"], thread_id)
+    finally:
+        client.close()
+
+    print(
+        f"reanchored thread={thread_id} recorded_cwd={before.get('cwd')!r} "
+        f"project={project}"
+    )
+    print(
+        "next: launch this exact thread with "
+        f"rt-codex resume {shlex.quote(thread_id)} from {project}"
+    )
+    return 0
+
+
 def codex_resume_launcher_args(thread_id: str) -> tuple[str, str]:
     """Return the resume subcommand shape shared by Codex 0.144.6 and 0.147.0."""
 
@@ -2802,6 +2860,13 @@ def build_parser() -> argparse.ArgumentParser:
     handoff.add_argument("project", nargs="?")
     handoff.add_argument("--thread-id")
 
+    reanchor = subparsers.add_parser(
+        "reanchor",
+        help="explicitly move a persisted Codex thread onto a project cwd",
+    )
+    reanchor.add_argument("project", nargs="?")
+    reanchor.add_argument("--thread-id")
+
     install = subparsers.add_parser("install")
     install.add_argument("--reload", action="store_true")
     install.add_argument("--auto-discover", action="store_true")
@@ -2817,6 +2882,8 @@ def main() -> int:
             return unbind_command(args)
         if args.command == "handoff":
             return handoff_command(args)
+        if args.command == "reanchor":
+            return reanchor_command(args)
         if args.command == "install":
             require_default_socket(args.socket)
             require_supported_version()

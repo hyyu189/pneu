@@ -498,6 +498,8 @@ def test_launcher_exec_preserves_harness_contract(
         _rtlauncher, "choose_launch_cwd", lambda _harness: project
     )
     monkeypatch.setenv("RT_FROM", harness)
+    if harness == "hermes":
+        monkeypatch.setenv("RT_HERMES_SKIP_AUTH_CHECK", "1")
     for name in (
         "RT_PROJECT_ROOT",
         "RT_SESSION_ID",

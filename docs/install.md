@@ -326,7 +326,12 @@ rt-codex
 
 With no native arguments, the Hermes launcher defaults to `hermes --tui`.
 Explicit native arguments are passed through unchanged so scripted/headless
-Hermes modes remain available.
+Hermes modes remain available. Before an anchored Hermes seat is claimed, the
+launcher checks for either the active profile's `auth.json` or the shared Nous
+OAuth store (normally `~/.hermes/shared/nous_auth.json`). If both are missing,
+run native `hermes` once outside pneu to complete browser login and then
+relaunch the seat. This is intentionally a presence check, not a freshness
+check; `RT_HERMES_SKIP_AUTH_CHECK=1` is the explicit emergency bypass.
 
 A project-anchored bare Claude launch supplies a fresh native `--session-id`,
 so pneu opens an addressable chat even when Claude is configured to start
@@ -362,6 +367,28 @@ thread ID and that the private runtime launch intent resolves to the same
 current fenced lease. A clean-account repeat and the real
 send-to-wake-to-drain/ack path remain release promotion gates even though the
 configuration and queueing paths are automated and tested.
+
+An anchored resume must name its thread explicitly:
+
+```bash
+rt-codex resume THREAD_ID
+```
+
+Before the launcher claims the seat, it reads that thread from the managed
+app-server and requires the persisted cwd to canonicalize to the selected
+project. The bind, stale-binding adoption, and handoff paths enforce the same
+gate. Symlink aliases are accepted after canonicalization; a moved, missing, or
+different worktree is refused with both paths named. To make a deliberate path
+change, use the explicit operator action printed by the refusal:
+
+```bash
+rt-codex-wake reanchor /absolute/path/to/project --thread-id THREAD_ID
+```
+
+The command sends an app-server `thread/resume` with an explicit cwd override
+and revalidates the returned thread before telling the operator to relaunch it.
+Picker and `--last` resume modes remain available through native `codex`, but
+cannot claim a Roundtable seat because their target is unknown at preflight.
 
 ## Project phone access
 
