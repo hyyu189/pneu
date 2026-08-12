@@ -86,7 +86,7 @@ commands:
   hermes     Launch a Hermes seat
   codex      Launch a Codex seat
   openclaw   Launch an isolated OpenClaw Gateway seat
-  grok       Launch an isolated Grok ACP seat
+  grok       Launch a native Grok TUI seat with monitor activation
   send       Send a durable message
   inbox      Read a durable inbox
   ack        Acknowledge a durable message
@@ -298,8 +298,8 @@ def ensure_harness_setup(
     """Run the installed package's ownership-safe setup once per harness."""
 
     if harness in {"grok", "openclaw"}:
-        # These adapters own their own isolated child state and do not install
-        # hooks, plugins, or LaunchAgents.
+        # Grok's native TUI uses a model-armed monitor and OpenClaw owns an
+        # isolated Gateway; neither installs hooks, plugins, or LaunchAgents.
         return
 
     configured_prefix = environ.get("ROUNDTABLE_INSTALL_PREFIX")
@@ -903,7 +903,7 @@ def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
     for index, (harness, agent_id) in enumerate(seats, 1):
         activation_hint = (
             " (starts with a visible automatic pneu activation turn)"
-            if harness == "codex"
+            if harness in {"codex", "grok"}
             else ""
         )
         print(

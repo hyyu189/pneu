@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the isolated Grok ACP Roundtable adapter."""
+"""Run the internal isolated Grok ACP pneu lab supervisor."""
 
 from __future__ import annotations
 

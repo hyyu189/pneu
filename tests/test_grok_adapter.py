@@ -4,7 +4,9 @@ import importlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -258,36 +260,207 @@ def test_stale_or_wrong_identity_is_refused_before_child_start(tmp_path, monkeyp
         _rtruntime.release(lease)
 
 
-def test_grok_launcher_transfers_claimed_lease_to_managed_adapter(tmp_path, monkeypatch):
+def _grok_launch_fixture(tmp_path, monkeypatch, user_argv, extra_env=None):
     project = tmp_path / "project"
-    project.mkdir()
+    state = project / ".roundtable"
+    state.mkdir(parents=True)
+    (state / "agents.yaml").write_text(
+        "schema: roundtable.agents.v1\n"
+        "project: .\n"
+        "agents:\n"
+        "  grok:\n"
+        "    harness: grok-build\n"
+        "    instances:\n"
+        "      - id: grok\n"
+    )
     executable = tmp_path / "grok"
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o755)
-    wake = tmp_path / "rt-grok-wake"
-    wake.write_text("#!/bin/sh\n", encoding="utf-8")
-    wake.chmod(0o755)
+    mailbox = (tmp_path / "mail" / "inbox" / "grok" / "new").absolute()
+    runtime = (tmp_path / "runtime").absolute()
+    user_home = (tmp_path / "user-home").absolute()
     observed = {}
 
+    for name in (
+        *_rtlauncher.LEASE_ENV_NAMES,
+        "RT_RUNTIME_DIR",
+        "RT_CODEX_RUNTIME_DIR",
+        "RT_GROK_NO_PRIMER",
+        "RT_GROK_ISOLATION_ROOT",
+        "GROK_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "TMPDIR",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RT_FROM", "grok")
+    monkeypatch.setenv("HOME", str(user_home))
+    for name, value in (extra_env or {}).items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setattr(_rtlauncher, "choose_launch_cwd", lambda _harness: project)
+    monkeypatch.setattr(_rtlauncher.os, "chdir", lambda path: observed.setdefault("cwd", path))
     monkeypatch.setattr(_rtlauncher, "set_launch_identity", lambda *_args: "grok")
-    monkeypatch.setattr(_rtlauncher, "normalize_runtime_environment", lambda: tmp_path)
+    monkeypatch.setattr(
+        _rtlauncher,
+        "normalize_runtime_environment",
+        lambda: (
+            _rtlauncher.os.environ.update(
+                {
+                    "RT_RUNTIME_DIR": str(runtime),
+                    "RT_CODEX_RUNTIME_DIR": str(runtime),
+                }
+            )
+            or runtime
+        ),
+    )
     monkeypatch.setattr(_rtlauncher, "harness_bin", lambda _harness: executable)
-    monkeypatch.setattr(_rtlauncher, "grok_adapter_bin", lambda: wake)
-    monkeypatch.setattr(_rtlauncher, "claim_launch_seat", lambda *_args: object())
+    monkeypatch.setattr(_rtlauncher, "preflight_grok_credentials", lambda: None)
+    monkeypatch.setattr(_rtlauncher, "grok_seat_maildir", lambda *_args: mailbox)
+    monkeypatch.setattr(_rtlauncher, "_same_process_lease", lambda *_args: None)
+    monkeypatch.setattr(
+        _rtlauncher,
+        "claim",
+        lambda root, agent_id, harness: SimpleNamespace(
+            project_root=root.resolve(),
+            agent_id=agent_id,
+            session_id=f"{harness}-session",
+            revision=7,
+        ),
+    )
 
     def fake_exec(path, argv):
         observed["path"] = path
         observed["argv"] = argv
-        observed["grok_bin"] = _rtlauncher.os.environ["RT_GROK_BIN"]
+        observed["environment"] = {
+            name: _rtlauncher.os.environ.get(name)
+            for name in (
+                *_rtlauncher.LEASE_ENV_NAMES,
+                "RT_RUNTIME_DIR",
+                "RT_CODEX_RUNTIME_DIR",
+                "HOME",
+                "RT_GROK_ISOLATION_ROOT",
+                "GROK_HOME",
+                "XDG_CONFIG_HOME",
+                "XDG_DATA_HOME",
+                "XDG_CACHE_HOME",
+                "TMPDIR",
+            )
+        }
         raise RuntimeError("exec captured")
 
     monkeypatch.setattr(_rtlauncher.os, "execv", fake_exec)
     with pytest.raises(RuntimeError, match="exec captured"):
-        _rtlauncher.launch("grok", ["--once"])
+        _rtlauncher.launch("grok", user_argv)
+    return observed, executable, mailbox, runtime, user_home
 
-    assert observed == {
-        "path": str(wake),
-        "argv": [str(wake), "--grok-bin", str(executable), "--once"],
-        "grok_bin": str(executable),
+
+def test_grok_credential_preflight_is_presence_only(tmp_path):
+    auth = tmp_path / "auth.json"
+    auth.write_bytes(b"\xffnot-readable-json")
+
+    adapter_env = {"HOME": str(tmp_path / "home"), "GROK_AUTH_PATH": str(auth)}
+    _rtlauncher.preflight_grok_credentials(adapter_env)
+    _rtlauncher.preflight_grok_credentials({"XAI_API_KEY": "present-only"})
+
+    with pytest.raises(_rtlauncher.SelectionError, match="credentials are missing"):
+        _rtlauncher.preflight_grok_credentials({"HOME": str(tmp_path / "missing")})
+
+
+def test_bare_grok_launcher_execs_native_tui_with_exact_monitor_primer(
+    tmp_path, monkeypatch, capsys
+):
+    observed, executable, mailbox, runtime, user_home = _grok_launch_fixture(
+        tmp_path, monkeypatch, []
+    )
+    prompt = _rtlauncher.GROK_SEAT_PRIMER_TEMPLATE.format(
+        maildir=mailbox,
+        inbox=BIN / "rt-inbox",
+        ack=BIN / "rt-ack",
+    )
+
+    assert _rtlauncher.GROK_SEAT_PRIMER_TEMPLATE == (
+        "[pneu] Grok seat activation turn. Use only the `monitor` tool to "
+        "create exactly one background task with `persistent: true` watching "
+        "the absolute directory {maildir}. For every event, start a turn that "
+        "runs `{inbox} --fenced --archive-quiet-acks -f json`, acts on every "
+        "non-ack message, then runs `{ack} --fenced <id>[,<id>...]` exactly "
+        "once for the handled IDs. On this activation turn, do not inspect "
+        "files, modify the workspace, or use any other tool. After creating "
+        "the monitor, reply exactly: ready."
+    )
+    assert observed["path"] == str(executable)
+    assert observed["argv"] == [str(executable), prompt]
+    assert observed["cwd"] == (tmp_path / "project")
+    assert observed["environment"] == {
+        "RT_PROJECT_ROOT": str((tmp_path / "project").resolve()),
+        "RT_FROM": "grok",
+        "RT_SESSION_ID": "grok-session",
+        "RT_LEASE_REVISION": "7",
+        "RT_RUNTIME_DIR": str(runtime),
+        "RT_CODEX_RUNTIME_DIR": str(runtime),
+        "HOME": str(user_home),
+        "RT_GROK_ISOLATION_ROOT": None,
+        "GROK_HOME": None,
+        "XDG_CONFIG_HOME": None,
+        "XDG_DATA_HOME": None,
+        "XDG_CACHE_HOME": None,
+        "TMPDIR": None,
     }
+    assert "activation primer skipped" not in capsys.readouterr().err
+    assert "rt-grok-wake" not in observed["argv"]
+
+
+def test_explicit_grok_arguments_pass_through_and_disable_primer(
+    tmp_path, monkeypatch, capsys
+):
+    observed, executable, *_rest = _grok_launch_fixture(
+        tmp_path, monkeypatch, ["--resume", "native-session"]
+    )
+
+    assert observed["argv"] == [str(executable), "--resume", "native-session"]
+    assert _rtlauncher.GROK_SEAT_PRIMER_TEMPLATE not in observed["argv"]
+    advisory = capsys.readouterr().err
+    assert "IMPORTANT: Grok monitor activation primer skipped" in advisory
+    assert "native arguments were supplied" in advisory
+    assert "after every resume" in advisory
+
+
+def test_rt_grok_no_primer_is_an_explicit_bare_opt_out(
+    tmp_path, monkeypatch, capsys
+):
+    observed, executable, *_rest = _grok_launch_fixture(
+        tmp_path,
+        monkeypatch,
+        [],
+        extra_env={"RT_GROK_NO_PRIMER": "1"},
+    )
+
+    assert observed["argv"] == [str(executable)]
+    advisory = capsys.readouterr().err
+    assert "RT_GROK_NO_PRIMER=1" in advisory
+    assert "will not auto-wake" in advisory
+
+
+def test_grok_seat_path_is_pinned_away_from_internal_acp_supervisor():
+    launcher_source = (BIN / "_rtlauncher.py").read_text()
+    launch_source = launcher_source.split("def launch(", 1)[1]
+
+    assert "grok_adapter_bin" not in launch_source
+    assert '"--grok-bin"' not in launch_source
+    assert "rt-grok-wake" not in launch_source
+
+
+def test_internal_grok_lab_help_is_explicit():
+    result = subprocess.run(
+        [sys.executable, str(BIN / "rt-grok-wake"), "--help"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    help_text = " ".join(result.stdout.split())
+    assert "INTERNAL LAB TOOL" in help_text
+    assert "Normal Grok seats use the native TUI via rt-grok" in help_text

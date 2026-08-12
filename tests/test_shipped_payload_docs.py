@@ -23,6 +23,7 @@ def test_orientation_templates_leave_roles_unassigned():
     for relative in (
         "templates/CLAUDE.md.tmpl",
         "templates/AGENTS.md.tmpl",
+        "templates/GROK.md.tmpl",
         "templates/HERMES.md.tmpl",
     ):
         lines = (ROOT / relative).read_text().splitlines()

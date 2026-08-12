@@ -132,8 +132,8 @@ builds the same archive, runs the hermetic default-prefix smoke, verifies both
 checksum layers, installs the extracted payload into an isolated HOME and
 prefix, and selects the configured setup harnesses using harmless fake
 executables. Grok has no setup-owned hooks or LaunchAgents, so its artifact
-check additionally asserts the two Grok wrappers and integration module are
-present. The workflow proves that:
+check additionally asserts the native TUI launcher, internal ACP lab wrapper
+and module, and `GROK.md` template are present. The workflow proves that:
 
 - the default setup plan creates no manifest, config, runtime directory,
   harness skill link, plugin link, or plist;
@@ -199,8 +199,9 @@ Before tagging or attaching the archive to a public release:
    thread and the private runtime launch intent resolves to the same current
    fenced lease, then completes real send-to-wake-to-drain/ack acceptance;
 5. standalone Codex passes that same acceptance before support is claimed;
-6. Grok Build passes the credentialed two-generation ACP adapter E2E and
-   extracted-artifact smoke;
+6. Grok Build passes a credentialed native-TUI launch, monitor wake,
+   drain/ack, resume re-arm, and extracted-artifact smoke; the ACP supervisor
+   is exercised only as an internal lab surface;
 7. the 1.3.0 Claude rc-host passes a live phone-side worktree spawn on Ocean's
    device, registers and addresses that session, refuses removal while its
    seat is live, and disables without leaving project hooks or a LaunchAgent;

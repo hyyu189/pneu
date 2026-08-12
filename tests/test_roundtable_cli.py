@@ -845,6 +845,29 @@ def test_selector_marks_configured_but_missing_harness_unavailable(
     )
 
 
+def test_selector_marks_grok_native_monitor_activation_turn(
+    tmp_path, fake_commands
+):
+    project = write_project(
+        tmp_path / "project",
+        {"grok": ("grok-build", ["grok"])},
+    )
+    stderr = io.StringIO()
+
+    selected = roundtable.choose_seat(
+        project,
+        stdin=TTYInput("1\n"),
+        stderr=stderr,
+    )
+
+    assert selected == ("grok", "grok")
+    assert (
+        "1) grok — grok "
+        "(starts with a visible automatic pneu activation turn)"
+        in stderr.getvalue()
+    )
+
+
 @pytest.mark.parametrize(
     ("harness", "override"),
     [

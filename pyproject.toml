@@ -104,6 +104,7 @@ package-dir = { "" = "bin", "pneu_packaging" = "pneu_packaging" }
   "templates/AGENTS.md.tmpl",
   "templates/BRIEF.md.tmpl",
   "templates/CLAUDE.md.tmpl",
+  "templates/GROK.md.tmpl",
   "templates/HERMES.md.tmpl",
   "templates/README.md.tmpl",
   "templates/ROUTING.md.tmpl",
