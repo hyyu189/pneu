@@ -23,7 +23,7 @@ rt-say  ->  project mailbox: new/  ->  agent acts  ->  rt-ack  ->  cur/
 ```
 
 The `rt-*` names and `RT_*` environment variables are pneu's tool prefix and
-remain stable in 1.3.1. Project state remains under `.roundtable/`, and
+remain stable in 1.3.2. Project state remains under `.roundtable/`, and
 `roundtable.*` wire and registry schema identifiers are unchanged. `roundtable`
 is a silent compatibility alias for the primary `pneu` command.
 
@@ -34,8 +34,8 @@ wheel and locked dependencies but not Python; the host needs CPython 3.11
 through 3.14.
 
 ```bash
-tar -xzf pneu-1.3.1-macos.tar.gz
-cd pneu-1.3.1
+tar -xzf pneu-1.3.2-macos.tar.gz
+cd pneu-1.3.2
 ./install
 export PATH="$HOME/.local/bin:$PATH"
 pneu
@@ -156,7 +156,7 @@ The repository records validation evidence and open promotion gates in
 [`docs/compatibility.md`](docs/compatibility.md). A supported platform/runtime
 claim requires a real end-to-end smoke test; version-number comparisons and
 fixtures alone do not establish support. Cross-host SSH, Linux service
-management, and multi-auth switching remain out of scope for 1.3.1. The
+management, and multi-auth switching remain out of scope for 1.3.2. The
 project phone-host path remains a release candidate until its required live
 phone-side smoke passes; fixtures and CLI inspection alone are not a support
 claim.
