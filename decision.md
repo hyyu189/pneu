@@ -2,6 +2,17 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-08-12: **Seats are interactive TUIs** (Ocean). A pneu seat launched
+  by a user — from the launcher card or an explicit seat command such as
+  `rt-grok` — is an interactive TUI session. pneu exists to build a network
+  between those TUIs; wake adapters are background channels into a TUI
+  session, never a replacement for one. Headless or oneshot agent processes
+  remain legitimate inside a harness (subagents, teammates, internal
+  automation) but are not user-facing seats. Claude/Codex/Hermes seats
+  already follow this; the Grok ACP supervisor and the OpenClaw Gateway
+  adapter predate the ruling and are recorded deviations — rework them
+  TUI-first or park them honestly (tracked in D14). Every future harness
+  integration arrives TUI-first.
 - 2026-08-11: **The communication layer is not a permission gate** (Ocean).
   Harness-side permission models own execution policy; pneu adapters default
   to full permission on wake turns. The Grok ACP supervisor — the one adapter
