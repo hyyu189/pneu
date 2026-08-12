@@ -52,6 +52,12 @@ POLL_SECONDS = min(5.0, DEFAULT_HEARTBEAT_RENEWAL_INTERVAL)
 LAYOUT_SCAN_TIMEOUT_SECONDS = 1.0
 GENERATION_POLL_SECONDS = 0.25
 REPLY_OVERDUE_PREFIX = "rt-wait-inbox: reply overdue:"
+CLAUDE_FENCE_ENVIRONMENT = (
+    "RT_PROJECT_ROOT",
+    "RT_FROM",
+    "RT_SESSION_ID",
+    "RT_LEASE_REVISION",
+)
 
 
 class StopRequested(Exception):
@@ -555,18 +561,49 @@ def _claude_hook_is_managed() -> bool:
 
     The hook is installed in user-level settings and therefore fires for every
     Claude project. A normal direct Claude launch must remain a silent no-op.
-    Partial lease context is deliberately treated as managed so ``run`` can
-    fail closed and surface the broken launch environment.
+    Partial Stop-hook context is diagnosed before this function is consulted;
+    other partial hook context remains managed and fails closed in ``run``.
     """
 
     return any(
         os.environ.get(name)
-        for name in (
-            "RT_PROJECT_ROOT",
-            "RT_FROM",
-            "RT_SESSION_ID",
-            "RT_LEASE_REVISION",
-        )
+        for name in CLAUDE_FENCE_ENVIRONMENT
+    )
+
+
+def _partial_claude_fence_environment(
+    environment: dict[str, str] | None = None,
+) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    environment = os.environ if environment is None else environment
+    carried = [name for name in CLAUDE_FENCE_ENVIRONMENT if name in environment]
+    if not carried:
+        return None
+    missing = tuple(
+        name for name in CLAUDE_FENCE_ENVIRONMENT if name not in environment
+    )
+    invalid = tuple(
+        name
+        for name in carried
+        if not environment[name].strip() or "\0" in environment[name]
+    )
+    if not missing and not invalid:
+        return None
+    return missing, invalid
+
+
+def _report_partial_claude_fence_environment(
+    missing: tuple[str, ...],
+    invalid: tuple[str, ...],
+) -> None:
+    details = []
+    if missing:
+        details.append("missing=" + ",".join(missing))
+    if invalid:
+        details.append("invalid=" + ",".join(invalid))
+    print(
+        "rt-wait-inbox: incomplete Claude Stop-hook fence environment "
+        f"({'; '.join(details)}); skipping automatic re-wake",
+        file=sys.stderr,
     )
 
 
@@ -854,6 +891,11 @@ def main(argv: list[str] | None = None) -> int:
     stop_hook_active = False
     if claude_hook:
         argv.pop(0)
+        if claude_stop_hook:
+            partial_fence = _partial_claude_fence_environment()
+            if partial_fence is not None:
+                _report_partial_claude_fence_environment(*partial_fence)
+                return 0
         managed_hook = _claude_hook_is_managed()
         hook_input: dict | None = None
         if not managed_hook or claude_stop_hook:

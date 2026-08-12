@@ -68,6 +68,18 @@ notice, the compatibility matrix, and the source-commit ledger. Top-level
 
 ## Verify and smoke
 
+The hermetic default-prefix smoke is a required release step. Run it from the
+repository after building the archive; it constructs a fresh child environment
+instead of inheriting the caller's install prefix or any harness/runtime state,
+then proves the caller's real prefix was unchanged:
+
+```bash
+mamba run -n general python scripts/isolated_install_smoke.py \
+  artifacts/pneu-<version>-macos.tar.gz
+```
+
+After that guard passes, run the extended setup/remove exercise:
+
 ```bash
 cd artifacts && shasum -a 256 --check SHA256SUMS
 cd ..
@@ -114,11 +126,12 @@ supplies a harmless fake executable, and the promotion gate uses the real
 validated CLI.
 
 The GitHub `release-artifact` workflow runs the full tests and safety gate,
-builds the same archive, verifies both checksum layers, installs the extracted
-payload into an isolated HOME and prefix, and selects the configured setup
-harnesses using harmless fake executables. Grok has no setup-owned hooks or
-LaunchAgents, so its artifact check additionally asserts the two Grok wrappers
-and integration module are present. The workflow proves that:
+builds the same archive, runs the hermetic default-prefix smoke, verifies both
+checksum layers, installs the extracted payload into an isolated HOME and
+prefix, and selects the configured setup harnesses using harmless fake
+executables. Grok has no setup-owned hooks or LaunchAgents, so its artifact
+check additionally asserts the two Grok wrappers and integration module are
+present. The workflow proves that:
 
 - the default setup plan creates no manifest, config, runtime directory,
   harness skill link, plugin link, or plist;
@@ -158,9 +171,9 @@ manual `rt-codex-wake bind` retained only as a fallback.
 Before tagging or attaching the archive to a public release:
 
 1. all CI matrix jobs and the artifact workflow pass;
-2. the extracted archive passes install, terminal-baseline smoke, and
-   uninstall on a clean macOS account, including the
-   `plan -> apply -> status -> remove --unload-codex` setup cycle;
+2. the extracted archive passes the hermetic default-prefix guard, install,
+   terminal-baseline smoke, and uninstall on a clean macOS account, including
+   the `plan -> apply -> status -> remove --unload-codex` setup cycle;
 3. clean-account Claude and Hermes setup passes skill discovery, lifecycle
    hook, tripwire, and real send-to-wake-to-drain/ack acceptance;
 4. npm Codex `0.144.6` passes the coordinated default-daemon reload, proves the
