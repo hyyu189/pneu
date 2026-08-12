@@ -178,18 +178,24 @@ final decision-maker.
 
 ## Development
 
-Use the shared environment for Python commands:
+Development needs any CPython 3.11–3.14 environment with the dev
+dependencies installed (`pip install -r requirements-dev.txt`); pneu does
+not require a specific environment manager. Run the checks from that
+environment:
 
 ```bash
-mamba run -n general pytest -q
-mamba run -n general python -m compileall -q bin pneu_packaging scripts tests
-mamba run -n general python scripts/check_public_safety.py
+pytest -q
+python -m compileall -q bin pneu_packaging scripts tests
+python scripts/check_public_safety.py
 ```
 
-For the source-install path:
+(With a conda/mamba-managed environment, prefix each command with your
+runner, for example `mamba run -n <env> pytest -q`.)
+
+For the source-install path, run from the same environment:
 
 ```bash
-mamba run -n general ./scripts/install.sh
+./scripts/install.sh
 ```
 
 See [`docs/release.md`](docs/release.md) for the deterministic artifact

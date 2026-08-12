@@ -41,16 +41,18 @@ toolchains.
 
 ## Build
 
-From a clean committed checkout:
+From a clean committed checkout, using any CPython 3.11–3.14 development
+environment (prefix with your environment runner if you use one, for example
+`mamba run -n <env> ...`):
 
 ```bash
-mamba run -n general python scripts/build_release.py
+python scripts/build_release.py
 ```
 
 To avoid network access, pre-populate a directory with the eight locked wheels:
 
 ```bash
-mamba run -n general python scripts/build_release.py \
+python scripts/build_release.py \
   --dependency-wheel-dir /path/to/locked-wheels
 ```
 

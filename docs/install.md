@@ -20,7 +20,7 @@ To preview the managed installer without touching a live installation, use
 isolated paths:
 
 ```bash
-mamba run -n general ./scripts/install.sh \
+./scripts/install.sh \
   --prefix /tmp/pneu-preview \
   --link-dir /tmp/pneu-preview-bin
 ```
@@ -161,11 +161,11 @@ runtime state, or invokes `launchctl`.
 ## Source install
 
 Source installation requires CPython 3.11 through 3.14 with PyYAML, setuptools
-77 or newer, and wheel available to the bootstrap interpreter. On the
-development machine:
+77 or newer, and wheel available to the bootstrap interpreter. Run from such
+an environment (prefix with your environment runner if you use one):
 
 ```bash
-mamba run -n general ./scripts/install.sh
+./scripts/install.sh
 ```
 
 The source fallback builds a local project wheel without network access and

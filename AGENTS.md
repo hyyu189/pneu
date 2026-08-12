@@ -55,8 +55,12 @@ speculative features.
 ## Implementation and tests
 
 - Prefer the Python standard library; declare every non-standard dependency.
-- Follow the shared environment rule: use `mamba run -n general ...` for Python
-  commands, never bare `python3` or `pip3 install`.
+- Run Python commands through a dedicated project environment (any CPython
+  3.11–3.14 with `requirements-dev.txt` installed), never against the system
+  interpreter with bare `python3` or global `pip3 install`. Environment
+  managers are a host convention, not a project requirement; a
+  conda/mamba-managed host would use its own runner prefix (for example
+  `mamba run -n <env> ...`).
 - Every behavior change needs focused regression coverage.
 - Before a commit, run the focused tests, the full suite, compile checks, and
   the repository's public-safety scan.
