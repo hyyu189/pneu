@@ -1,16 +1,21 @@
-# ROUTING.md — context-loading routing（非消息投递路由）
+# ROUTING.md — context-loading routing (not message-delivery routing)
 
 conditional paths are indexes; read only when their trigger matches.
 
 ```yaml
 load_if:
-  pneu:                                    # 触发即用 pneu skill（含通信纪律）
+  pneu:                                    # Load the pneu skill immediately, including communication discipline.
     when:
-      - inbound_pneu_message               # [FROM→TO kind id=...] 到达
-      - peer_agent_coordination            # Claude / Codex / Hermes 互为 peer
-      - rt_say_or_ack_or_refresh_or_resolve
-      - handoff_delivery
-      - wake_or_delivery_debug
+      - inbound_pneu_mail_message           # [FROM→TO kind id=...] arrives
+      - message_or_dispatch_to_coding_agent_seat
+      - coordinate_another_coding_agent_seat
+      - check_or_drain_agent_mail_or_inbox
+      - claude_codex_hermes_grok_openclaw_peer_agents
+      - rt_say_rt_inbox_rt_ack_rt_refresh_rt_resolve
+      - handoff_writing_or_delivery
+      - sibling_worktree_seat_coordination
+      - seat_lease_coordination
+      - wake_or_delivery_debugging
     skill: pneu
     read:
       - .roundtable/agents.yaml

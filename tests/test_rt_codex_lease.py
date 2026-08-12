@@ -612,7 +612,7 @@ def test_custom_codex_instance_scans_and_wakes_its_own_mailbox(
     assert result.ok and result.detail == "wake started"
     assert len(starts) == 1
     wake_text = starts[0]["input"][0]["text"]
-    assert "drain the Roundtable inbox for codex-review in this project" in wake_text
+    assert wake_text == wake.WAKE_TEXT.format(agent="codex-review")
     assert str(inbox) not in wake_text
 
 

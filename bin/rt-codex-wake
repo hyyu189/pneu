@@ -70,7 +70,7 @@ from _rtruntime import (
 
 WAKE_TEXT = (
     "drain the Roundtable inbox for {agent} in this project, "
-    "按 roundtable skill Delivery v2 协议处理"
+    "following the roundtable skill Delivery v2 protocol"
 )
 STATE_SCHEMA = "roundtable.codex-wake.v1"
 BIND_REQUEST_SCHEMA = "roundtable.codex-bind-request.v1"

@@ -1,11 +1,13 @@
 ---
 name: pneu
 description: >-
-  Use when active pneu coordination is required: an inbound [FROM→TO kind
-  id=...] message arrives, the user mentions Hermes/Claude/Codex as peer agents,
-  rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
-  routing, or wake/delivery debugging. Do not use merely because a repo
-  contains .roundtable/agents.yaml.
+  Use when an inbound [FROM→TO kind id=...] pneu message arrives; when the user
+  wants to message, dispatch to, or coordinate another coding-agent seat; check
+  or drain agent mail or an inbox; collaborate with Claude, Codex, Hermes, Grok,
+  or OpenClaw as peer agents; use rt-say, rt-inbox, rt-ack, rt-refresh, or
+  rt-resolve; write or deliver a handoff; coordinate sibling-worktree seats or
+  seat leases; or debug wake or delivery behavior. Do not use merely because a
+  repo contains .roundtable/agents.yaml.
 version: 8.4.0
 author: pneu contributors
 license: MIT
@@ -342,6 +344,17 @@ write `handoff/<topic>.md`, commit, and rt-say a one-line pointer.
 
 Emergency keyboard path (`--legacy-nudge-only` + submit-key lore) is archived
 in `~/.pneu/docs/legacy-v1-keyboard.md`; human-coordinated use only.
+
+## Dispatch workflow
+
+The standard harness-neutral shape for dispatching work to a sibling seat is:
+`pneu worktree add NAME` → `pneu worktree open NAME --seat AGENT` (the surface
+chain handles the terminal) → write `handoff/<topic>.md` in the new tree with
+the goal, boundaries, and verification expectations →
+`rt-say --fenced --no-nudge --expect-reply <dur> AGENT@NAME dispatch "<one-line pointer>"`
+→ the seat reports back with a result file and a mail message. Assign
+responsibilities in the handoff itself; this workflow does not prescribe
+project roles.
 
 ## Receiving
 

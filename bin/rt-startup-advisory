@@ -120,8 +120,8 @@ def main() -> int:
             return 0
         quoted = shlex.quote(str(root))
         print(
-            "roundtable: cwd 不在 roundtable 项目; "
-            f"workspace 同伴在 {root}; cd {quoted} 或 "
+            "roundtable: cwd is outside a Roundtable project; "
+            f"a workspace peer is in {root}; cd {quoted} or "
             f"export ROUNDTABLE_PROJECT_DIR={quoted}"
         )
     except Exception:

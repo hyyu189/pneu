@@ -1,5 +1,5 @@
 codex:
   cwd: .
-  role: fast implementation, tests, integration, CLI/runtime review
+  role:  # optional — e.g. "implementation and tests" — assign per project
   always_read: [ROUTING.md, README.md]
-  startup: 由可信的 pneu SessionStart hook 自动排队并验证当前 Codex thread 绑定；正常情况下不要手动 bind。仅当 pneu diagnostics 明确报告自动绑定未完成时，才使用 fallback：`~/.pneu/bin/rt-codex-wake bind "$RT_PROJECT_ROOT"`
+  startup: The trusted pneu SessionStart hook automatically queues and validates the current Codex thread binding; normally, do not bind manually. Use the fallback only when pneu diagnostics explicitly report that automatic binding did not complete: `~/.pneu/bin/rt-codex-wake bind "$RT_PROJECT_ROOT"`
