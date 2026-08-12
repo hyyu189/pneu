@@ -615,7 +615,7 @@ def test_open_requires_seat_when_worktree_configures_several(lab):
     assert "not launched, printed" not in result.stdout
 
 
-def test_open_records_herdr_surface_only_after_success(lab, tmp_path):
+def test_open_no_wait_reports_spawn_without_surface_record(lab, tmp_path):
     _lab_tmp, base, _registry, runtime = lab
     target = create_demo(
         lab,
@@ -643,20 +643,20 @@ def test_open_records_herdr_surface_only_after_success(lab, tmp_path):
         "demo",
         "--surface",
         "herdr",
+        "--no-wait",
         cwd=base,
         env=environment,
     )
 
     assert result.returncode == 0, result.stderr
+    assert "worktree launch requested:" in result.stdout
     assert "surface: herdr:w1:p9" in result.stdout
+    assert "activation: not waited (--no-wait)" in result.stdout
     sys.path.insert(0, str(ROOT / "bin"))
     from _rtruntime import seat_paths
 
     record_path = seat_paths(target, "codex", root=runtime).surface
-    payload = json.loads(record_path.read_text())
-    assert payload["agentId"] == "codex"
-    assert payload["harness"] == "codex"
-    assert payload["surface"] == {"kind": "herdr", "pane": "w1:p9"}
+    assert not record_path.exists()
     assert read_calls(trace)[-1][:3] == ["pane", "run", "w1:p9"]
 
 

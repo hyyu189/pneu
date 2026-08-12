@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -19,6 +20,7 @@ LEASE_CONTEXT_ENV_NAMES = (
     "RT_LEASE_REVISION",
 )
 TMUX_TARGET_FORMAT = "#{session_name}:#{window_index}.#{pane_index}"
+ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class SurfaceError(RuntimeError):
@@ -147,7 +149,12 @@ def detect_surface(
     return SurfaceSelection("print", "fallback")
 
 
-def launcher_shell_command(launcher: Path, agent_id: str) -> str:
+def launcher_shell_command(
+    launcher: Path,
+    agent_id: str,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> str:
     """Build a shell-safe launcher command with inherited seat fencing removed."""
 
     if not launcher.is_absolute():
@@ -157,6 +164,19 @@ def launcher_shell_command(launcher: Path, agent_id: str) -> str:
     command = ["/usr/bin/env"]
     for name in LEASE_CONTEXT_ENV_NAMES:
         command.extend(["-u", name])
+    for name, value in (environment or {}).items():
+        if (
+            not isinstance(name, str)
+            or not ENVIRONMENT_NAME_RE.fullmatch(name)
+            or name in LEASE_CONTEXT_ENV_NAMES
+            or name == "RT_FROM"
+        ):
+            raise SurfaceError(f"invalid explicit launcher environment name: {name!r}")
+        if not isinstance(value, str) or "\0" in value:
+            raise SurfaceError(
+                f"explicit launcher environment {name} must be a string without NUL"
+            )
+        command.append(f"{name}={value}")
     command.extend([f"RT_FROM={agent_id}", str(launcher)])
     return shlex.join(command)
 
@@ -394,6 +414,7 @@ def launch_surface(
     tree: Path,
     launcher: Path,
     agent_id: str,
+    launcher_environment: Mapping[str, str] | None = None,
     environ: Mapping[str, str] | None = None,
     stdout: TextIO,
     runner=subprocess.run,
@@ -403,7 +424,11 @@ def launch_surface(
     selected_environment = os.environ if environ is None else environ
     if not tree.is_absolute():
         raise SurfaceError(f"worktree root must be an absolute path: {tree}")
-    command = launcher_shell_command(launcher, agent_id)
+    command = launcher_shell_command(
+        launcher,
+        agent_id,
+        environment=launcher_environment,
+    )
     if selection.kind == "herdr":
         return _launch_herdr(
             selection,

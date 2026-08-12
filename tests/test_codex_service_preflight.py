@@ -747,6 +747,126 @@ def test_bridge_repair_never_reloads_app_server(monkeypatch):
     assert calls == ["restart-wake"]
 
 
+def _write_bridge_takeover_fixture(
+    runtime: Path,
+    socket_path: Path,
+    *,
+    heartbeat_pid: int,
+) -> None:
+    pid_path = runtime / "rt-codex-wake.pid"
+    heartbeat_path = runtime / "rt-codex-wake-heartbeat.json"
+    pid_path.write_text("222\n", encoding="utf-8")
+    pid_path.chmod(0o600)
+    now = datetime.now(timezone.utc).isoformat()
+    heartbeat_path.write_text(
+        json.dumps(
+            {
+                "schema": "roundtable.codex-wake-heartbeat.v1",
+                "pid": heartbeat_pid,
+                "heartbeatAt": now,
+                "lastRpcOkAt": now,
+                "lastError": None,
+                "socketPath": str(socket_path),
+                "bridgeBuildFingerprint": "sha256:current",
+            }
+        ),
+        encoding="utf-8",
+    )
+    heartbeat_path.chmod(0o600)
+
+
+def _prepare_bridge_takeover_test(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    socket_path = tmp_path / "app.sock"
+    _write_bridge_takeover_fixture(runtime, socket_path, heartbeat_pid=111)
+    monkeypatch.setattr(_rtcodex, "RUNTIME_DIR", runtime)
+    monkeypatch.setattr(_rtcodex, "launchd_running", lambda _label: True)
+    monkeypatch.setattr(
+        _rtcodex,
+        "pid_is_running",
+        lambda *_args: (True, "pid 222"),
+    )
+    monkeypatch.setattr(
+        _rtcodex,
+        "wake_bridge_build_fingerprint",
+        lambda: "sha256:current",
+    )
+    return runtime, socket_path
+
+
+def test_bridge_repair_waits_for_heartbeat_pid_takeover(tmp_path, monkeypatch):
+    runtime, socket_path = _prepare_bridge_takeover_test(tmp_path, monkeypatch)
+    clock = [0.0]
+    sleeps: list[float] = []
+
+    def fake_sleep(interval: float) -> None:
+        sleeps.append(interval)
+        clock[0] += interval
+        if len(sleeps) == 2:
+            _write_bridge_takeover_fixture(
+                runtime,
+                socket_path,
+                heartbeat_pid=222,
+            )
+
+    monkeypatch.setattr(_rtcodex.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_rtcodex.time, "sleep", fake_sleep)
+
+    _rtcodex._wait_for_wake_bridge_takeover(
+        socket_path,
+        timeout=1.0,
+        poll_interval=0.1,
+    )
+
+    assert sleeps == [0.1, 0.1]
+
+
+def test_bridge_repair_takeover_timeout_reports_observed_pid_and_age(
+    tmp_path,
+    monkeypatch,
+):
+    _runtime, socket_path = _prepare_bridge_takeover_test(tmp_path, monkeypatch)
+    clock = [0.0]
+
+    def fake_sleep(interval: float) -> None:
+        clock[0] += interval
+
+    monkeypatch.setattr(_rtcodex.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(_rtcodex.time, "sleep", fake_sleep)
+
+    with pytest.raises(
+        _rtcodex.CodexRuntimeError,
+        match=r"wake bridge repair failed: bridge heartbeat pid 111 != live pid 222; "
+        r"heartbeat age=\d+\.\d+s",
+    ):
+        _rtcodex._wait_for_wake_bridge_takeover(
+            socket_path,
+            timeout=0.25,
+            poll_interval=0.1,
+        )
+
+
+def test_ready_preflight_does_not_wait_for_bridge_takeover(monkeypatch):
+    outcomes = iter(
+        [
+            status(_rtcodex.SERVICE_READY),
+            status(_rtcodex.SERVICE_READY),
+        ]
+    )
+    monkeypatch.setattr(_rtcodex, "inspect_codex_services", lambda *_a: next(outcomes))
+    monkeypatch.setattr(_rtcodex, "codex_service_repair_lock", unlocked)
+    monkeypatch.setattr(
+        _rtcodex,
+        "_wait_for_wake_bridge_takeover",
+        lambda *_a, **_k: pytest.fail("healthy preflight must not wait for bridge repair"),
+    )
+
+    observed = _rtcodex.codex_launch_preflight()
+
+    assert observed.state == _rtcodex.SERVICE_READY
+
+
 def test_daemon_reload_requires_explicit_approval(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(

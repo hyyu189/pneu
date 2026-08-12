@@ -178,6 +178,8 @@ SERVICE_RELOAD_DEFERRED_BUSY = "reload_deferred_busy"
 SERVICE_UNSUPPORTED = "unsupported"
 SERVICE_UNSAFE = "unsafe"
 SERVICE_SETUP_REQUIRED = "setup_required"
+WAKE_BRIDGE_TAKEOVER_TIMEOUT_SECONDS = 15.0
+WAKE_BRIDGE_TAKEOVER_POLL_SECONDS = 0.2
 
 
 @dataclass(frozen=True)
@@ -1025,8 +1027,21 @@ def wake_bridge_health(
             "wake bridge build fingerprint is stale or invalid: "
             f"reported={rendered} expected={expected_build}",
         )
+    heartbeat_at = _parse_timestamp(heartbeat.get("heartbeatAt"))
+    heartbeat_age = (
+        max(0.0, (datetime.now(timezone.utc) - heartbeat_at).total_seconds())
+        if heartbeat_at is not None
+        else None
+    )
     if heartbeat.get("pid") != pid:
-        return False, f"bridge heartbeat pid {heartbeat.get('pid')} != live pid {pid}"
+        rendered_age = (
+            f"{heartbeat_age:.1f}s" if heartbeat_age is not None else "unknown"
+        )
+        return (
+            False,
+            f"bridge heartbeat pid {heartbeat.get('pid')} != live pid {pid}; "
+            f"heartbeat age={rendered_age}",
+        )
     reported_socket = heartbeat.get("socketPath")
     if not isinstance(reported_socket, str) or not reported_socket:
         return False, "bridge heartbeat socketPath is missing or invalid"
@@ -1037,13 +1052,12 @@ def wake_bridge_health(
         if not isinstance(last_error, str):
             return False, "bridge heartbeat lastError is invalid"
         return False, f"bridge reports error: {last_error}"
-    now = datetime.now(timezone.utc)
-    heartbeat_at = _parse_timestamp(heartbeat.get("heartbeatAt"))
     last_rpc_ok = _parse_timestamp(heartbeat.get("lastRpcOkAt"))
     if heartbeat_at is None:
         return False, "bridge heartbeat timestamp is missing or invalid"
     if last_rpc_ok is None:
         return False, "last successful bridge RPC timestamp is missing or invalid"
+    now = datetime.now(timezone.utc)
     heartbeat_age = max(0.0, (now - heartbeat_at).total_seconds())
     rpc_age = max(0.0, (now - last_rpc_ok).total_seconds())
     if heartbeat_age > max_age:
@@ -1404,18 +1418,32 @@ def _wait_for_daemon(socket_path: Path, timeout: float) -> None:
     raise CodexRuntimeError(f"app-server reload failed: {last_detail}")
 
 
-def _restart_wake_bridge(socket_path: Path, timeout: float) -> None:
-    require_supported_daemon(socket_path)
-    install_launch_agent(WAKE_LABEL, wake_plist(socket_path), reload=True)
-    kickstart(WAKE_LABEL, force=False)
+def _wait_for_wake_bridge_takeover(
+    socket_path: Path,
+    *,
+    timeout: float = WAKE_BRIDGE_TAKEOVER_TIMEOUT_SECONDS,
+    poll_interval: float = WAKE_BRIDGE_TAKEOVER_POLL_SECONDS,
+) -> None:
+    """Wait for the repaired bridge's fresh, PID-matched heartbeat."""
+
     deadline = time.monotonic() + timeout
     last_detail = "wake bridge did not become ready"
-    while time.monotonic() < deadline:
+    while True:
         ok, last_detail = wake_bridge_health(socket_path)
         if ok:
             return
-        time.sleep(0.2)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(poll_interval, remaining))
     raise CodexRuntimeError(f"wake bridge repair failed: {last_detail}")
+
+
+def _restart_wake_bridge(socket_path: Path) -> None:
+    require_supported_daemon(socket_path)
+    install_launch_agent(WAKE_LABEL, wake_plist(socket_path), reload=True)
+    kickstart(WAKE_LABEL, force=False)
+    _wait_for_wake_bridge_takeover(socket_path)
 
 
 def _reload_service_pair(socket_path: Path, timeout: float) -> None:
@@ -1426,7 +1454,7 @@ def _reload_service_pair(socket_path: Path, timeout: float) -> None:
     )
     kickstart(APP_SERVER_LABEL, force=False)
     _wait_for_daemon(socket_path, timeout)
-    _restart_wake_bridge(socket_path, timeout)
+    _restart_wake_bridge(socket_path)
 
 
 def codex_launch_preflight(
@@ -1497,7 +1525,7 @@ def codex_launch_preflight(
                         clear_codex_reload_marker(reload_payload)
                     continue
                 if current.state == SERVICE_BRIDGE_DOWN:
-                    _restart_wake_bridge(socket_path, timeout)
+                    _restart_wake_bridge(socket_path)
                     continue
                 if (
                     current.state == SERVICE_RELOAD_REQUIRED_IDLE

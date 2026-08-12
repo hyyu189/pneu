@@ -149,6 +149,21 @@ The workflow uploads a 14-day candidate artifact and deliberately does not
 publish a GitHub Release. Configuration automation is not a substitute for
 credentialed real-harness E2E.
 
+For the worktree-open journey tier, run the live Herdr lab separately from CI
+and from a source checkout:
+
+```bash
+python scripts/herdr_open_lab.py
+```
+
+The lab starts a uniquely named `pneu-lab-*` Herdr server, creates disposable
+Git projects and a private pneu runtime, then exercises `worktree open` through
+the real Herdr pane backend. Its fake Codex launcher claims and heartbeats the
+isolated seat, so success requires an active lease and a post-activation
+`surface.json`. The lab stops only its named server, verifies the fake seat has
+retired, and deletes its temporary state. It does not use harness credentials
+or connect to the operator's focused Herdr session.
+
 ## Judge journey
 
 The intended five-minute path begins with the archive:

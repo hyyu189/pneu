@@ -97,7 +97,7 @@ only creates files the repository does not carry.
 | `rt-projects migrate ROOT` | Exclusively copy a local mailbox through a verified archive and durable recovery record into the central UUID store. |
 | `rt-projects rollback ROOT --manifest PATH` | Copy current central mail back to local; requires the exact active forward recovery record and preserves post-cutover mail. |
 | `pneu worktree add NAME [options]` | Create a Git sibling worktree, bootstrap its pneu registry identity, and print its `codex@NAME` launch route. |
-| `pneu worktree open NAME [--seat AGENT] [--surface SURFACE]` | Open one configured seat in a registered sibling using explicit, Herdr, tmux, or print-fallback surface selection. |
+| `pneu worktree open NAME [--seat AGENT] [--surface SURFACE] [--no-wait]` | Open one configured seat in a registered sibling using explicit, Herdr, tmux, or print-fallback surface selection. |
 | `pneu worktree list` | List registered siblings in the current Git-derived group with branch, UUID, and seat status. |
 | `pneu worktree remove NAME [--keep-branch]` | Refuse active/ambiguous seats, unbind Codex, tombstone the registry row, remove the worktree, and delete only a merged branch. |
 | `pneu rc-host enable\|disable\|status` | Expert project-only Claude mobile/web worktree-spawn host; requires accepted workspace trust. |
@@ -144,8 +144,12 @@ default; otherwise pass `--seat`. `--surface` wins over `RT_SURFACE`, followed
 by exact `HERDR_ENV=1`, tmux in the current server or a default server with an
 attached client, and finally a printed `cd ... && <absolute launcher>` command.
 Herdr and tmux command failures are hard errors. Their successful launches
-record advisory surface metadata beside the host-local seat runtime, but that
-record is never a lease or liveness fact.
+become `worktree opened` only after the selected fenced lease is active; only
+then is advisory surface metadata recorded beside the host-local runtime. A
+timeout reports the surface, exact command, and last seat state without a new
+record. `--no-wait` is an explicit spawn-only opt-out that claims neither
+activation success nor a surface record. The record is never itself a lease or
+liveness fact.
 
 `pneu worktree remove <name>` resolves exactly one active sibling in the
 same group. It refuses active, unhealthy-but-owned, or ambiguous seat state,

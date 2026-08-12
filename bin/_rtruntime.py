@@ -1294,12 +1294,15 @@ def record_seat_surface(
     agent_id: str,
     harness: str,
     surface: dict[str, str],
+    *,
+    session_id: Any,
+    revision: Any,
 ) -> Path:
     """Record one advisory terminal location beside a seat's fenced state.
 
-    Surface placement is not ownership or liveness evidence. The caller records
-    it only after a terminal backend accepts the launch command; the harness
-    launcher remains responsible for claiming the actual seat lease.
+    Surface placement is not ownership or liveness evidence. The worktree-open
+    caller records it only after the terminal backend accepts the command and
+    the harness launcher has claimed an active seat lease.
     """
 
     canonical = canonical_project(project)
@@ -1336,6 +1339,17 @@ def record_seat_surface(
     with _locked(paths.claim_lock):
         _write_project_meta(paths, canonical)
         with _locked(paths.state_lock):
+            lease = _load_fenced_record(
+                paths,
+                canonical,
+                agent_id,
+                session_id,
+                revision,
+            )
+            if lease.get("harness") != selected_harness:
+                raise FenceRejected(
+                    f"seat harness changed for {agent_id!r} in {canonical}"
+                )
             payload = {
                 "schema": SEAT_SURFACE_SCHEMA,
                 "projectRoot": str(canonical),
