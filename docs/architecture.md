@@ -10,7 +10,7 @@ core.
 | Layer | Responsibility | Required for delivery |
 | --- | --- | --- |
 | Product core | Project config and identity, atomic maildir delivery, ledger, inbox, acknowledgement, and drain state | Yes |
-| Harness adapters | Codex app-server wake; Claude lifecycle hooks and optional project rc-host; Hermes lifecycle plugin; isolated Grok ACP supervisor; isolated OpenClaw Gateway supervisor | Only for automatic wake or phone spawn; offline delivery still succeeds |
+| Harness adapters | Codex app-server wake; Claude lifecycle hooks and optional project rc-host; Hermes lifecycle plugin; native Grok TUI monitor; isolated OpenClaw Gateway supervisor; internal Grok ACP lab | Only for automatic wake or phone spawn; offline delivery still succeeds |
 | Terminal integrations | Optional workspace topology, surface diagnostics, project navigation, and notifications | No |
 
 The data path is:
@@ -293,16 +293,15 @@ plugin keeps polling so a late acknowledgement still re-arms automatically.
 A later session reset re-arms after session-scoped failures, while fence
 supersession and invalid installations stay closed for the process.
 
-Grok Build uses a separate stdlib ACP supervisor rather than hooks or a shared
-leader. The launcher claims the logical `grok` seat first, then the wake bridge
-starts one `grok agent --no-leader stdio` child with a bounded `HOME`,
-`GROK_HOME`, XDG, temporary, log, registry, and project environment. The child
-receives only the current lease identity and an existing API credential; the
-adapter never copies or refreshes host auth state. ACP permission requests are
-default-deny and admit only the exact fenced pneu inbox and acknowledgement
-commands. A prompt is successful only after the exact filename generation has
-left `new/`; the adapter retains the generation on timeout, auth failure, or
-child death and may create one newly authenticated child for recovery.
+Grok Build is TUI-first. The launcher claims the logical `grok` seat and execs
+the user's native interactive TUI with the fenced environment and project cwd,
+without an isolated HOME. A pinned first turn creates one session-scoped
+persistent `monitor` over the authoritative mailbox `new/`; monitor events run
+the absolute fenced inbox/ack forms inside Grok's own approval UX. Explicit
+native arguments and the emergency opt-out skip that turn and print a re-arm
+advisory. Resume requires re-arming because the monitor dies with the session.
+The former stdlib ACP supervisor remains directly invocable as an internal lab
+surface, but it is never a user-facing seat or an automatic launcher target.
 
 Heartbeat reports adapter health; it is not by itself permission to steal a
 seat. On the same host, owner PID plus a process-start fingerprint protects
@@ -371,9 +370,9 @@ is claimed; neither should fork the core transport.
 The release candidate now implements the host-local fenced lease, unified
 launcher selector, no-Git project initialization, dry-run-first harness setup,
 owned global skill links, Claude lifecycle hooks, the Hermes lifecycle plugin,
-the isolated Grok ACP supervisor, Codex SessionStart auto-bind, and owned
-Codex service definitions. Automated tests exercise those config changes and
-their symmetric removal from an installed release artifact.
+the native Grok TUI monitor primer and internal ACP lab, Codex SessionStart
+auto-bind, and owned Codex service definitions. Automated tests exercise those
+config changes and their symmetric removal from an installed release artifact.
 
 Codex setup writes but does not load service definitions. The unified launcher
 then performs a fail-closed preflight: cold services and a stopped wake bridge
@@ -391,8 +390,8 @@ The remaining P0 promotion work is:
    end-to-end gates before claiming support;
 3. pass real clean-account Claude and Hermes skill discovery, lifecycle, and
    wake acceptance;
-4. complete the Grok clean-account/terminal-matrix and approved
-   token-lifecycle promotion gates;
+4. complete the Grok credentialed native-TUI wake, resume re-arm, and
+   clean-account/terminal-matrix promotion gates;
 5. repeat the same harness acceptance in Terminal.app, iTerm2, Ghostty, and
    cmux;
 6. test cmux topology, navigation, and notifications separately as optional

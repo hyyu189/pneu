@@ -24,13 +24,13 @@ TEMPLATE_VARIABLE_RE = re.compile(r"\$\{([A-Za-z0-9_]+)\}")
 LAUNCHER_STATE_SCHEMA = "roundtable.launcher-state.v1"
 
 FILES = {
-    # Per-harness entrypoints — thin (role + always-load). Each harness only auto-reads its OWN
-    # file: Claude/Hermes don't natively read AGENTS.md (that's Codex's), and Claude bridges to
-    # shared context via @-import — so each gets a dedicated entrypoint, not one shared AGENTS.md.
+    # Per-harness entrypoints. Each harness only auto-reads its own file, so
+    # each gets a dedicated entrypoint rather than sharing AGENTS.md.
     "AGENTS.md": "AGENTS.md.tmpl",   # Codex
     "CLAUDE.md": "CLAUDE.md.tmpl",   # Claude (@-imports ROUTING.md + README.md)
     "HERMES.md": "HERMES.md.tmpl",   # Hermes
-    # Shared always-loaded routing hub: the single load_if manifest for all three.
+    "GROK.md": "GROK.md.tmpl",       # Grok Build
+    # Shared always-loaded routing hub: one load_if manifest for every seat.
     "ROUTING.md": "ROUTING.md.tmpl",
     "README.md": "README.md.tmpl",
     "BRIEF.md": "BRIEF.md.tmpl",
@@ -57,6 +57,14 @@ MARKER_BLOCKS = {
         "<!-- BEGIN Roundtable -->\n"
         "For pneu work, always read `ROUTING.md` and `README.md`. "
         "Use the `pneu` skill for peer-agent messaging.\n"
+        "<!-- END Roundtable -->\n"
+    ),
+    "GROK.md": (
+        "<!-- BEGIN Roundtable -->\n"
+        "For pneu work, always read `ROUTING.md` and `README.md`. "
+        "Use the `pneu` skill for peer-agent messaging. After a resumed "
+        "Grok session, re-arm one persistent mailbox monitor before relying "
+        "on automatic wake.\n"
         "<!-- END Roundtable -->\n"
     ),
     "ROUTING.md": (

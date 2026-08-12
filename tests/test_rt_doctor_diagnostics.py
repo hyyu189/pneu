@@ -97,6 +97,132 @@ agents:
     return project
 
 
+def _registered_grok_project(path: Path, registry: Path) -> Path:
+    project = _registered_project(path, registry)
+    (project / ".roundtable" / "agents.yaml").write_text(
+        """schema: roundtable.agents.v1
+project: "."
+agents:
+  grok:
+    harness: grok-build
+    instances:
+      - id: grok
+"""
+    )
+    return project
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected_level", "expected_state"),
+    [
+        ("present", "OK", "present"),
+        ("absent", "WARN", "absent"),
+        ("unreadable", "WARN", "unreadable"),
+    ],
+)
+def test_grok_monitor_advisory_uses_bounded_session_fixtures(
+    tmp_path,
+    capsys,
+    fixture,
+    expected_level,
+    expected_state,
+):
+    registry = tmp_path / "registry" / "projects.yaml"
+    project = _registered_grok_project(tmp_path / "grok-project", registry)
+    mailbox = _rtlib.resolve_project_mailbox(project, registry)
+    expected_maildir = mailbox.inbox_dir / "grok" / "new"
+    sessions = tmp_path / "fixture-home" / ".grok" / "sessions"
+    session = sessions / "session-1"
+    session.mkdir(parents=True)
+    evidence = session / "updates.jsonl"
+    if fixture == "present":
+        evidence.write_text(
+            json.dumps(
+                {
+                    "hookEventName": "Stop",
+                    "backgroundTasks": [
+                        {
+                            "tool": "monitor",
+                            "persistent": True,
+                            "watch": str(expected_maildir),
+                        }
+                    ],
+                }
+            )
+            + "\n"
+        )
+    elif fixture == "absent":
+        evidence.write_text(
+            json.dumps({"hookEventName": "Stop", "backgroundTasks": []}) + "\n"
+        )
+    else:
+        evidence.write_bytes(b"\xffnot-utf8")
+    report = doctor.Report()
+    inspections = {
+        (str(project), "grok"): {
+            "status": "active_healthy",
+            "record": {"agentId": "grok", "harness": "grok"},
+        }
+    }
+
+    doctor.report_grok_monitor_liveness(
+        report,
+        {str(project): project},
+        inspections,
+        registry,
+        sessions,
+    )
+
+    output = capsys.readouterr().out
+    assert f"{expected_level} grok-monitor:" in output
+    assert f"evidence={expected_state}" in output
+    assert str(project) in output
+    if fixture == "present":
+        assert "report-only; session evidence is not a lease" in output
+    else:
+        assert "re-arm its persistent pneu mailbox monitor" in output
+        assert "resume always requires one re-arm turn" in output
+    assert not report.failed
+
+
+def test_native_grok_owner_health_defers_only_monitor_health_to_advisory(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    project = tmp_path / "grok-project"
+    project.mkdir()
+    monkeypatch.setattr(
+        doctor,
+        "configured_instances",
+        lambda _project: [("grok", "grok-build")],
+    )
+    monkeypatch.setattr(
+        doctor,
+        "inspect_seat",
+        lambda *_args: {
+            "status": "active_unhealthy",
+            "detail": "owner pid 123 is live; wake adapter has no heartbeat",
+            "record": {"agentId": "grok", "harness": "grok"},
+        },
+    )
+    report = doctor.Report()
+
+    inspections, codex_instances = doctor.inspect_project_seats(
+        report,
+        {str(project): project},
+    )
+
+    output = capsys.readouterr().out
+    assert "OK seat:" in output
+    assert "status=active_owner" in output
+    assert "monitor-health=reported-separately" in output
+    assert "restart the wake adapter" not in output
+    assert (str(project), "grok") in inspections
+    assert codex_instances == {str(project): set()}
+    assert not report.failed
+
+
 def test_legacy_marker_scan_reports_busy_project_and_continues(
     tmp_path,
     capsys,

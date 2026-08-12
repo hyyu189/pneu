@@ -48,6 +48,10 @@ def test_new_project_defaults_to_no_git(tmp_path):
     assert (project / ".roundtable" / "agents.yaml").is_file()
     assert (project / ".claude" / "skills").is_symlink()
     assert os.readlink(project / ".claude" / "skills") == "../skills"
+    grok = (project / "GROK.md").read_text()
+    assert 'role:  # optional — e.g. "implementation and tests" — assign per project' in grok
+    assert "rt-inbox --fenced --archive-quiet-acks -f json" in grok
+    assert "After resuming a session" in grok
     assert not (project / ".git").exists()
     assert "git: not initialized (use --git to opt in)" in result.stdout
 
@@ -156,6 +160,24 @@ def test_here_preserves_user_files_and_marked_appends_are_idempotent(tmp_path):
         assert content == snapshots[rel]
         assert content.count("BEGIN Roundtable") == 1
         assert content.count("END Roundtable") == 1
+
+
+def test_here_preserves_user_grok_orientation_and_adds_rearm_contract_once(tmp_path):
+    project = tmp_path / "existing-grok-project"
+    project.mkdir()
+    original = "# My Grok rules\n\nKeep this first.\n"
+    (project / "GROK.md").write_text(original)
+
+    first = run_init(tmp_path, "--here", cwd=project)
+    snapshot = (project / "GROK.md").read_text()
+    second = run_init(tmp_path, "--here", cwd=project)
+
+    assert first.returncode == 0, first.stderr
+    assert second.returncode == 0, second.stderr
+    assert snapshot.startswith(original)
+    assert (project / "GROK.md").read_text() == snapshot
+    assert snapshot.count("BEGIN Roundtable") == 1
+    assert "re-arm one persistent mailbox monitor" in snapshot
 
 
 def test_here_writes_a_portable_project_reference_for_yaml_sensitive_path(tmp_path):

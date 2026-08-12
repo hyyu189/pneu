@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch a fenced Grok ACP Roundtable seat."""
+"""Launch a fenced native Grok TUI pneu seat."""
 
 from __future__ import annotations
 

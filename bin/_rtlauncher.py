@@ -40,7 +40,8 @@ COMMANDS = {
     # OpenClaw is launched through rt-openclaw-wake, not attached to a
     # pre-existing native Gateway service.
     "openclaw": ["openclaw"],
-    # Grok is launched through rt-grok-wake, not attached to a shared leader.
+    # Grok is the vendor's native interactive TUI. Its mailbox monitor is
+    # armed by the launcher-primed first turn below.
     "grok": ["grok"],
 }
 HARNESS_LABELS = {
@@ -493,6 +494,46 @@ def preflight_hermes_credentials(argv: list[str]) -> None:
     )
 
 
+def grok_credential_paths(
+    environment: dict[str, str] | None = None,
+) -> tuple[Path, ...]:
+    """Return credential locations used by the native Grok TUI preflight.
+
+    This is deliberately a presence-only boundary. The launcher never parses,
+    copies, refreshes, or logs credential contents; Grok remains responsible
+    for validating and refreshing its own authentication state.
+    """
+
+    environment = os.environ if environment is None else environment
+    configured = environment.get("GROK_AUTH_PATH", "").strip()
+    if configured:
+        return (Path(configured).expanduser().absolute(),)
+    home_value = environment.get("HOME", "").strip()
+    home = Path(home_value).expanduser() if home_value else Path.home()
+    return ((home / ".grok" / "auth.json").absolute(),)
+
+
+def preflight_grok_credentials(
+    environment: dict[str, str] | None = None,
+) -> None:
+    """Refuse a Grok seat with no visible native credential source."""
+
+    environment = os.environ if environment is None else environment
+    if environment.get("XAI_API_KEY", "").strip():
+        return
+    candidates = grok_credential_paths(environment)
+    for candidate in candidates:
+        if candidate.is_file():
+            return
+    rendered = ", ".join(str(path) for path in candidates)
+    raise SelectionError(
+        "rt-grok: Grok credentials are missing "
+        f"(checked {rendered}). Run native `grok` once outside pneu to complete "
+        "login, then relaunch the seat. This preflight checks presence only; "
+        "a present-but-stale credential can still fail inside Grok itself."
+    )
+
+
 def configured_sender_ids(root: Path, harness: str) -> list[str]:
     document = load_agents_doc(root, f"rt-{harness}")
     if not isinstance(document, dict):
@@ -662,18 +703,6 @@ def openclaw_adapter_bin() -> Path:
     )
 
 
-def grok_adapter_bin() -> Path:
-    """Resolve the managed Grok ACP wake bridge beside this launcher."""
-
-    candidate = Path(__file__).resolve().parent / "rt-grok-wake"
-    if candidate.is_file() and os.access(candidate, os.X_OK):
-        return candidate
-    raise SelectionError(
-        "rt-grok: managed rt-grok-wake is unavailable; reinstall Roundtable "
-        "or use the source-tree launcher"
-    )
-
-
 def codex_seat_overrides() -> list[str]:
     arguments = []
     for name in CODEX_TOOL_ENV_NAMES:
@@ -703,6 +732,17 @@ def append_codex_seat_overrides(argv: list[str]) -> list[str]:
 CODEX_SEAT_PRIMER = (
     "[roundtable] Seat activation turn. Do not call tools, inspect files, "
     "or modify the workspace. Reply exactly: ready."
+)
+
+GROK_SEAT_PRIMER_TEMPLATE = (
+    "[pneu] Grok seat activation turn. Use only the `monitor` tool to create "
+    "exactly one background task with `persistent: true` watching the absolute "
+    "directory {maildir}. For every event, start a turn that runs "
+    "`{inbox} --fenced --archive-quiet-acks -f json`, acts on every non-ack "
+    "message, then runs `{ack} --fenced <id>[,<id>...]` exactly once for the "
+    "handled IDs. On this activation turn, do not inspect files, modify the "
+    "workspace, or use any other tool. After creating the monitor, reply "
+    "exactly: ready."
 )
 
 
@@ -748,6 +788,66 @@ def print_codex_primer_skip_advisory(argv: list[str]) -> None:
         "rt-codex: IMPORTANT: Codex activation primer skipped because "
         f"{reason}. This seat will not arm or bind until its first turn; "
         "interact with it once (or resume it) to arm.",
+        file=sys.stderr,
+    )
+
+
+def grok_primer_skip_reason(argv: list[str]) -> str | None:
+    if argv:
+        return "native arguments were supplied"
+    if os.environ.get("RT_GROK_NO_PRIMER") == "1":
+        return "RT_GROK_NO_PRIMER=1"
+    return None
+
+
+def _managed_rt_tool(name: str) -> Path:
+    candidate = Path(__file__).resolve().parent / name
+    if candidate.is_file() and os.access(candidate, os.X_OK):
+        return candidate
+    raise SelectionError(
+        f"rt-grok: managed {name} is unavailable; reinstall pneu before "
+        "launching this seat"
+    )
+
+
+def grok_seat_maildir(root: Path, agent_id: str) -> Path:
+    """Resolve the authoritative absolute ``new/`` path for one Grok seat."""
+
+    try:
+        mailbox = resolve_project_mailbox_checked(root)
+    except ProjectRegistryError as error:
+        raise SelectionError(
+            f"rt-grok: cannot resolve the mailbox monitor target for {root}: {error}"
+        ) from error
+    return (mailbox.inbox_dir / agent_id / "new").absolute()
+
+
+def grok_seat_primer_args(
+    root: Path,
+    agent_id: str,
+    argv: list[str],
+) -> list[str]:
+    """Return the pinned monitor-arming first turn for a bare Grok launch."""
+
+    if grok_primer_skip_reason(argv) is not None:
+        return []
+    prompt = GROK_SEAT_PRIMER_TEMPLATE.format(
+        maildir=grok_seat_maildir(root, agent_id),
+        inbox=_managed_rt_tool("rt-inbox"),
+        ack=_managed_rt_tool("rt-ack"),
+    )
+    return [prompt]
+
+
+def print_grok_primer_skip_advisory(argv: list[str]) -> None:
+    reason = grok_primer_skip_reason(argv)
+    if reason is None:
+        return
+    print(
+        "rt-grok: IMPORTANT: Grok monitor activation primer skipped because "
+        f"{reason}. This seat will not auto-wake until one turn creates its "
+        "persistent pneu mailbox monitor; re-arm it once after Grok opens (and "
+        "after every resume), or relaunch without native arguments.",
         file=sys.stderr,
     )
 
@@ -1101,9 +1201,11 @@ def choose_launch_cwd(
     if unanchored_index is not None:
         print(f"  {unanchored_index}) Start without a project anchor", file=stderr)
     else:
+        label = HARNESS_LABELS[harness]
+        native_command = COMMANDS[harness][0]
         print(
-            "  Roundtable Codex requires a project anchor; use native `codex` "
-            "for an unanchored session.",
+            f"  Roundtable {label} requires a project anchor; use native "
+            f"`{native_command}` for an unanchored session.",
             file=stderr,
         )
 
@@ -1221,7 +1323,7 @@ def launch(harness: str, argv: list[str]) -> int:
             )
         if harness == "grok":
             raise SelectionError(
-                "rt-grok: Roundtable Grok requires a project anchor so its ACP "
+                "rt-grok: Roundtable Grok requires a project anchor so its TUI "
                 "lease and durable mailbox are safe; choose or initialize a "
                 "project, or run native `grok` directly"
             )
@@ -1233,6 +1335,18 @@ def launch(harness: str, argv: list[str]) -> int:
         # Authentication recovery requires a browser login outside the Hermes
         # TUI, so refuse before a Roundtable seat lease can be stranded.
         preflight_hermes_credentials(argv)
+    grok_argv = argv
+    if harness == "grok" and root is not None:
+        # Authentication stays entirely native. Refuse before claiming a seat
+        # when no credential source is present, and prepare the monitor prompt
+        # before the claim so a path-resolution failure cannot strand a lease.
+        if not agent_id:
+            raise SelectionError(
+                f"rt-grok: no configured grok instance in {root}; add one to "
+                ".roundtable/agents.yaml or set RT_FROM"
+            )
+        preflight_grok_credentials()
+        grok_argv = [*argv, *grok_seat_primer_args(root, agent_id, argv)]
     codex_argv = (
         anchor_codex_project(root, argv)
         if harness == "codex" and root is not None
@@ -1282,15 +1396,6 @@ def launch(harness: str, argv: list[str]) -> int:
         command = [str(adapter), "--gateway-bin", str(executable), *argv]
         os.execv(command[0], command)
         return 127
-    if harness == "grok":
-        # Transfer the already-claimed lease to the managed ACP adapter in
-        # this same PID. The native Grok CLI is never allowed to discover or
-        # attach to the user's personal state or a shared leader.
-        os.environ["RT_GROK_BIN"] = str(executable)
-        adapter = grok_adapter_bin()
-        command = [str(adapter), "--grok-bin", str(executable), *argv]
-        os.execv(command[0], command)
-        return 127
     command = [*COMMANDS[harness]]
     if harness == "claude" and root is not None and not argv:
         # A bare Claude launch may open the user's FleetView/Remote Control
@@ -1309,6 +1414,9 @@ def launch(harness: str, argv: list[str]) -> int:
     elif harness == "claude":
         command.extend(argv)
         command.extend(claude_remote_control_args(root, agent_id, argv))
+    elif harness == "grok":
+        print_grok_primer_skip_advisory(argv)
+        command.extend(grok_argv)
     else:
         command.extend(argv)
     command[0] = str(executable)

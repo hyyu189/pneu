@@ -1,10 +1,10 @@
-"""Grok ACP wake adapter for a fenced Roundtable seat.
+"""Internal Grok ACP mail-drain lab for a fenced pneu seat.
 
-The adapter owns the wake path only.  Roundtable's authoritative maildir stays
-the source of truth; the Grok child reads the mailbox and acknowledges work
-through the normal ``rt-*`` commands.  This module supervises one isolated ACP
-stdio child, keeps one authenticated session for repeated wakes, and fails
-closed on lease, authentication, permission, and protocol ambiguity.
+The user-facing ``rt-grok`` seat is the native interactive Grok TUI. This
+module remains directly invocable for isolated ACP regression labs only; it is
+never selected by the seat launcher. pneu's authoritative maildir stays the
+source of truth, and this supervisor continues to fail closed on lease,
+authentication, permission, and protocol ambiguity.
 """
 
 from __future__ import annotations
@@ -866,7 +866,13 @@ def _load_adapter_from_environment(args: argparse.Namespace) -> GrokAdapter:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="rt-grok-wake")
+    parser = argparse.ArgumentParser(
+        prog="rt-grok-wake",
+        description=(
+            "INTERNAL LAB TOOL: run the isolated Grok ACP mail-drain "
+            "supervisor. Normal Grok seats use the native TUI via rt-grok."
+        ),
+    )
     parser.add_argument("--grok-bin")
     parser.add_argument("--runtime-root")
     parser.add_argument("--once", action="store_true")

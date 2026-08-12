@@ -230,6 +230,10 @@ def test_wheel_contains_commands_helpers_templates_and_uninstaller(built_wheel):
         for name in names
     )
     assert any(
+        name.endswith(".data/data/share/pneu/templates/GROK.md.tmpl")
+        for name in names
+    )
+    assert any(
         name.endswith(
             ".data/data/share/pneu/integrations/hermes/"
             "pneu/plugin.yaml"

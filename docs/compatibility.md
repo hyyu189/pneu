@@ -16,7 +16,7 @@ real vendor session can wake.
 | Hermes | Global skill link; packaged lifecycle plugin; marked plugin enablement; plan/apply/status/remove tests; two sequential RC7 development-host wake generations | RC8 artifact and clean-account plugin/wake repeat |
 | Codex | Shared executable resolver; global skill link; owned SessionStart auto-bind hook; owned app-server and wake plist generation; fail-closed service preflight tests; development-host cutover and thread/lease identity spike | Clean-account repeat and real send-to-wake-to-drain/ack |
 | OpenClaw | Isolated Gateway adapter; fenced lease and identity checks; project-scoped state and loopback Gateway protocol tests | Clean-account/terminal-matrix repeat before public support promotion |
-| Grok Build `0.2.118` | Isolated stdlib ACP supervisor; fenced lease and identity checks; bounded HOME/XDG/GROK_HOME/TMP/log state; audit-logged full-permission wake policy (mailroom-only via `RT_GROK_WAKE_MAILROOM_ONLY=1`); child-death recovery; focused fault, mutation, soak, three-seat interop, refreshed-credential two-generation E2E, and extracted release-artifact smoke | Work-seat (write-action) wake E2E under the full-permission policy, clean-account/terminal-matrix repeat, and an explicit vendor-supported token-refresh/preflight contract before public support promotion |
+| Grok Build `1.0.0` (inspected) | Native TUI launcher with a fenced seat environment, read-only credential-presence preflight, pinned monitor-arming first turn, explicit-argument/`RT_GROK_NO_PRIMER` opt-outs, neutral `GROK.md`, and fixture-driven doctor advisory; isolated ACP supervisor retained only for labs | Credentialed live native-TUI send-to-monitor-wake-to-drain/ack, resume re-arm, and clean-account/terminal-matrix repeats before any public support claim |
 
 The Codex plist files are written but not loaded by setup. This is an
 intentional safety boundary, not evidence that the daemon is running.
@@ -28,47 +28,41 @@ The normal `pneu` launcher owns the next step: it performs a targeted
 Codex service preflight and starts or repairs only states proven safe. Users do
 not normally run the two low-level service reload commands themselves.
 
-## Grok ACP adapter
+## Grok native TUI seat
 
-The Grok path is a project-anchored, stdlib-only wake adapter. `rt-grok` claims
-the `grok` seat and transfers the fenced identity to `rt-grok-wake`, which
-supervises one `grok agent --no-leader stdio` child. It does not install hooks,
-plugins, LaunchAgents, a shared leader, or a daemon, and it does not replace
-the durable maildir as the delivery fact source.
+`rt-grok` resolves the real vendor executable, checks only that an existing
+credential source is present, claims the fenced project seat, changes to the
+project root, and execs the native interactive `grok` TUI. The seat receives
+the normal `RT_FROM`, project, session, lease-revision, and runtime environment.
+pneu does not replace `HOME`, `GROK_HOME`, XDG, temporary, or log state for the
+TUI, and it never parses, refreshes, copies, or logs credentials during the
+launcher preflight.
 
-The child environment is bounded to an adapter-owned root for `HOME`,
-`GROK_HOME`, XDG directories, `TMPDIR`, logs, and temporary state. It receives
-only the selected executable, project/registry paths, lease identity, and an
-existing credential supplied through the runtime boundary. The adapter refuses
-missing or ambiguous identity and stale lease revisions. Since the 2026-08-11
-owner decision the communication layer is not a permission gate: the ACP
-supervisor approves wake-turn permission requests by default and records every
-decision in the audit trail, so execution policy belongs to the harness side.
-Setting `RT_GROK_WAKE_MAILROOM_ONLY=1` restores the earlier fenced policy that
-rejects shell operators and any command outside the exact `rt-inbox`/`rt-ack`
-forms. The adapter reports a successful generation only after the triggered
-filenames leave `new/`; a timeout or failed child leaves mail durable for
-manual recovery. All recorded fault/mutation/soak/interop evidence predates
-the policy default change; a work-seat wake performing a real write action
-under the default policy has not yet been exercised end to end, so the
-adapter's verified surface remains the mail-drain loop.
+A bare launch supplies one pinned positional activation prompt. That turn may
+use only Grok's `monitor` tool to create exactly one background task with
+`persistent: true` watching the seat's authoritative absolute maildir `new/`
+path. Each event starts a turn that uses the package-managed absolute
+`rt-inbox --fenced --archive-quiet-acks -f json` and `rt-ack --fenced` forms.
+Work happens in the interactive TUI under Grok's own approval UX; pneu does not
+answer permission requests for the seat. Explicit native arguments pass
+through unchanged and skip the primer, as does `RT_GROK_NO_PRIMER=1`, with a
+prominent re-arm advisory. The monitor dies with its native session, so every
+resume also requires one re-arm turn before automatic wake can be trusted.
 
-Focused product tests cover process-down and killed-turn recovery, auth and
-permission failures, bounded hung prompts, fence mutations, duplicate-safe
-generation handling, 25 wake cycles with resource bounds, and three-seat
-Grok/Claude/Codex mail interop. The first 2026-08-06 product-adapter attempt
-correctly failed closed on an expired host OAuth credential with ACP 403
-`unauthenticated:bad-credentials`. After an external Grok TUI refresh, a
-read-only rerun passed two mail-to-wake-to-drain-to-ack generations with the
-ACP child killed and restarted between them; the final `new/` was empty and
-the auth file was unchanged during the lab.
+`rt-doctor` reads bounded fixture-equivalent evidence from Grok session records
+and reports whether an active seat appears to have the expected persistent
+monitor. This is a report-only advisory over an undocumented observation
+surface, never a lease, routing fact, or support claim. Missing or unreadable
+evidence produces a warning with the one-turn re-arm remedy.
 
-The lifecycle boundary is deliberate: the adapter reads the current OIDC auth
-file key at each child start/restart and supplies it as `XAI_API_KEY`, but does
-not refresh tokens or depend on a manually launched TUI. Expired credentials
-remain a durable-mail/manual-recovery condition until an approved
-vendor-supported refresh/preflight contract exists. Grok is therefore
-credentialed-development-host verified but not yet promoted as public support.
+`rt-grok-wake` and `integrations/grok/roundtable` remain packaged and directly
+invocable only as internal ACP mail-drain lab machinery. They retain their
+isolated HOME/XDG/GROK_HOME/TMP/log boundary, fenced identity checks, permission
+policy experiments, and prior fault/mutation/soak evidence, but `rt-grok` never
+selects them. Their earlier credentialed two-generation E2E is lab evidence,
+not evidence for the native TUI seat. Grok remains unpromoted until Ocean runs
+the credentialed live TUI wake acceptance and the clean-account/terminal
+matrix passes.
 
 ## Codex executable selection
 

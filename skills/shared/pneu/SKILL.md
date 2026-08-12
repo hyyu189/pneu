@@ -8,7 +8,7 @@ description: >-
   rt-resolve; write or deliver a handoff; coordinate sibling-worktree seats or
   seat leases; or debug wake or delivery behavior. Do not use merely because a
   repo contains .roundtable/agents.yaml.
-version: 8.4.0
+version: 8.5.0
 author: pneu contributors
 license: MIT
 platforms: [macos]
@@ -16,7 +16,7 @@ platforms: [macos]
 
 # pneu
 
-Collocated agents (Hermes, Claude, Codex) collaborate per project and talk
+Collocated agents (Hermes, Claude, Codex, Grok) collaborate per project and talk
 through the `rt-*` CLI tools. Messages are **files in the project's mailbox**;
 wakes are harness-native. Nothing touches a keyboard.
 
@@ -26,7 +26,7 @@ identity mechanism keys off that canonical project path. For a human, prefer
 the unified `pneu` entry: it chooses or safely creates the project first,
 then selects a configured harness seat. `roundtable` remains a silent
 compatibility alias. The scriptable `rt-claude`,
-`rt-hermes`, and `rt-codex` launchers remain available. A project with no open
+`rt-hermes`, `rt-codex`, and `rt-grok` launchers remain available. A project with no open
 session for an agent means that agent is **offline** there; mail waits durably
 in `new/`.
 
@@ -90,7 +90,7 @@ only creates files the repository does not carry.
 | `pneu` (`roundtable` alias) | Recommended project-first onboarding, harness selection, and launch. |
 | `roundtable-setup [plan\|apply\|status\|remove]` | Own host-level harness onboarding; the default is a no-write plan. |
 | `roundtable-init --here` / `roundtable-init NAME` | Adopt the current directory or create and register a project; add `--git` only when wanted. |
-| `rt-claude` / `rt-hermes` / `rt-codex` | Claim a fenced project seat and launch the real harness executable. |
+| `rt-claude` / `rt-hermes` / `rt-codex` / `rt-grok` | Claim a fenced project seat and launch the real interactive harness executable. |
 | `rt-say [--expect-reply DURATION] <agent>[@<project>] <kind> "body"` | Write the message into this project or one exact registered sibling worktree (atomic maildir); optionally arm one sender-side reply alarm. |
 | `rt-ack <id>[,<id>...] ["note"]` | Acknowledge and archive received message(s). Comma-batches. The sender gets a quiet `ack-*` file. |
 | `rt-inbox` | List un-ack'd inbound messages. |
@@ -190,12 +190,13 @@ ownership, persists the fence into Claude's environment file, and treats
 resume/compact repeats for the same native session as idempotent. Direct or
 phone sessions outside registered projects stay entirely native.
 
-Launch dedicated sessions with `rt-codex`, `rt-claude`, or `rt-hermes`. When
+Launch dedicated sessions with `rt-codex`, `rt-claude`, `rt-hermes`, or
+`rt-grok`. When
 called outside a project on a TTY they offer registered projects, project
-creation, or (for Claude/Hermes) an explicit unanchored launch. pneu
-Codex requires a project anchor; native `codex` remains available for sessions
-that do not need pneu messaging. Non-TTY unanchored calls exit 2. All
-three launchers select a real harness executable instead of a generated cmux
+creation, or (for Claude/Hermes) an explicit unanchored launch. pneu Codex and
+Grok require a project anchor; native `codex` or `grok` remains available for
+sessions that do not need pneu messaging. Non-TTY unanchored calls exit 2. All
+four launchers select a real harness executable instead of a generated cmux
 PATH shim and export the unique configured `RT_FROM` identity. A
 multi-instance project must set `RT_FROM` explicitly. Launching one seat from
 inside another seat's shell is safe: the launcher discards the inherited seat
@@ -296,6 +297,22 @@ Hermes session start and injects a user-visible pneu notice when mail
 lands. It is inert outside a complete pneu launcher lease and shuts down
 its watcher with the Hermes session.
 
+**Arming (Grok)** — launch through project-anchored `pneu grok` (or
+`rt-grok`). The launcher resolves the native interactive TUI, performs a
+read-only credential-presence preflight, claims the fenced seat, and execs
+Grok in the project root without replacing the user's HOME or Grok state. A
+bare launch supplies one pinned visible activation turn that may use only the
+`monitor` tool to create exactly one background task with `persistent: true`
+watching the seat's absolute authoritative maildir `new/`. Each event starts a
+turn that uses the package-managed absolute
+`rt-inbox --fenced --archive-quiet-acks -f json` and `rt-ack --fenced` forms,
+then acts and acknowledges under Grok's native approval UX. Explicit native
+arguments and `RT_GROK_NO_PRIMER=1` skip the primer and print a re-arm
+advisory. The monitor dies with the native session, so resume also requires one
+re-arm turn. `rt-doctor` reports bounded session-record evidence as an
+advisory; it is not a lease or support claim. `rt-grok-wake` is an internal ACP
+lab tool and is never the Grok seat path.
+
 **Arming (Codex)** — launch through project-anchored `pneu codex` (or
 `rt-codex`). The trusted SessionStart hook atomically queues the native thread
 identity; the wake bridge validates its exact project cwd and fenced launcher
@@ -310,10 +327,11 @@ seat to arm or bind. Manual
 `rt-codex-wake bind <project-root>` is a diagnostic fallback only. An unbound
 session has no waker, but its mail still waits durably like any offline agent's.
 
-`rt-wait-inbox` remains an implementation and diagnostic tool. Arming is
-owned by the harness-native lifecycle hooks above (Claude SessionStart/Stop
-async hooks, the Hermes plugin, the Codex bridge); never arm a watcher from a
-model turn, and specifically never run `rt-wait-inbox ... &` — shell
+`rt-wait-inbox` remains an implementation and diagnostic tool. Except for
+Grok's documented native `monitor` activation turn, arming is owned by the
+harness-native lifecycle hooks above (Claude SessionStart/Stop async hooks,
+the Hermes plugin, the Codex bridge); never arm an `rt-wait-inbox` watcher from
+a model turn, and specifically never run `rt-wait-inbox ... &` — shell
 backgrounding trips the harness's background-operation approval prompt and
 freezes an unattended seat. If a seat is unarmed, recover through a normal
 interaction or a relaunch, not a hand-started watcher. Never kill the watcher
@@ -375,8 +393,9 @@ Mail waiting in `new/` means the receiver is offline, unarmed, or busy — not
 lost. Diagnose in order: ① is a pneu-launched session open in that
 project (Rule #0)? ② does `roundtable-setup status` report the harness
 configured? ③ does `rt-doctor` report a current fenced lease and healthy
-adapter? ④ for Codex, is the thread bound and are both services healthy?
-⑤ has that session ever had a turn? A freshly launched seat with zero
+adapter? ④ for Codex, is the thread bound and are both services healthy? ⑤ for
+Grok, does `rt-doctor` find monitor evidence, or does the TUI need one re-arm
+turn? ⑥ has that session ever had a turn? A freshly launched seat with zero
 interactions is effectively unarmed until its first turn — interact with it
 once. A busy seat is not a lost seat either: wake latency on long turns is
 minutes-level because the current turn finishes before the drain. Fix the
@@ -387,7 +406,7 @@ native waker; never re-send by keyboard reflex or on latency alone.
 A project can define more than one addressable instance ID under `instances:`
 in `agents.yaml`; a single instance normally reuses the base name (`codex`).
 Build Week P0 permits only one active seat per harness in a project, so a
-second simultaneous Claude, Codex, or Hermes launch is rejected instead of
+second simultaneous Claude, Codex, Hermes, or Grok launch is rejected instead of
 guessing. An inactive prior seat does not conflict: a fresh launch gets a new
 fenced session lease. Mail addressing needs only the instance ID; cmux launch
 metadata (cwd anchor, title) matters for the diagnostic `rt-resolve` view and

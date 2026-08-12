@@ -1,0 +1,23 @@
+grok:
+  cwd: .
+  role:  # optional — e.g. "implementation and tests" — assign per project
+  always_read: [ROUTING.md, README.md]
+
+# pneu mailroom
+
+The registry-selected maildir is the delivery fact; the Grok monitor only
+starts a turn when that durable inbox changes. On a monitor event, use the
+package-managed absolute command paths supplied by the launcher:
+
+- `<pneu-prefix>/bin/rt-inbox --fenced --archive-quiet-acks -f json`
+- `<pneu-prefix>/bin/rt-ack --fenced <id>[,<id>...]`
+- `<pneu-prefix>/bin/rt-say --fenced --no-nudge <agent> <kind> <message>`
+
+Act on every non-ack message before acknowledging it once. Quiet receipts are
+archived by the fenced inbox command and are never acknowledged again.
+
+A bare `rt-grok` launch uses one visible activation turn to create exactly one
+`monitor` background task with `persistent: true`. The monitor is scoped to the
+native Grok session. After resuming a session, or when the launcher says its
+primer was skipped, perform one monitor re-arm turn before relying on automatic
+wake; do not create a second monitor in an already armed session.
