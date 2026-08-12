@@ -93,6 +93,12 @@ def test_release_workflow_exercises_isolated_artifact_setup():
     assert 'export RT_CODEX_RUNTIME_DIR="$RT_RUNTIME_DIR"' in workflow
     assert "ROUNDTABLE_RUNTIME_ROOT" not in workflow
     assert "./migrate" not in workflow
+    assert (
+        "python scripts/isolated_install_smoke.py artifacts/pneu-*-macos.tar.gz"
+        in workflow
+    )
+    assert "scripts/isolated_install_smoke.py" in release_doc
+    assert "hermetic default-prefix smoke is a required release step" in release_doc
     assert 'test ! -e "$prefix"' in workflow
     assert 'export PATH="$link_dir:$PATH"' in workflow
     assert 'HOME="$setup_home" pneu --help' in workflow

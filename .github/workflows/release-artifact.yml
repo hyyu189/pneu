@@ -61,6 +61,9 @@ jobs:
       - name: Verify outer checksum
         run: cd artifacts && shasum -a 256 --check SHA256SUMS
 
+      - name: Verify hermetic default-prefix install
+        run: python scripts/isolated_install_smoke.py artifacts/pneu-*-macos.tar.gz
+
       - name: Exercise the exact extracted artifact
         shell: bash
         run: |

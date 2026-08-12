@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import resource
@@ -1374,6 +1375,99 @@ def test_global_stop_gate_is_noop_for_direct_launch_but_partial_lease_fails(
     assert partial.returncode == 2
     assert "missing claimed-seat environment" in partial.stderr
     assert_no_project_liveness(project)
+
+
+@pytest.mark.parametrize(
+    ("fence", "expected"),
+    [
+        (
+            {"RT_PROJECT_ROOT": "/tmp/project"},
+            "missing=RT_FROM,RT_SESSION_ID,RT_LEASE_REVISION",
+        ),
+        (
+            {
+                "RT_PROJECT_ROOT": "/tmp/project",
+                "RT_SESSION_ID": "session",
+                "RT_LEASE_REVISION": "revision",
+            },
+            "missing=RT_FROM",
+        ),
+        (
+            {
+                "RT_PROJECT_ROOT": "/tmp/project",
+                "RT_FROM": "claude",
+                "RT_SESSION_ID": "   ",
+                "RT_LEASE_REVISION": "revision",
+            },
+            "invalid=RT_SESSION_ID",
+        ),
+    ],
+)
+def test_claude_stop_hook_partial_fence_is_a_calm_diagnostic(
+    tmp_path,
+    fence,
+    expected,
+):
+    environment = os.environ.copy()
+    for name in (
+        "RT_PROJECT_ROOT",
+        "RT_FROM",
+        "RT_SESSION_ID",
+        "RT_LEASE_REVISION",
+    ):
+        environment.pop(name, None)
+    environment.update(fence)
+
+    result = run_tool(
+        "rt-wait-inbox",
+        "--claude-stop-hook",
+        cwd=tmp_path,
+        env=environment,
+        input_text='{"hook_event_name":"Stop","stop_hook_active":true}',
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert result.stderr.count("\n") == 1
+    assert expected in result.stderr
+    assert "usage:" not in result.stderr
+    assert "Roundtable mail arrived" not in result.stderr
+
+
+def test_claude_stop_hook_complete_fence_still_reaches_managed_run(
+    monkeypatch,
+):
+    wait = load_wait_module("rt_wait_complete_stop_fence_test")
+    for name, value in {
+        "RT_PROJECT_ROOT": "/complete/project",
+        "RT_FROM": "claude",
+        "RT_SESSION_ID": "complete-session",
+        "RT_LEASE_REVISION": "complete-revision",
+    }.items():
+        monkeypatch.setenv(name, value)
+    captured = {}
+
+    def fake_run(agent, explicit, **options):
+        captured.update(agent=agent, explicit=explicit, options=options)
+        return 17
+
+    monkeypatch.setattr(wait, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO('{"hook_event_name":"Stop","stop_hook_active":true}'),
+    )
+
+    assert wait.main(["--claude-stop-hook"]) == 17
+    assert captured == {
+        "agent": "claude",
+        "explicit": None,
+        "options": {
+            "claude_hook": True,
+            "claude_stop_hook": True,
+            "stop_hook_active": True,
+        },
+    }
 
 
 def test_stop_gate_recursion_flag_accepts_pretty_json_without_a_lease(tmp_path):

@@ -34,6 +34,8 @@ REGISTRATION_ENV = "RT_RC_HOST_PROJECT_UUID"
 LABEL_PREFIX = "com.roundtable.rc-host"
 CREATE_TIMEOUT_SECONDS = 120
 REMOVE_TIMEOUT_SECONDS = 120
+LABEL_RETIRE_TIMEOUT_SECONDS = 15.0
+LABEL_RETIRE_POLL_SECONDS = 0.1
 MAX_STATE_BYTES = 256 * 1024
 PID_RE = re.compile(r"(?m)^\s*pid\s*=\s*(\d+)\s*$")
 AGENT_ID_RE = re.compile(r"^[a-z0-9#_-]+$")
@@ -649,6 +651,25 @@ def _launchctl_inspect(label: str) -> tuple[bool, str, int | None]:
     return True, result.stdout, int(match.group(1)) if match else None
 
 
+def _sleep_for_launchctl_retirement(seconds: float) -> None:
+    time.sleep(seconds)
+
+
+def _wait_for_launchctl_retirement(label: str) -> None:
+    deadline = time.monotonic() + LABEL_RETIRE_TIMEOUT_SECONDS
+    while True:
+        loaded, _output, _pid = _launchctl_inspect(label)
+        if not loaded:
+            return
+        if time.monotonic() >= deadline:
+            target = f"{_launch_domain()}/{label}"
+            raise RCHostError(
+                f"LaunchAgent {label} is still loaded after bootout; inspect "
+                f"with `launchctl print {target}` and retry disable"
+            )
+        _sleep_for_launchctl_retirement(LABEL_RETIRE_POLL_SECONDS)
+
+
 def _pid_alive(pid: int | None) -> bool:
     if pid is None or pid <= 0:
         return False
@@ -750,7 +771,16 @@ def enable(project: Path | str, *, home: Path | None = None) -> RCHostStatus:
             return status(root)
 
         loaded, _output, _pid = _launchctl_inspect(label)
-        if loaded or _path_info(plist_path) is not None:
+        plist_exists = _path_info(plist_path) is not None
+        if loaded or plist_exists:
+            if loaded and not plist_exists:
+                raise RCHostError(
+                    f"refusing unowned existing LaunchAgent state for {label}; "
+                    "the label is loaded while its plist is absent, so the job "
+                    "is likely still retiring after disable; retry shortly, then "
+                    f"inspect with `launchctl print {_launch_domain()}/{label}` "
+                    "if it persists"
+                )
             raise RCHostError(
                 f"refusing unowned existing LaunchAgent state for {label}; inspect {plist_path}"
             )
@@ -845,6 +875,7 @@ def disable(project: Path | str) -> RCHostStatus:
             if result.returncode != 0:
                 detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
                 raise RCHostError(f"cannot unload LaunchAgent {label}: {detail}")
+            _wait_for_launchctl_retirement(label)
         try:
             if settings_payload is None:
                 settings_path.unlink()

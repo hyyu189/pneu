@@ -151,6 +151,70 @@ def test_enable_is_project_local_idempotent_and_disable_reverses_owned_state(rc_
     assert _rtrchost.load_state_for_project(project) is None
 
 
+def test_disable_waits_for_launchd_label_retirement(rc_lab, monkeypatch):
+    project, home, _launch_agents, _launch_state = rc_lab
+    enabled = _rtrchost.enable(project, home=home)
+    observations = iter(
+        [
+            (True, "pid = 123", 123),
+            (True, "pid = 123", 123),
+            (True, "pid = 123", 123),
+            (False, "not loaded", None),
+        ]
+    )
+    sleeps = []
+    monkeypatch.setattr(_rtrchost, "_launchctl_inspect", lambda _label: next(observations))
+    monkeypatch.setattr(_rtrchost, "_sleep_for_launchctl_retirement", sleeps.append)
+
+    disabled = _rtrchost.disable(project)
+
+    assert not disabled.enabled
+    assert sleeps == [
+        _rtrchost.LABEL_RETIRE_POLL_SECONDS,
+        _rtrchost.LABEL_RETIRE_POLL_SECONDS,
+    ]
+    assert not (home / "Library" / "LaunchAgents" / f"{enabled.label}.plist").exists()
+
+
+def test_disable_retirement_timeout_preserves_owned_state(rc_lab, monkeypatch):
+    project, home, launch_agents, _launch_state = rc_lab
+    enabled = _rtrchost.enable(project, home=home)
+    monkeypatch.setattr(
+        _rtrchost,
+        "_launchctl_inspect",
+        lambda _label: (True, "pid = 123", 123),
+    )
+    monkeypatch.setattr(_rtrchost, "LABEL_RETIRE_TIMEOUT_SECONDS", 0.0)
+
+    with pytest.raises(
+        _rtrchost.RCHostError,
+        match=rf"{enabled.label}.*launchctl print.*retry disable",
+    ):
+        _rtrchost.disable(project)
+
+    assert (project / ".claude" / "settings.local.json").is_file()
+    assert (launch_agents / f"{enabled.label}.plist").is_file()
+    assert _rtrchost.load_state_for_project(project) is not None
+
+
+def test_enable_retiring_label_hint_requires_a_missing_plist(rc_lab):
+    project, home, launch_agents, launch_state = rc_lab
+    label = _rtrchost.label_for(_rtlib.resolve_project_mailbox(project).project_uuid)
+    launch_state["loaded"] = True
+
+    with pytest.raises(_rtrchost.RCHostError) as missing_plist:
+        _rtrchost.enable(project, home=home)
+    assert "likely still retiring after disable" in str(missing_plist.value)
+    assert "retry shortly" in str(missing_plist.value)
+
+    launch_agents.mkdir(parents=True)
+    (launch_agents / f"{label}.plist").write_text("unowned", encoding="utf-8")
+    with pytest.raises(_rtrchost.RCHostError) as present_plist:
+        _rtrchost.enable(project, home=home)
+    assert "likely still retiring after disable" not in str(present_plist.value)
+    assert "retry shortly" not in str(present_plist.value)
+
+
 def test_trust_gate_has_plain_remedy_and_makes_no_partial_changes(rc_lab):
     project, home, launch_agents, _launch_state = rc_lab
     (home / ".claude.json").write_text(json.dumps({"projects": {}}), encoding="utf-8")
