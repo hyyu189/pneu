@@ -14,7 +14,7 @@ bridge-cse_01UXb6DTgRWKWtgQomZCmPbT, session
 crashed:
 
 ```
-FileNotFoundError: '/Users/haiyangyu/.claude/session-env/00666b27-.../sessionstart-hook-0.sh'
+FileNotFoundError: '~/.claude/session-env/00666b27-.../sessionstart-hook-0.sh'
 _rtruntime.RuntimeStateError: cannot inspect CLAUDE_ENV_FILE ...
 ```
 
