@@ -5445,7 +5445,7 @@ def test_startup_advisory_suggests_unique_same_workspace_project(tmp_path):
 
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.count("\n") == 1
-    assert "cwd 不在 roundtable 项目" in proc.stdout
+    assert "cwd is outside a Roundtable project" in proc.stdout
     assert str(peer.resolve()) in proc.stdout
     assert "export ROUNDTABLE_PROJECT_DIR=" in proc.stdout
 

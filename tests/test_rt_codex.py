@@ -260,7 +260,7 @@ def test_idle_three_messages_produce_one_wake(tmp_path):
     assert first[0].ok and second[0].ok
     assert len(starts) == 1
     wake_text = starts[0][1]["input"][0]["text"]
-    assert "drain the Roundtable inbox for codex in this project" in wake_text
+    assert wake_text == wake.WAKE_TEXT.format(agent="codex")
     assert str(project / ".roundtable") not in wake_text
     inbox = resolve_project_mailbox(project).inbox_dir / "codex" / "new"
     assert len(list(inbox.iterdir())) == 3
