@@ -5,18 +5,24 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import math
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Mapping
 
 from _rtcodex import RUNTIME_DIR as CODEX_RUNTIME_DIR
 from _rtlib import (
     ProjectRegistryError,
     _clean_git_environment,
+    _default_state_root,
     _entry_with_revalidated_group,
     _verify_registered_entry_identity,
     active_project_entries,
@@ -34,12 +40,17 @@ from _rtruntime import (
     inspect_seat,
     reclaim_project_runtime,
     record_seat_surface,
+    runtime_root,
 )
 
 
 PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PROMPT_ATTEMPTS = 3
 KNOWN_HARNESSES = ("claude", "codex", "hermes", "openclaw", "grok")
+INSTALL_MANIFEST_SCHEMA = "roundtable.install.v1"
+OPEN_ACTIVATION_TIMEOUT_SECONDS = 45.0
+OPEN_ACTIVATION_POLL_SECONDS = 0.1
+OPEN_ACTIVATION_TIMEOUT_ENV = "RT_WORKTREE_OPEN_TIMEOUT"
 
 
 class WorktreeError(RuntimeError):
@@ -61,6 +72,12 @@ class SeatView:
     agent_id: str
     status: str
     detail: str = ""
+
+
+@dataclass(frozen=True)
+class SeatLauncher:
+    path: Path
+    environment: tuple[tuple[str, str], ...] = ()
 
 
 def _git_environment() -> dict[str, str]:
@@ -558,17 +575,197 @@ def _selected_seat(project: Path, requested: str | None) -> tuple[str, str]:
     )
 
 
-def _seat_launcher(harness: str) -> Path:
+def _launcher_state_root(environ: Mapping[str, str]) -> Path:
+    configured = environ.get("ROUNDTABLE_INSTALL_PREFIX", "").strip()
+    candidate = (
+        Path(configured).expanduser()
+        if configured
+        else _default_state_root()
+    )
+    if not candidate.is_absolute():
+        raise WorktreeError(
+            "ROUNDTABLE_INSTALL_PREFIX must be absolute for a spawned seat "
+            f"launcher: {candidate}"
+        )
+    normalized = Path(os.path.normpath(os.fspath(candidate)))
+    try:
+        return normalized.resolve(strict=False)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise WorktreeError(
+            f"cannot resolve the spawned launcher state root {normalized}: {error}"
+        ) from error
+
+
+def _require_owned_regular_file(path: Path, label: str, *, executable: bool = False) -> None:
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise WorktreeError(f"cannot inspect {label} {path}: {error}") from error
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+        raise WorktreeError(f"{label} is not a user-owned regular file: {path}")
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise WorktreeError(f"{label} is group/other writable: {path}")
+    if executable and not os.access(path, os.X_OK):
+        raise WorktreeError(f"{label} is not executable: {path}")
+
+
+def _installed_launcher(
+    tool: Path,
+    state_root: Path,
+    harness: str,
+) -> Path | None:
+    """Return the manifest-owned hermetic wrapper for an installed tool."""
+
+    try:
+        relative = tool.relative_to(state_root)
+    except ValueError:
+        return None
+    if (
+        len(relative.parts) != 4
+        or relative.parts[0] != "versions"
+        or relative.parts[2] != "bin"
+        or relative.parts[3] != "rt-worktree"
+    ):
+        return None
+
+    manifest_path = state_root / "install-manifest.json"
+    try:
+        _require_owned_regular_file(manifest_path, "installed launcher manifest")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except WorktreeError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise WorktreeError(
+            f"cannot read installed launcher manifest {manifest_path}: {error}"
+        ) from error
+    if not isinstance(manifest, dict) or manifest.get("schema") != INSTALL_MANIFEST_SCHEMA:
+        raise WorktreeError(f"installed launcher manifest is invalid: {manifest_path}")
+    if manifest.get("prefix") != str(state_root):
+        raise WorktreeError(
+            f"installed launcher manifest prefix does not match {state_root}"
+        )
+    versions = manifest.get("versions")
+    if not isinstance(versions, list) or str(tool.parents[1]) not in versions:
+        raise WorktreeError(
+            f"running rt-worktree version is not owned by {manifest_path}: {tool}"
+        )
+
+    wrapper = state_root / "bin" / f"rt-{harness}"
+    files = manifest.get("files")
+    expected_digest = files.get(str(wrapper)) if isinstance(files, dict) else None
+    if not isinstance(expected_digest, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", expected_digest
+    ):
+        raise WorktreeError(
+            f"installed launcher wrapper is not recorded by {manifest_path}: {wrapper}"
+        )
+    _require_owned_regular_file(wrapper, "installed launcher wrapper", executable=True)
+    try:
+        actual_digest = hashlib.sha256(wrapper.read_bytes()).hexdigest()
+    except OSError as error:
+        raise WorktreeError(f"cannot verify installed launcher {wrapper}: {error}") from error
+    if actual_digest != expected_digest:
+        raise WorktreeError(
+            f"installed launcher wrapper differs from its manifest: {wrapper}"
+        )
+    return wrapper
+
+
+def _seat_launcher(
+    harness: str,
+    *,
+    tool_path: Path | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> SeatLauncher:
     if harness not in KNOWN_HARNESSES:
         raise WorktreeError(
             f"configured harness {harness!r} has no pneu seat launcher"
         )
-    launcher = Path(__file__).resolve().with_name(f"rt-{harness}")
+    selected_environment = os.environ if environ is None else environ
+    state_root = _launcher_state_root(selected_environment)
+    tool = (tool_path or Path(__file__)).resolve()
+    installed = _installed_launcher(tool, state_root, harness)
+    if installed is not None:
+        return SeatLauncher(installed)
+
+    launcher = tool.with_name(f"rt-{harness}")
     if not launcher.is_file() or not os.access(launcher, os.X_OK):
         raise WorktreeError(
             f"pneu seat launcher is unavailable or not executable: {launcher}"
         )
-    return launcher
+    try:
+        selected_runtime = runtime_root().expanduser().absolute()
+    except RuntimeStateError as error:
+        raise WorktreeError(f"cannot resolve spawned launcher runtime: {error}") from error
+    rendered_runtime = str(selected_runtime)
+    return SeatLauncher(
+        launcher,
+        (
+            ("ROUNDTABLE_INSTALL_PREFIX", str(state_root)),
+            ("RT_RUNTIME_DIR", rendered_runtime),
+            ("RT_CODEX_RUNTIME_DIR", rendered_runtime),
+        ),
+    )
+
+
+def _activation_timeout(environ: Mapping[str, str]) -> float:
+    raw = environ.get(OPEN_ACTIVATION_TIMEOUT_ENV)
+    if raw is None or not raw.strip():
+        return OPEN_ACTIVATION_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise WorktreeError(
+            f"{OPEN_ACTIVATION_TIMEOUT_ENV} must be a positive finite number"
+        ) from error
+    if not math.isfinite(value) or value <= 0:
+        raise WorktreeError(
+            f"{OPEN_ACTIVATION_TIMEOUT_ENV} must be a positive finite number"
+        )
+    return value
+
+
+def _wait_for_active_seat(
+    project: Path,
+    agent_id: str,
+    harness: str,
+    *,
+    timeout: float,
+):
+    deadline = time.monotonic() + timeout
+    last = None
+    while True:
+        last = inspect_seat(project, agent_id)
+        token = last.token
+        if (
+            last.status in {"active_healthy", "active_unhealthy"}
+            and token is not None
+            and token.harness == harness
+        ):
+            return last
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return last
+        time.sleep(min(OPEN_ACTIVATION_POLL_SECONDS, remaining))
+
+
+def _require_launchable_seat(project: Path, agent_id: str) -> None:
+    inspection = inspect_seat(project, agent_id)
+    if inspection.status in {"active_healthy", "active_unhealthy"}:
+        raise WorktreeError(
+            f"seat {agent_id!r} is already active in {project}: "
+            f"{inspection.status} ({inspection.detail})"
+        )
+    if inspection.status == "ambiguous":
+        raise WorktreeError(
+            f"seat {agent_id!r} has ambiguous runtime state in {project}: "
+            f"{inspection.detail}"
+        )
+
+
+def _surface_label(kind: str, surface: dict[str, str]) -> str:
+    reference = surface.get("pane") or surface.get("target") or "<unknown>"
+    return f"{kind}:{reference}"
 
 
 def _worktree_open(args, *, cwd: Path, stdout, stderr) -> int:
@@ -592,11 +789,17 @@ def _worktree_open(args, *, cwd: Path, stdout, stderr) -> int:
     harness, agent_id = _selected_seat(target, args.seat)
     launcher = _seat_launcher(harness)
     selection = detect_surface(args.surface, environ=os.environ)
+    activation_timeout = None
+    if selection.kind != "print":
+        _require_launchable_seat(target, agent_id)
+        if not args.no_wait:
+            activation_timeout = _activation_timeout(os.environ)
     launch = launch_surface(
         selection,
         tree=target,
-        launcher=launcher,
+        launcher=launcher.path,
         agent_id=agent_id,
+        launcher_environment=dict(launcher.environment),
         environ=os.environ,
         stdout=stdout,
     )
@@ -606,30 +809,63 @@ def _worktree_open(args, *, cwd: Path, stdout, stderr) -> int:
         raise WorktreeError(
             f"{selection.kind} launch succeeded without a surface reference"
         )
+    surface_label = _surface_label(selection.kind, launch.surface)
+    if args.no_wait:
+        print("worktree launch requested:", file=stdout)
+        print(f"  project: {name}", file=stdout)
+        print(f"  path: {target}", file=stdout)
+        print(f"  seat: {agent_id}", file=stdout)
+        print(f"  harness: {harness}", file=stdout)
+        print(f"  surface: {surface_label}", file=stdout)
+        print(f"  command: {launch.command}", file=stdout)
+        print("  activation: not waited (--no-wait); no advisory record written", file=stdout)
+        return 0
+
+    if activation_timeout is None:
+        raise WorktreeError("seat activation timeout was not initialized")
+    inspection = _wait_for_active_seat(
+        target,
+        agent_id,
+        harness,
+        timeout=activation_timeout,
+    )
+    inspection_token = inspection.token
+    if (
+        inspection.status not in {"active_healthy", "active_unhealthy"}
+        or inspection_token is None
+        or inspection_token.harness != harness
+    ):
+        detail = f" ({inspection.detail})" if inspection.detail else ""
+        raise WorktreeError(
+            f"seat activation timed out after {activation_timeout:.1f}s\n"
+            f"  surface: {surface_label}\n"
+            f"  command: {launch.command}\n"
+            f"  last seat state: {inspection.status}{detail}\n"
+            "  advisory record: not written"
+        )
     try:
         surface_path = record_seat_surface(
             target,
             agent_id,
             harness,
             launch.surface,
+            session_id=inspection_token.session_id,
+            revision=inspection_token.revision,
         )
     except (RuntimeStateError, OSError) as error:
-        surface_path = None
-        print(
-            "rt-worktree: warning: seat launch succeeded, but its advisory "
-            f"surface reference could not be recorded: {error}",
-            file=stderr,
-        )
+        raise WorktreeError(
+            "seat activated, but its advisory surface reference could not be "
+            f"recorded; inspect {surface_label} before retrying: {error}"
+        ) from error
 
-    reference = launch.surface.get("pane") or launch.surface.get("target")
     print("worktree opened:", file=stdout)
     print(f"  project: {name}", file=stdout)
     print(f"  path: {target}", file=stdout)
     print(f"  seat: {agent_id}", file=stdout)
     print(f"  harness: {harness}", file=stdout)
-    print(f"  surface: {selection.kind}:{reference}", file=stdout)
-    if surface_path is not None:
-        print(f"  advisory record: {surface_path}", file=stdout)
+    print(f"  surface: {surface_label}", file=stdout)
+    print(f"  activation: {inspection.status}", file=stdout)
+    print(f"  advisory record: {surface_path}", file=stdout)
     return 0
 
 
@@ -892,6 +1128,11 @@ def build_parser() -> argparse.ArgumentParser:
     open_command.add_argument("name")
     open_command.add_argument("--seat", metavar="AGENT")
     open_command.add_argument("--surface", metavar="SURFACE")
+    open_command.add_argument(
+        "--no-wait",
+        action="store_true",
+        help="return after spawning without claiming activation success",
+    )
 
     subparsers.add_parser("list", help="list registered sibling worktrees")
     return parser

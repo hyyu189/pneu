@@ -357,9 +357,10 @@ workspace features.
 `pneu worktree open` is the explicit visible-seat adapter. It resolves only a
 registered worktree in the caller's Git-derived group, launches the selected
 pneu harness wrapper through Herdr or tmux when available, and otherwise
-prints an exact command for a normal terminal. Its recorded surface handle is
-advisory navigation metadata; the fenced lease remains the only seat-owner
-fact.
+prints an exact command for a normal terminal. A backend spawn becomes an open
+success only after the selected fenced lease is active; only then is its
+surface handle recorded. The handle remains advisory navigation metadata, and
+the fenced lease remains the only seat-owner fact.
 
 tmux is a multiplexer rather than a terminal emulator. Same-host tmux and
 cross-host SSH require their own lifecycle and wake acceptance before support

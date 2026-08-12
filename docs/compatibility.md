@@ -146,9 +146,11 @@ not create or manage tmux windows or panes on this direct path.
 `pneu worktree open` is the separate opt-in surface manager. It uses a
 Herdr-created pane when `HERDR_ENV=1`, a tmux pane/window when inside tmux or a
 default server has an attached client, and otherwise prints the exact launcher
-command without claiming it ran. These backends have isolated fake-binary
-coverage; real harness launches in each host remain part of the promotion
-matrix below.
+command without claiming it ran. A real backend spawn is reported as opened
+and recorded only after its selected seat lease becomes active; timeout is a
+nonzero result with the surface, command, and last seat state. These backends
+have isolated fake-binary coverage; real harness launches in each host remain
+part of the promotion matrix below.
 
 If a tmux window was created with the launcher itself as the window command,
 there is no parent shell for the window to return to; the window can therefore

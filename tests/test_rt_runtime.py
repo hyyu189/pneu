@@ -154,6 +154,52 @@ def test_claim_is_active_unhealthy_until_wake_heartbeat(
     assert healthy.token == ready
 
 
+def test_surface_record_is_fenced_to_the_observed_active_lease(
+    tmp_path,
+    runtime,
+    process_table,
+):
+    root = project(tmp_path)
+    old = _rtruntime.claim(root, "codex", "codex", owner_pid=101)
+    surface_path = _rtruntime.record_seat_surface(
+        root,
+        "codex",
+        "codex",
+        {"kind": "herdr", "pane": "w1:p1"},
+        session_id=old.session_id,
+        revision=old.revision,
+    )
+    process_table[101] = None
+    fresh = _rtruntime.claim(root, "codex", "codex", owner_pid=102)
+
+    with pytest.raises(_rtruntime.FenceRejected, match="seat lease changed"):
+        _rtruntime.record_seat_surface(
+            root,
+            "codex",
+            "codex",
+            {"kind": "herdr", "pane": "w1:p2"},
+            session_id=old.session_id,
+            revision=old.revision,
+        )
+
+    assert json.loads(surface_path.read_text())["surface"] == {
+        "kind": "herdr",
+        "pane": "w1:p1",
+    }
+    _rtruntime.record_seat_surface(
+        root,
+        "codex",
+        "codex",
+        {"kind": "herdr", "pane": "w1:p2"},
+        session_id=fresh.session_id,
+        revision=fresh.revision,
+    )
+    assert json.loads(surface_path.read_text())["surface"] == {
+        "kind": "herdr",
+        "pane": "w1:p2",
+    }
+
+
 def test_active_same_harness_blocks_other_agent_but_other_harness_is_allowed(
     tmp_path, runtime, process_table
 ):

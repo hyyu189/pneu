@@ -133,8 +133,10 @@ seat launcher from that worktree. A sole configured seat is automatic; a
 multi-seat project requires `--seat`. Surface selection is explicit flag,
 `RT_SURFACE`, ambient Herdr (`HERDR_ENV=1`), ambient or attached-client tmux,
 then a print-only fallback. Successful Herdr/tmux launches write an advisory
-host-runtime surface reference beside the seat state; it is navigation
-metadata, never ownership or liveness evidence.
+host-runtime surface reference only after the selected seat lease becomes
+active; it is navigation metadata, never ownership or liveness evidence. The
+default activation wait is bounded. `--no-wait` returns after spawning without
+claiming activation success or writing a surface record.
 
 `pneu rc-host enable` is an expert, project-anchored opt-in for Claude mobile
 or web worktree spawn. It first requires an already accepted Claude workspace
