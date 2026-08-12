@@ -8,6 +8,7 @@ import json
 import re
 import select
 import shutil
+import stat
 import subprocess
 import sys
 import termios
@@ -16,6 +17,7 @@ import tty
 from pathlib import Path
 
 from _rtlauncher import (
+    CONFIG_HARNESSES,
     SelectionError,
     configured_sender_ids,
     HARNESS_LABELS,
@@ -29,10 +31,12 @@ from _rtlib import (
     active_project_entries,
     emit_registry_warnings,
     is_project_root,
+    load_agents_doc,
     load_project_registry,
     resolve_project_mailbox_checked,
 )
 from _rtrchost import RCHostError, load_state_for_project
+from _rtruntime import RuntimeStateError, inspect_seat, runtime_root
 
 
 ALIASES = {
@@ -54,8 +58,16 @@ ALIASES = {
     "rc-host": "rt-rc-host",
 }
 HARNESS_ORDER = ("claude", "codex", "hermes", "openclaw", "grok")
+HARNESS_CONFIG = {
+    "claude": ("claude", "claude-code"),
+    "codex": ("codex", "codex"),
+    "hermes": ("hermes", "hermes-agent"),
+    "openclaw": ("openclaw", "openclaw-gateway"),
+    "grok": ("grok", "grok-build"),
+}
 PROMPT_ATTEMPTS = 3
 LAUNCHER_STATE_SCHEMA = "roundtable.launcher-state.v1"
+CODEX_WAKE_STATE_SCHEMA = "roundtable.codex-wake.v1"
 
 HELP = """usage: pneu [command] [args...]
 
@@ -653,6 +665,238 @@ def seat_inventory(
     return seats, unavailable
 
 
+def _addable_harnesses(root: Path) -> list[str]:
+    """Return installed harnesses that have no configured project seat."""
+
+    addable = []
+    for harness in HARNESS_ORDER:
+        try:
+            if configured_sender_ids(root, harness):
+                continue
+            harness_bin(harness)
+        except SelectionError:
+            continue
+        addable.append(harness)
+    return addable
+
+
+def _codex_wake_state_path() -> Path:
+    return runtime_root() / "rt-codex-wake-state.json"
+
+
+def _bound_codex_thread(root: Path, agent: str) -> str | None:
+    """Read one resumable binding; corrupt or unsafe state is a quiet miss."""
+
+    try:
+        path = _codex_wake_state_path()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_size > 4 * 1024 * 1024
+            ):
+                return None
+            raw = handle.read(4 * 1024 * 1024 + 1)
+        if len(raw) > 4 * 1024 * 1024:
+            return None
+        value = json.loads(raw.decode("utf-8"))
+        if not isinstance(value, dict) or value.get("schema") != CODEX_WAKE_STATE_SCHEMA:
+            return None
+        bindings = value.get("bindings")
+        if not isinstance(bindings, dict):
+            return None
+        binding = bindings.get(str(root))
+        if not isinstance(binding, dict):
+            return None
+        if binding.get("project") != str(root) or binding.get("agent") != agent:
+            return None
+        thread_id = binding.get("threadId")
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+        inspection = inspect_seat(root, agent)
+        if inspection.status not in {"vacant", "stale"}:
+            return None
+        return thread_id
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        RuntimeStateError,
+        ValueError,
+    ):
+        return None
+
+
+def _bound_codex_threads(
+    root: Path,
+    seats: list[tuple[str, str]],
+) -> dict[tuple[str, str], str]:
+    bindings = {}
+    for harness, agent in seats:
+        if harness != "codex":
+            continue
+        thread_id = _bound_codex_thread(root, agent)
+        if thread_id:
+            bindings[(harness, agent)] = thread_id
+    return bindings
+
+
+def _append_harness_seat(root: Path, harness: str) -> str:
+    """Atomically append one roundtable-init-shaped seat block."""
+
+    if harness not in HARNESS_CONFIG:
+        raise OnboardingError(f"pneu: unsupported harness seat: {harness}")
+    path = root / ".roundtable" / "agents.yaml"
+    descriptor = None
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        )
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise OnboardingError(
+                "pneu: refusing add-seat because agents.yaml is not a "
+                f"user-owned regular file: {path}"
+            )
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = None
+            raw = handle.read()
+    except OnboardingError:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        raise OnboardingError(
+            f"pneu: cannot read agents configuration {path}: {error}"
+        ) from error
+
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeError as error:
+        raise OnboardingError(
+            f"pneu: refusing add-seat because agents.yaml is not UTF-8: {path}"
+        ) from error
+    try:
+        document = load_agents_doc(root, "pneu")
+    except (SystemExit, OSError, UnicodeError) as error:
+        raise OnboardingError(
+            f"pneu: refusing add-seat because agents.yaml cannot be parsed: {error}"
+        ) from error
+    if document.get("schema") != "roundtable.agents.v1":
+        raise OnboardingError(
+            "pneu: refusing add-seat because agents.yaml schema drift cannot be "
+            "safely appended"
+        )
+    agents = document.get("agents")
+    if not isinstance(agents, dict):
+        raise OnboardingError(
+            "pneu: refusing add-seat because agents.yaml has no agents mapping"
+        )
+
+    config_name, harness_name = HARNESS_CONFIG[harness]
+    aliases = CONFIG_HARNESSES[harness]
+    for existing_name, existing in agents.items():
+        if not isinstance(existing, dict):
+            raise OnboardingError(
+                "pneu: refusing add-seat because agents.yaml contains an "
+                f"unsupported seat block: {existing_name!r}"
+            )
+        if existing_name == config_name or existing.get("harness") in aliases:
+            raise OnboardingError(
+                f"pneu: {HARNESS_LABELS[harness]} already has a project seat block"
+            )
+
+    lines = text.splitlines()
+    agents_lines = [
+        index
+        for index, line in enumerate(lines)
+        if re.fullmatch(r"agents:\s*(?:#.*)?", line)
+    ]
+    if len(agents_lines) != 1 or any(
+        line.strip()
+        and not line.lstrip().startswith("#")
+        and not line.startswith((" ", "\t"))
+        for line in lines[agents_lines[0] + 1 :] if agents_lines
+    ):
+        raise OnboardingError(
+            "pneu: refusing add-seat because agents.yaml layout drift cannot be "
+            "safely appended"
+        )
+
+    if raw.endswith(b"\n\n"):
+        separator = b""
+    elif raw.endswith(b"\n"):
+        separator = b"\n"
+    else:
+        separator = b"\n\n"
+    block = (
+        f"  {config_name}:\n"
+        f"    harness: {harness_name}\n"
+        "    instances:\n"
+        f"      - id: {config_name}\n"
+    ).encode("utf-8")
+    payload = raw + separator + block
+    identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+    temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
+    temp_descriptor = None
+    try:
+        temp_descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            stat.S_IMODE(info.st_mode),
+        )
+        os.fchmod(temp_descriptor, stat.S_IMODE(info.st_mode))
+        with os.fdopen(temp_descriptor, "wb") as handle:
+            temp_descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        current = path.lstat()
+        current_identity = (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+        )
+        if current_identity != identity:
+            raise OnboardingError(
+                f"pneu: refusing add-seat because agents.yaml changed while editing: {path}"
+            )
+        os.replace(temporary, path)
+        directory = os.open(
+            path.parent,
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+        )
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except OnboardingError:
+        raise
+    except OSError as error:
+        raise OnboardingError(
+            f"pneu: cannot update agents configuration {path}: {error}"
+        ) from error
+    finally:
+        if temp_descriptor is not None:
+            os.close(temp_descriptor)
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            pass
+    return f"added {HARNESS_LABELS[harness]} seat {config_name}"
+
+
 def choose_seat(root: Path, *, stdin, stderr) -> tuple[str, str]:
     seats, unavailable = seat_inventory(root)
     print("Choose a harness seat:", file=stderr)
@@ -846,6 +1090,8 @@ def _render_seat_card(
     root: Path,
     seats: list[tuple[str, str]],
     unavailable: list[tuple[str, str]],
+    addable: list[str],
+    bound_threads: dict[tuple[str, str], str],
     cursor: int,
     *,
     stderr,
@@ -856,8 +1102,14 @@ def _render_seat_card(
     print("seats", file=stderr)
     for index, (harness, agent) in enumerate(seats):
         marker = ">" if index == cursor else " "
-        print(f" {marker} {HARNESS_LABELS[harness]} — {agent}", file=stderr)
+        bound = " (bound thread)" if (harness, agent) in bound_threads else ""
+        print(
+            f" {marker} {HARNESS_LABELS[harness]} — {agent}{bound}",
+            file=stderr,
+        )
     for harness, detail in unavailable:
+        if harness in addable:
+            detail = "not configured in this project — press a to add"
         print(f"   unavailable: {HARNESS_LABELS[harness]} — {detail}", file=stderr)
     unread = " ".join(
         f"{agent}={count}" for agent, count in _unread_by_seat(root, seats)
@@ -868,14 +1120,28 @@ def _render_seat_card(
         f"Claude phone connection: {'on' if _phone_access_on(root) else 'off'}  [p]",
         file=stderr,
     )
-    print(
-        "↑↓/1-9 select · Enter launch · p Claude phone · w worktrees · "
-        "? guide · q quit",
-        file=stderr,
-    )
+    footer = "↑↓/1-9 select · Enter launch"
+    if addable:
+        footer += " · a add seat"
+    footer += " · p Claude phone · w worktrees · ? guide · q quit"
+    print(footer, file=stderr)
     if notice:
         print(notice, file=stderr)
     stderr.flush()
+
+
+def _choose_addable_harness(addable: list[str], *, stdin, stderr) -> str | None:
+    choices = " · ".join(
+        f"{index} {HARNESS_LABELS[harness]}"
+        for index, harness in enumerate(addable, 1)
+    )
+    print(f"Add seat: {choices} · q cancel", file=stderr, flush=True)
+    while True:
+        key = _read_card_key(stdin)
+        if key == "q":
+            return None
+        if key.isdigit() and 1 <= int(key) <= len(addable):
+            return addable[int(key) - 1]
 
 
 def _run_card_command(name: str, arguments: list[str], root: Path) -> tuple[int, str]:
@@ -960,9 +1226,12 @@ def choose_seat_card(
     *,
     stdin,
     stderr,
+    selection_meta: dict | None = None,
+    notice: str = "",
 ) -> tuple[str, str] | None:
     seats, unavailable = seat_inventory(root)
-    if not seats:
+    addable = _addable_harnesses(root)
+    if not seats and not addable:
         detail = " | ".join(f"{name}: {error}" for name, error in unavailable)
         raise OnboardingError(
             f"pneu: no launchable configured harness seats in {root}"
@@ -972,24 +1241,46 @@ def choose_seat_card(
     last = state.get("lastSeat")
     keys = [f"{harness}:{agent}" for harness, agent in seats]
     cursor = keys.index(last) if last in keys else 0
-    notice = ""
+    if selection_meta is not None:
+        selection_meta.clear()
     while True:
+        bound_threads = _bound_codex_threads(root, seats)
         _render_seat_card(
             root,
             seats,
             unavailable,
+            addable,
+            bound_threads,
             cursor,
             stderr=stderr,
             notice=notice,
         )
         notice = ""
         key = _read_card_key(stdin)
-        if key == "up":
+        if key == "up" and seats:
             cursor = (cursor - 1) % len(seats)
-        elif key == "down":
+        elif key == "down" and seats:
             cursor = (cursor + 1) % len(seats)
         elif key.isdigit() and 1 <= int(key) <= len(seats):
             cursor = int(key) - 1
+        elif key == "a" and addable:
+            harness = _choose_addable_harness(
+                addable,
+                stdin=stdin,
+                stderr=stderr,
+            )
+            if harness is None:
+                continue
+            try:
+                notice = _append_harness_seat(root, harness)
+            except OnboardingError as error:
+                notice = str(error)
+                continue
+            seats, unavailable = seat_inventory(root)
+            addable = _addable_harnesses(root)
+            selected_key = f"{harness}:{HARNESS_CONFIG[harness][0]}"
+            keys = [f"{name}:{agent}" for name, agent in seats]
+            cursor = keys.index(selected_key) if selected_key in keys else 0
         elif key == "p":
             notice = _toggle_phone_access(root)
         elif key == "w":
@@ -1004,7 +1295,14 @@ def choose_seat_card(
         elif key == "q":
             return None
         elif key == "enter":
-            return seats[cursor]
+            if not seats:
+                notice = "No configured seat yet; press a to add one"
+                continue
+            selected = seats[cursor]
+            thread_id = bound_threads.get(selected)
+            if thread_id and selection_meta is not None:
+                selection_meta["resumeThreadId"] = thread_id
+            return selected
 
 
 def remember_last_seat(root: Path, harness: str, agent: str) -> None:
@@ -1041,27 +1339,58 @@ def onboard(
             stderr=stderr,
             init_runner=init_runner,
         )
-        if _rich_card_available(stdin, stderr):
+        rich_card = _rich_card_available(stdin, stderr)
+        if rich_card:
             if not show_first_run_welcome(root, stdin=stdin, stderr=stderr):
                 return 0
-            selected = choose_seat_card(root, stdin=stdin, stderr=stderr)
-            if selected is None:
-                return 0
-            harness, agent_id = selected
-        else:
-            harness, agent_id = choose_seat(root, stdin=stdin, stderr=stderr)
-        ensure_harness_setup(
-            harness,
-            home=home,
-            stdin=stdin,
-            stderr=stderr,
-            environ=environ,
-            setup_runner=setup_runner,
-        )
-        remember_last_seat(root, harness, agent_id)
-        environ["RT_FROM"] = agent_id
-        chdir_runner(root)
-        return execute(f"rt-{harness}", [], exec_runner=exec_runner)
+        card_notice = ""
+        while True:
+            selection_meta = {}
+            if rich_card:
+                selected = choose_seat_card(
+                    root,
+                    stdin=stdin,
+                    stderr=stderr,
+                    selection_meta=selection_meta,
+                    notice=card_notice,
+                )
+                if selected is None:
+                    return 0
+                harness, agent_id = selected
+            else:
+                harness, agent_id = choose_seat(root, stdin=stdin, stderr=stderr)
+            ensure_harness_setup(
+                harness,
+                home=home,
+                stdin=stdin,
+                stderr=stderr,
+                environ=environ,
+                setup_runner=setup_runner,
+            )
+            thread_id = selection_meta.get("resumeThreadId")
+            launch_arguments = []
+            if rich_card and harness == "codex" and isinstance(thread_id, str):
+                code, detail = _run_card_command(
+                    "rt-codex-wake",
+                    ["handoff", str(root), "--thread-id", thread_id],
+                    root,
+                )
+                if code != 0:
+                    card_notice = (
+                        detail.splitlines()[-1]
+                        if detail
+                        else "Codex thread handoff refused"
+                    )
+                    continue
+                launch_arguments = ["resume", thread_id]
+            remember_last_seat(root, harness, agent_id)
+            environ["RT_FROM"] = agent_id
+            chdir_runner(root)
+            return execute(
+                f"rt-{harness}",
+                launch_arguments,
+                exec_runner=exec_runner,
+            )
     except OnboardingError as error:
         if root is not None and is_project_root(root):
             raise project_ready_recovery(error, root) from error

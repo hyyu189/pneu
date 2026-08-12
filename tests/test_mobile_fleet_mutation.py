@@ -171,8 +171,8 @@ MUTATIONS = (
     (
         "adoption-session-bypass",
         "rt-wait-inbox",
-        "or token.session_id != session_id",
-        "or False",
+        "or token.session_id != session_id\n            or token.owner_pid != selected_owner",
+        "or False\n            or token.owner_pid != selected_owner",
     ),
     (
         "empty-hook-output-bypass",

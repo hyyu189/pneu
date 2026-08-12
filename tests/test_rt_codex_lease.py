@@ -116,6 +116,8 @@ class BridgeClient:
             return {"data": [self.selected_thread["id"]]}
         if method in {"thread/read", "thread/resume"}:
             return {"thread": dict(self.selected_thread)}
+        if method == "thread/name/set":
+            return {}
         if method == "hooks/list":
             return {
                 "data": [
@@ -297,8 +299,20 @@ def test_bind_command_records_current_lease_and_native_thread(
     selected_thread = thread(project)
 
     class Client:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, params):
+            self.calls.append((method, params))
+            assert method == "thread/name/set"
+            binding = wake.StateStore(state_file).bindings[str(project)]
+            assert binding["threadId"] == selected_thread["id"]
+            return {}
+
         def close(self):
             pass
+
+    client = Client()
 
     monkeypatch.setattr(
         wake, "require_supported_version", lambda: (0, 144, 6)
@@ -310,7 +324,7 @@ def test_bind_command_records_current_lease_and_native_thread(
         raising=False,
     )
     monkeypatch.setattr(wake, "require_supported_daemon", lambda _socket: None)
-    monkeypatch.setattr(wake, "AppServerClient", lambda _socket: Client())
+    monkeypatch.setattr(wake, "AppServerClient", lambda _socket: client)
     monkeypatch.setattr(
         wake,
         "read_thread",
@@ -335,7 +349,72 @@ def test_bind_command_records_current_lease_and_native_thread(
     inspection = _rtruntime.inspect_seat(project, "codex")
     assert inspection.status == "active_healthy"
     assert inspection.token.native_session_id == selected_thread["id"]
+    assert client.calls == [
+        (
+            "thread/name/set",
+            {
+                "threadId": selected_thread["id"],
+                "name": f"codex@{project.name}",
+            },
+        )
+    ]
     assert "bound project=" in capsys.readouterr().out
+
+
+def test_bind_command_keeps_binding_when_thread_name_rpc_fails(
+    tmp_path, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    claim_codex(monkeypatch, tmp_path, project)
+    state_file = tmp_path / "wake-state.json"
+    selected_thread = thread(project)
+    events = []
+
+    class Client:
+        def request(self, method, params):
+            assert method == "thread/name/set"
+            raise wake.RpcError("cosmetic name failure")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(wake, "require_supported_version", lambda: (0, 147, 0))
+    monkeypatch.setattr(wake, "require_supported_daemon", lambda _socket: None)
+    monkeypatch.setattr(wake, "AppServerClient", lambda _socket: Client())
+    monkeypatch.setattr(
+        wake,
+        "read_thread",
+        lambda _client, _thread_id: selected_thread,
+    )
+    monkeypatch.setattr(
+        wake,
+        "log_event",
+        lambda event, **fields: events.append((event, fields)),
+    )
+
+    result = wake.bind_command(
+        SimpleNamespace(
+            project=str(project),
+            thread_id=selected_thread["id"],
+            socket=tmp_path / "app.sock",
+            state_file=state_file,
+        )
+    )
+
+    assert result == 0
+    assert wake.StateStore(state_file).bindings[str(project)]["threadId"] == "thread-1"
+    assert events == [
+        (
+            "thread_name_failed",
+            {
+                "project": str(project),
+                "agent": "codex",
+                "thread_id": "thread-1",
+                "name": f"codex@{project.name}",
+                "error": "cosmetic name failure",
+            },
+        )
+    ]
 
 
 def test_auto_discovery_persists_binding_inside_seat_guard(

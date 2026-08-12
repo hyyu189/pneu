@@ -939,9 +939,250 @@ def test_pty_single_card_enters_through_last_used_seat(
     assert "unread mail: claude=0 codex=0" in rendered
     assert "Claude phone connection: off  [p]" in rendered
     assert (
-        "↑↓/1-9 select · Enter launch · p Claude phone · w worktrees · "
+        "↑↓/1-9 select · Enter launch · a add seat · "
+        "p Claude phone · w worktrees · "
         "? guide · q quit" in rendered
     )
+
+
+def test_pty_card_resumes_vacant_bound_codex_thread(
+    tmp_path, isolated_registry, fake_commands, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    runtime.chmod(0o700)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    thread_id = "019ff37e-5071-7300-bdb4-bedd1537b0ad"
+    (runtime / "rt-codex-wake-state.json").write_text(
+        json.dumps(
+            {
+                "schema": roundtable.CODEX_WAKE_STATE_SCHEMA,
+                "bindings": {
+                    str(project): {
+                        "agent": "codex",
+                        "project": str(project),
+                        "threadId": thread_id,
+                    }
+                },
+                "projects": {},
+            }
+        )
+    )
+    (project / ".roundtable" / "launcher.json").write_text(
+        json.dumps(
+            {
+                "schema": roundtable.LAUNCHER_STATE_SCHEMA,
+                "welcomePending": False,
+                "lastSeat": "codex:codex",
+            }
+        )
+    )
+    monkeypatch.setattr(roundtable, "choose_project", lambda **_kwargs: project)
+    monkeypatch.setattr(roundtable, "ensure_harness_setup", lambda *_a, **_k: None)
+    handoff_calls = []
+
+    def handoff(name, arguments, root):
+        handoff_calls.append((name, arguments, root))
+        return 0, "handoff prepared"
+
+    monkeypatch.setattr(roundtable, "_run_card_command", handoff)
+    exec_calls = []
+
+    result, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.onboard(
+            cwd=project,
+            home=tmp_path / "home",
+            stdin=stdin,
+            stderr=stderr,
+            environ={},
+            exec_runner=lambda path, argv: exec_calls.append((path, argv)) or 0,
+            chdir_runner=lambda _root: None,
+        ),
+        b"\n",
+    )
+
+    target = fake_commands / "rt-codex"
+    assert result == 0
+    assert "Codex — codex (bound thread)" in rendered
+    assert handoff_calls == [
+        (
+            "rt-codex-wake",
+            ["handoff", str(project), "--thread-id", thread_id],
+            project,
+        )
+    ]
+    assert exec_calls == [
+        (str(target), [str(target), "resume", thread_id])
+    ]
+
+
+def test_pty_card_shows_handoff_refusal_and_does_not_resume(
+    tmp_path, isolated_registry, fake_commands, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    runtime.chmod(0o700)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    thread_id = "019ff37e-5071-7300-bdb4-bedd1537b0ad"
+    (runtime / "rt-codex-wake-state.json").write_text(
+        json.dumps(
+            {
+                "schema": roundtable.CODEX_WAKE_STATE_SCHEMA,
+                "bindings": {
+                    str(project): {
+                        "agent": "codex",
+                        "project": str(project),
+                        "threadId": thread_id,
+                    }
+                },
+                "projects": {},
+            }
+        )
+    )
+    (project / ".roundtable" / "launcher.json").write_text(
+        json.dumps(
+            {
+                "schema": roundtable.LAUNCHER_STATE_SCHEMA,
+                "welcomePending": False,
+                "lastSeat": "codex:codex",
+            }
+        )
+    )
+    monkeypatch.setattr(roundtable, "choose_project", lambda **_kwargs: project)
+    monkeypatch.setattr(roundtable, "ensure_harness_setup", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        roundtable,
+        "_run_card_command",
+        lambda *_args: (2, "handoff failed\nactive Codex seat appeared"),
+    )
+    exec_calls = []
+
+    result, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.onboard(
+            cwd=project,
+            home=tmp_path / "home",
+            stdin=stdin,
+            stderr=stderr,
+            environ={},
+            exec_runner=lambda path, argv: exec_calls.append((path, argv)) or 0,
+            chdir_runner=lambda _root: None,
+        ),
+        b"\nq",
+    )
+
+    assert result == 0
+    assert "active Codex seat appeared" in rendered
+    assert exec_calls == []
+
+
+def test_pty_card_corrupt_codex_state_silently_uses_fresh_launch(
+    tmp_path, isolated_registry, fake_commands, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    runtime.chmod(0o700)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    (runtime / "rt-codex-wake-state.json").write_text("{not-json\n")
+    selection = {}
+
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project,
+            stdin=stdin,
+            stderr=stderr,
+            selection_meta=selection,
+        ),
+        b"\n",
+    )
+
+    assert selected == ("codex", "codex")
+    assert selection == {}
+    assert "(bound thread)" not in rendered
+    assert "not-json" not in rendered
+
+
+def test_card_does_not_offer_add_for_missing_harness_executables(
+    tmp_path, isolated_registry, fake_commands, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    before = (project / ".roundtable" / "agents.yaml").read_bytes()
+
+    def only_codex_is_installed(harness):
+        if harness == "codex":
+            return fake_commands / harness
+        raise roundtable.SelectionError(f"missing {harness}")
+
+    monkeypatch.setattr(roundtable, "harness_bin", only_codex_is_installed)
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project,
+            stdin=stdin,
+            stderr=stderr,
+        ),
+        b"\n",
+    )
+
+    assert selected == ("codex", "codex")
+    assert roundtable._addable_harnesses(project) == []
+    assert "a add seat" not in rendered
+    assert (project / ".roundtable" / "agents.yaml").read_bytes() == before
+
+
+def test_pty_add_seat_preserves_existing_agents_yaml_prefix(
+    tmp_path, isolated_registry, fake_commands
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    path = project / ".roundtable" / "agents.yaml"
+    before = path.read_bytes()
+
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project,
+            stdin=stdin,
+            stderr=stderr,
+        ),
+        b"a1\n",
+    )
+
+    after = path.read_bytes()
+    assert selected == ("claude", "claude")
+    assert after.startswith(before)
+    assert after[len(before) :] == (
+        b"\n"
+        b"  claude:\n"
+        b"    harness: claude-code\n"
+        b"    instances:\n"
+        b"      - id: claude\n"
+    )
+    assert "a add seat" in rendered
+    assert "Add seat: 1 Claude Code" in rendered
+    assert "> Claude Code — claude" in rendered
+
+
+def test_add_seat_refuses_unparseable_agents_yaml_without_rewrite(
+    tmp_path,
+):
+    project = write_project(tmp_path / "project")
+    path = project / ".roundtable" / "agents.yaml"
+    before = b"schema: roundtable.agents.v1\nagents: [\n"
+    path.write_bytes(before)
+
+    with pytest.raises(roundtable.OnboardingError, match="cannot be parsed"):
+        roundtable._append_harness_seat(project, "claude")
+
+    assert path.read_bytes() == before
+    assert list(path.parent.glob(".agents.yaml.tmp.*")) == []
 
 
 def test_pty_card_arrow_keys_move_cursor_when_sequence_arrives_in_one_burst(

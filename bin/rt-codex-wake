@@ -714,6 +714,7 @@ def _adopt_stale_binding(
         raise IdentityError(
             f"Codex seat changed before binding adoption for {project}: {error}"
         ) from error
+    set_thread_name_best_effort(client, project, current.agent_id, thread_id)
     if did_change:
         log_event(
             "binding_adopted",
@@ -787,6 +788,36 @@ def log_event(event: str, **fields) -> None:
     descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def set_thread_name_best_effort(
+    client: AppServerClient,
+    project: Path,
+    agent_id: str,
+    thread_id: str,
+) -> None:
+    """Apply the cosmetic pneu thread name without weakening a valid bind."""
+
+    name = f"{agent_id}@{project.name}"
+    try:
+        client.request(
+            "thread/name/set",
+            {"threadId": thread_id, "name": name},
+        )
+    except Exception as error:
+        # Binding is load-bearing. Naming remains best-effort even if a future
+        # app-server changes this cosmetic RPC.
+        try:
+            log_event(
+                "thread_name_failed",
+                project=str(project),
+                agent=agent_id,
+                thread_id=thread_id,
+                name=name,
+                error=str(error),
+            )
+        except Exception:
+            pass
 
 
 def notify_needs_human(
@@ -1247,6 +1278,7 @@ def drain_bind_requests(
                     current.revision,
                     native_session_id=thread_id,
                 )
+            set_thread_name_best_effort(client, project, agent_id, thread_id)
             if did_change:
                 changed.add(str(project))
             consumed = _consume_bind_request(path, identity)
@@ -1726,6 +1758,12 @@ class WakeBridge:
                 raise IdentityError(
                     f"Codex seat changed before auto-bind: {error}"
                 ) from error
+        set_thread_name_best_effort(
+            self.client,
+            project,
+            binding["agent"],
+            binding["threadId"],
+        )
         _binding_lease(project, binding)
         self.resume_attempted.add(key)
         self.resumed[key], subscribed = resume_or_loaded(
@@ -2524,6 +2562,7 @@ def bind_command(args) -> int:
                     f"Codex seat changed before bind: {error}"
                 ) from error
         agent_id = lease.agent_id if lease is not None else "codex"
+        set_thread_name_best_effort(client, project, agent_id, thread_id)
         print(f"bound project={project} agent={agent_id} thread={thread_id}")
         return 0
     finally:
