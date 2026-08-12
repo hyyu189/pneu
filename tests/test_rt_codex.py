@@ -223,6 +223,8 @@ class FakeClient:
             return {"thread": dict(self.value)}
         if method == "thread/resume":
             return {"thread": dict(self.value)}
+        if method == "thread/name/set":
+            return {}
         if method == "thread/turns/list":
             return {"data": list(self.value.get("turns") or [])}
         if method == "hooks/list":

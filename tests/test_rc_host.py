@@ -6,6 +6,7 @@ import io
 import json
 import os
 import plistlib
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -331,8 +332,7 @@ def test_worktree_hooks_create_registered_container_tree_and_defer_live_removal(
 def test_registered_unleased_session_adoption_is_idempotent(tmp_path, monkeypatch):
     project = write_project(tmp_path / "adopted")
     runtime = tmp_path / "runtime"
-    env_file = tmp_path / "claude-env"
-    env_file.write_text("", encoding="utf-8")
+    env_file = tmp_path / "phone" / "session" / "claude-env"
     monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
     monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
     environment = {"CLAUDE_ENV_FILE": str(env_file)}
@@ -357,13 +357,16 @@ def test_registered_unleased_session_adoption_is_idempotent(tmp_path, monkeypatc
     assert first == second == "claude"
     assert first_token is not None and second_token is not None
     assert first_token.revision == second_token.revision
+    assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+    assert stat.S_IMODE(env_file.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(env_file.parent.parent.stat().st_mode) == 0o700
     exports = env_file.read_text(encoding="utf-8")
     assert "export RT_PROJECT_ROOT=" in exports
     assert "export RT_SESSION_ID=phone-session-1" in exports
 
 
-def test_adoption_releases_new_lease_when_environment_persistence_fails(
-    tmp_path, monkeypatch
+def test_adoption_keeps_new_lease_when_environment_persistence_fails(
+    tmp_path, monkeypatch, capsys
 ):
     project = write_project(tmp_path / "adoption-rollback")
     runtime = tmp_path / "runtime"
@@ -379,19 +382,87 @@ def test_adoption_releases_new_lease_when_environment_persistence_fails(
         ),
     )
 
-    with pytest.raises(_rtruntime.RuntimeStateError, match="persistence failure"):
-        wait._adopt_unleased_claude_session(
-            {
-                "hook_event_name": "SessionStart",
-                "source": "startup",
-                "session_id": "phone-session-rollback",
-                "cwd": str(project),
-            },
-            environment={"CLAUDE_ENV_FILE": str(env_file)},
-            owner_pid=os.getpid(),
-        )
+    environment = {"CLAUDE_ENV_FILE": str(env_file)}
+    adopted = wait._adopt_unleased_claude_session(
+        {
+            "hook_event_name": "SessionStart",
+            "source": "startup",
+            "session_id": "phone-session-degraded",
+            "cwd": str(project),
+        },
+        environment=environment,
+        owner_pid=os.getpid(),
+    )
 
-    assert _rtruntime.inspect_seat(project, "claude").status == "vacant"
+    inspection = _rtruntime.inspect_seat(project, "claude")
+    assert adopted == "claude"
+    assert inspection.status in {"active_healthy", "active_unhealthy"}
+    assert inspection.token is not None
+    assert inspection.token.session_id == "phone-session-degraded"
+    assert environment["RT_SESSION_ID"] == "phone-session-degraded"
+    assert "continues with the active lease" in capsys.readouterr().err
+
+
+def test_unmanaged_stop_hook_restores_matching_active_lease(tmp_path, monkeypatch):
+    project = write_project(tmp_path / "stop-fallback")
+    runtime = tmp_path / "runtime"
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    for name in (
+        "RT_PROJECT_ROOT",
+        "RT_FROM",
+        "RT_SESSION_ID",
+        "RT_LEASE_REVISION",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    token = _rtruntime.claim(
+        project,
+        "claude",
+        "claude",
+        owner_pid=os.getpid(),
+        session_id="phone-stop-session",
+    )
+    payload = {
+        "hook_event_name": "Stop",
+        "session_id": token.session_id,
+        "cwd": str(project),
+        "stop_hook_active": True,
+    }
+    captured = {}
+
+    rejected_environment = {}
+    assert (
+        wait._restore_claude_lease_environment(
+            {**payload, "session_id": "different-session"},
+            environment=rejected_environment,
+        )
+        is None
+    )
+    assert rejected_environment == {}
+
+    def fake_run(agent, explicit, **options):
+        captured.update(agent=agent, explicit=explicit, options=options)
+        return 0
+
+    monkeypatch.setattr(wait, "run", fake_run)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+    try:
+        assert wait.main(["--claude-stop-hook"]) == 0
+        assert captured == {
+            "agent": "claude",
+            "explicit": None,
+            "options": {
+                "claude_hook": True,
+                "claude_stop_hook": True,
+                "stop_hook_active": True,
+            },
+        }
+        assert os.environ["RT_PROJECT_ROOT"] == str(project)
+        assert os.environ["RT_FROM"] == "claude"
+        assert os.environ["RT_SESSION_ID"] == token.session_id
+        assert os.environ["RT_LEASE_REVISION"] == str(token.revision)
+    finally:
+        assert _rtruntime.release(token)
 
 
 def test_adoption_never_claims_unregistered_or_displaces_live_lease(

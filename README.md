@@ -76,7 +76,11 @@ compatibility alias emits no rename warning.
 On a full TTY, `pneu` presents one compact seat card with the last-used seat
 selected, three status lines, and in-place Claude phone connection controls.
 Arrow keys or digits move the selection, and a single Enter launches that
-seat. Line-oriented and non-TTY streams retain the
+seat. Installed harnesses that are not configured for the project can be
+added with `a`; missing executables retain their install guidance. A vacant
+or stale Codex seat with a persisted binding is marked `(bound thread)`, and
+Enter performs a guarded handoff before resuming that exact thread.
+Line-oriented and non-TTY streams retain the
 numbered selector for script compatibility; the full guide appears only with
 `?` or `pneu guide`.
 

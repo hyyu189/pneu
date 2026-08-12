@@ -517,6 +517,62 @@ def test_occupied_seat_is_a_clear_selection_error(
     assert "requested seat 'claude'" in str(captured.value)
 
 
+def test_owner_process_location_formats_tty_and_tmux_ancestor():
+    rendered = _rtlauncher._format_owner_process_location(
+        430,
+        tty_output="ttys017\n",
+        process_output=(
+            "  101     1\n"
+            "  220   101\n"
+            "  430   220\n"
+        ),
+        tmux_output=(
+            "777 unrelated:window\n"
+            "101 build:editor\n"
+        ),
+    )
+
+    assert rendered == "tty=ttys017; tmux=build:editor"
+
+
+def test_owner_process_location_formatter_omits_every_failed_probe():
+    assert _rtlauncher._format_owner_process_location(
+        430,
+        tty_output=None,
+        process_output=None,
+        tmux_output=None,
+    ) == ""
+
+
+def test_occupied_seat_omits_process_location_when_probes_fail(
+    tmp_path, monkeypatch
+):
+    project = (tmp_path / "project").resolve()
+
+    class Occupied(RuntimeError):
+        def __init__(self):
+            self.inspection = SimpleNamespace(
+                status="active_healthy",
+                detail="owner pid 430 is running",
+                token=SimpleNamespace(agent_id="codex", owner_pid=430),
+            )
+
+    monkeypatch.setattr(_rtlauncher, "SeatOccupied", Occupied)
+    monkeypatch.setattr(
+        _rtlauncher,
+        "claim",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(Occupied()),
+    )
+    monkeypatch.setattr(_rtlauncher, "_owner_process_location", lambda _pid: "")
+
+    with pytest.raises(_rtlauncher.SelectionError) as captured:
+        _rtlauncher.claim_launch_seat(project, "codex", "codex")
+
+    assert str(captured.value).endswith("owner pid 430 is running")
+    assert "tty=" not in str(captured.value)
+    assert "tmux=" not in str(captured.value)
+
+
 def test_explicit_identity_must_belong_to_selected_project_and_harness(
     tmp_path, monkeypatch
 ):

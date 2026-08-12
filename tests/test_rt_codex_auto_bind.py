@@ -160,6 +160,8 @@ class Client:
             return {"thread": dict(self.threads.get(params["threadId"]) or {})}
         if method == "thread/resume":
             return {"thread": dict(self.threads.get(params["threadId"]) or {})}
+        if method == "thread/name/set":
+            return {}
         if method == "hooks/list":
             return {
                 "data": [
@@ -542,8 +544,9 @@ def test_bridge_validates_and_auto_binds_current_fenced_request(tmp_path):
     assert run_hook(hook_payload(project), environment).returncode == 0
     store = wake.StateStore(tmp_path / "wake-state.json")
 
+    client = Client(project, ["thread-1"])
     changed = wake.drain_bind_requests(
-        Client(project, ["thread-1"]),
+        client,
         store,
         [project],
         requests_dir=tmp_path / "runtime" / "codex-bind-requests",
@@ -557,6 +560,10 @@ def test_bridge_validates_and_auto_binds_current_fenced_request(tmp_path):
     assert list((tmp_path / "runtime" / "codex-bind-requests").iterdir()) == []
     inspection = _rtruntime.inspect_seat(project, "codex")
     assert inspection.token.native_session_id == "thread-1"
+    assert (
+        "thread/name/set",
+        {"threadId": "thread-1", "name": f"codex@{project.name}"},
+    ) in client.calls
 
 
 def test_unknown_bind_refreshes_registry_before_rejecting(tmp_path):

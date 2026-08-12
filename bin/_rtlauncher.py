@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
@@ -79,6 +80,111 @@ LEASE_ENV_NAMES = (
     "RT_SESSION_ID",
     "RT_LEASE_REVISION",
 )
+
+
+def _best_effort_process_output(command: list[str]) -> str | None:
+    """Return one short process-location probe, or ``None`` on any failure."""
+
+    try:
+        result = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=0.25,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _format_owner_process_location(
+    owner_pid: int,
+    *,
+    tty_output: str | None,
+    process_output: str | None,
+    tmux_output: str | None,
+) -> str:
+    """Format best-effort TTY/tmux evidence from already captured outputs."""
+
+    fragments = []
+    if tty_output is not None:
+        tty_name = tty_output.strip()
+        if tty_name.startswith("/dev/"):
+            tty_name = tty_name[len("/dev/") :]
+        if tty_name in {"", "?", "??", "-"}:
+            tty_name = "none"
+        fragments.append(f"tty={tty_name}")
+
+    ancestors = {owner_pid}
+    parents: dict[int, int] = {}
+    if process_output is not None:
+        for line in process_output.splitlines():
+            fields = line.split()
+            if len(fields) != 2:
+                continue
+            try:
+                pid, parent = (int(field) for field in fields)
+            except ValueError:
+                continue
+            if pid > 0 and parent >= 0:
+                parents[pid] = parent
+        current = owner_pid
+        while current in parents:
+            parent = parents[current]
+            if parent <= 0 or parent in ancestors:
+                break
+            ancestors.add(parent)
+            current = parent
+
+    if tmux_output is not None:
+        for line in tmux_output.splitlines():
+            pane_pid_text, separator, location = line.strip().partition(" ")
+            if not separator or not location:
+                continue
+            try:
+                pane_pid = int(pane_pid_text)
+            except ValueError:
+                continue
+            if pane_pid in ancestors:
+                fragments.append(f"tmux={location}")
+                break
+    return "; ".join(fragments)
+
+
+def _owner_process_location(owner_pid: int) -> str:
+    """Locate an occupied seat without making launcher refusal depend on it."""
+
+    if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
+        return ""
+    tty_output = _best_effort_process_output(
+        ["/bin/ps", "-o", "tty=", "-p", str(owner_pid)]
+    )
+    process_output = None
+    tmux_output = None
+    tmux = shutil.which("tmux")
+    if tmux:
+        process_output = _best_effort_process_output(
+            ["/bin/ps", "-axo", "pid=,ppid="]
+        )
+        tmux_output = _best_effort_process_output(
+            [
+                tmux,
+                "list-panes",
+                "-a",
+                "-F",
+                "#{pane_pid} #{session_name}:#{window_name}",
+            ]
+        )
+    return _format_owner_process_location(
+        owner_pid,
+        tty_output=tty_output,
+        process_output=process_output,
+        tmux_output=tmux_output,
+    )
+
+
 LEASE_CONTEXT_ENV_NAMES = tuple(
     name for name in LEASE_ENV_NAMES if name != "RT_FROM"
 )
@@ -464,17 +570,20 @@ def claim_launch_seat(root: Path | None, harness: str, agent_id: str | None):
     except SeatOccupied as error:
         status = error.inspection.status
         condition = "unhealthy" if status == "active_unhealthy" else "active"
-        owner = getattr(getattr(error.inspection, "token", None), "agent_id", None)
+        token = getattr(error.inspection, "token", None)
+        owner = getattr(token, "agent_id", None)
         occupied = owner if isinstance(owner, str) and owner else agent_id
         request_detail = (
             f"; requested seat {agent_id!r}"
             if occupied != agent_id
             else ""
         )
+        location = _owner_process_location(getattr(token, "owner_pid", 0))
+        location_detail = f"; {location}" if location else ""
         raise SelectionError(
             f"rt-{harness}: seat {occupied!r} is {condition} in {root}"
             f"{request_detail}; "
-            f"{error.inspection.detail}"
+            f"{error.inspection.detail}{location_detail}"
         ) from error
     except SeatAmbiguous as error:
         raise SelectionError(
