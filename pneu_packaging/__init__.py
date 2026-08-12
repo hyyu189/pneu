@@ -14,6 +14,7 @@ MANAGED_HELPERS = (
     "_rtmigrate.py",
     "_rtrchost.py",
     "_rtruntime.py",
+    "_rtsurface.py",
 )
 
 MANAGED_ASSETS = (

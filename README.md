@@ -61,6 +61,7 @@ pneu setup                   preview harness setup (read-only)
 pneu setup apply             apply owned harness setup
 pneu doctor                  diagnose the current project and seat
 pneu worktree add NAME       create a registered tree in ../<repo>-worktree/
+pneu worktree open NAME      open one configured seat in a visible surface
 pneu rc-host enable          enable project-only Claude phone worktree spawn
 pneu rc-host status          inspect this project's phone host
 rt-say AGENT KIND "MESSAGE" durable local or sibling delivery
@@ -125,6 +126,15 @@ an unanswered deadline wakes the sender once through the existing watcher.
 `<repo-parent>/<repo-name>-worktree/NAME` by default. The container is created
 on demand and holds only pneu-created linked trees; the main checkout never
 migrates into it. `--path` remains the explicit escape hatch.
+
+`pneu worktree open NAME [--seat AGENT] [--surface herdr|tmux|print]` resolves
+only a registered project in the current Git-derived group and starts its pneu
+seat launcher from that worktree. A sole configured seat is automatic; a
+multi-seat project requires `--seat`. Surface selection is explicit flag,
+`RT_SURFACE`, ambient Herdr (`HERDR_ENV=1`), ambient or attached-client tmux,
+then a print-only fallback. Successful Herdr/tmux launches write an advisory
+host-runtime surface reference beside the seat state; it is navigation
+metadata, never ownership or liveness evidence.
 
 `pneu rc-host enable` is an expert, project-anchored opt-in for Claude mobile
 or web worktree spawn. It first requires an already accepted Claude workspace

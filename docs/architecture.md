@@ -139,7 +139,7 @@ host:
 | Agent identities and portable project configuration | `<project>/.roundtable/agents.yaml` | Durable project state |
 | Stable worktree identity and registry metadata | ignored `<project>/.roundtable/project.json` plus `~/.pneu/projects.yaml` | Durable worktree and host state |
 | Inbox `new/`, `cur/`, and `tmp/`; message ledger and acknowledgements | Registry-selected local or central mail root (new/upgraded entries initially use `<project>/.roundtable/`) | Durable delivery state |
-| Current session lease, owner PID and process fingerprint, wake-adapter PID, activity and heartbeat | `~/.pneu/.runtime/` | Host-local ephemeral state |
+| Current session lease, owner PID and process fingerprint, wake-adapter PID, activity and heartbeat; advisory Herdr/tmux seat surface | `~/.pneu/.runtime/` | Host-local ephemeral state |
 | Enabled Claude project rc-host ownership, plist digest, and last phone registration | registry-adjacent `rc-hosts/<project-uuid>.json`; plist under `~/Library/LaunchAgents/` | Durable host/project trait until explicit disable |
 | Optional terminal topology, navigation handles, and adapter diagnostics | `~/.pneu/.runtime/adapters/` | Host-local ephemeral state |
 
@@ -353,6 +353,13 @@ Claude, Hermes, Codex, and Grok wake/UX matrix in Terminal.app, iTerm2, and
 Ghostty.
 cmux must pass the same baseline and may additionally expose its optional
 workspace features.
+
+`pneu worktree open` is the explicit visible-seat adapter. It resolves only a
+registered worktree in the caller's Git-derived group, launches the selected
+pneu harness wrapper through Herdr or tmux when available, and otherwise
+prints an exact command for a normal terminal. Its recorded surface handle is
+advisory navigation metadata; the fenced lease remains the only seat-owner
+fact.
 
 tmux is a multiplexer rather than a terminal emulator. Same-host tmux and
 cross-host SSH require their own lifecycle and wake acceptance before support

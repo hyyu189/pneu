@@ -141,7 +141,14 @@ The launcher replaces itself with the selected harness executable. When you
 run `pneu`, `rt-claude`, `rt-codex`, `rt-hermes`, `rt-openclaw`, or `rt-grok`
 from an existing interactive shell, that shell remains the parent and returns
 to its prompt when the harness exits, including after Ctrl-C. The launcher does
-not create or manage tmux windows or panes.
+not create or manage tmux windows or panes on this direct path.
+
+`pneu worktree open` is the separate opt-in surface manager. It uses a
+Herdr-created pane when `HERDR_ENV=1`, a tmux pane/window when inside tmux or a
+default server has an attached client, and otherwise prints the exact launcher
+command without claiming it ran. These backends have isolated fake-binary
+coverage; real harness launches in each host remain part of the promotion
+matrix below.
 
 If a tmux window was created with the launcher itself as the window command,
 there is no parent shell for the window to return to; the window can therefore
@@ -432,6 +439,7 @@ acknowledgement, and drain. It does not prove interactive wake UX.
 | iTerm2 | Same maildir core | Pending promotion gate |
 | Ghostty | Same maildir core | Pending promotion gate |
 | cmux | Same maildir core; optional topology features | Pending baseline and separate optional-adapter gate |
+| Herdr | Same maildir core; `pneu worktree open` backend has isolated command-contract coverage | Promotion gate: one real configured harness launch through a Herdr pane |
 | tmux | Delivery/ack loop, cross-worktree addressing, watcher wake mechanics (attached and detached), app-server socket and launchd reachability all validated under tmux in isolated labs on 2026-08-02; static audit found no terminal-sensitive code on the delivery or wake paths | Promotion gate: one full credentialed seat launched inside tmux; docs must carry the env-propagation caveat (a running tmux server does not see a client shell's later exports — use `tmux new-window -e VAR=...` or `set-environment` plus a fresh pane) |
 | Cross-host SSH | No P0 transport | Unsupported |
 

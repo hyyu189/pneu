@@ -90,7 +90,7 @@ commands:
   send       Send a durable message
   inbox      Read a durable inbox
   ack        Acknowledge a durable message
-  worktree   Add, list, or remove a registered Git worktree project
+  worktree   Add, open, list, or remove a registered Git worktree project
   rc-host    Enable, disable, or inspect this project's Claude phone host
 """
 

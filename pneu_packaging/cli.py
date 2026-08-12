@@ -1013,7 +1013,7 @@ def _create_version(
                 str(installed_python),
                 "-c",
                 "import _rtcodex, _rtlauncher, _rtlib, _rtmigrate, "
-                "_rtruntime, yaml",
+                "_rtruntime, _rtsurface, yaml",
             ]
         )
 

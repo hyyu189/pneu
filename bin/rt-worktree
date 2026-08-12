@@ -27,17 +27,19 @@ from _rtlib import (
     resolve_project_mailbox_checked,
     unregister_project,
 )
+from _rtsurface import SurfaceError, detect_surface, launch_surface
 from _rtruntime import (
     RuntimeStateError,
     harness_lease_records,
     inspect_seat,
     reclaim_project_runtime,
+    record_seat_surface,
 )
 
 
 PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 PROMPT_ATTEMPTS = 3
-KNOWN_HARNESSES = ("claude", "codex", "hermes", "openclaw")
+KNOWN_HARNESSES = ("claude", "codex", "hermes", "openclaw", "grok")
 
 
 class WorktreeError(RuntimeError):
@@ -510,6 +512,8 @@ def _configured_seats(project: Path) -> list[tuple[str, str]]:
             "hermes": "hermes",
             "openclaw-gateway": "openclaw",
             "openclaw": "openclaw",
+            "grok-build": "grok",
+            "grok": "grok",
         }.get(raw_harness, raw_harness)
         instances = config.get("instances")
         if not isinstance(instances, list) or not instances:
@@ -521,6 +525,112 @@ def _configured_seats(project: Path) -> list[tuple[str, str]]:
                 if pair not in result:
                     result.append(pair)
     return result
+
+
+def _selected_seat(project: Path, requested: str | None) -> tuple[str, str]:
+    configured = _configured_seats(project)
+    if requested is not None:
+        matches = [seat for seat in configured if seat[1] == requested]
+        if not matches:
+            rendered = ", ".join(
+                f"{agent_id} ({harness})" for harness, agent_id in configured
+            ) or "none"
+            raise WorktreeError(
+                f"seat {requested!r} is not configured in {project}; "
+                f"configured seats: {rendered}"
+            )
+        if len(matches) != 1:
+            rendered = ", ".join(harness for harness, _agent_id in matches)
+            raise WorktreeError(
+                f"seat {requested!r} is ambiguous across harnesses: {rendered}"
+            )
+        return matches[0]
+    if len(configured) == 1:
+        return configured[0]
+    if not configured:
+        raise WorktreeError(f"no launchable seats are configured in {project}")
+    rendered = ", ".join(
+        f"{agent_id} ({harness})" for harness, agent_id in configured
+    )
+    raise WorktreeError(
+        f"multiple seats are configured in {project}; pass --seat AGENT "
+        f"({rendered})"
+    )
+
+
+def _seat_launcher(harness: str) -> Path:
+    if harness not in KNOWN_HARNESSES:
+        raise WorktreeError(
+            f"configured harness {harness!r} has no pneu seat launcher"
+        )
+    launcher = Path(__file__).resolve().with_name(f"rt-{harness}")
+    if not launcher.is_file() or not os.access(launcher, os.X_OK):
+        raise WorktreeError(
+            f"pneu seat launcher is unavailable or not executable: {launcher}"
+        )
+    return launcher
+
+
+def _worktree_open(args, *, cwd: Path, stdout, stderr) -> int:
+    name = _validate_name(args.name)
+    repo = _repository(cwd, cwd=cwd)
+    entries, warnings = _registry_snapshot()
+    emit_registry_warnings(warnings, stream=stderr, tool="rt-worktree")
+    entry = _sibling_entry(name, repo.group, entries)
+    try:
+        target = Path(entry["root"]).resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise WorktreeError(
+            f"registered worktree root is unavailable for {name!r}: {error}"
+        ) from error
+    target_repo = _repository(target, cwd=target)
+    if target_repo.group != repo.group:
+        raise WorktreeError(
+            f"registered project {name!r} is outside the invoking Git group: {target}"
+        )
+
+    harness, agent_id = _selected_seat(target, args.seat)
+    launcher = _seat_launcher(harness)
+    selection = detect_surface(args.surface, environ=os.environ)
+    launch = launch_surface(
+        selection,
+        tree=target,
+        launcher=launcher,
+        agent_id=agent_id,
+        environ=os.environ,
+        stdout=stdout,
+    )
+    if not launch.launched:
+        return 0
+    if launch.surface is None:
+        raise WorktreeError(
+            f"{selection.kind} launch succeeded without a surface reference"
+        )
+    try:
+        surface_path = record_seat_surface(
+            target,
+            agent_id,
+            harness,
+            launch.surface,
+        )
+    except (RuntimeStateError, OSError) as error:
+        surface_path = None
+        print(
+            "rt-worktree: warning: seat launch succeeded, but its advisory "
+            f"surface reference could not be recorded: {error}",
+            file=stderr,
+        )
+
+    reference = launch.surface.get("pane") or launch.surface.get("target")
+    print("worktree opened:", file=stdout)
+    print(f"  project: {name}", file=stdout)
+    print(f"  path: {target}", file=stdout)
+    print(f"  seat: {agent_id}", file=stdout)
+    print(f"  harness: {harness}", file=stdout)
+    print(f"  surface: {selection.kind}:{reference}", file=stdout)
+    if surface_path is not None:
+        print(f"  advisory record: {surface_path}", file=stdout)
+    return 0
 
 
 def _seat_views(project: Path) -> list[SeatView]:
@@ -775,6 +885,14 @@ def build_parser() -> argparse.ArgumentParser:
     remove.add_argument("--keep-branch", action="store_true")
     remove.add_argument("--yes", action="store_true")
 
+    open_command = subparsers.add_parser(
+        "open",
+        help="open a configured seat in a visible terminal surface",
+    )
+    open_command.add_argument("name")
+    open_command.add_argument("--seat", metavar="AGENT")
+    open_command.add_argument("--surface", metavar="SURFACE")
+
     subparsers.add_parser("list", help="list registered sibling worktrees")
     return parser
 
@@ -809,13 +927,26 @@ def main(
                 stdout=stdout,
                 stderr=stderr,
             )
+        if args.command == "open":
+            return _worktree_open(
+                args,
+                cwd=cwd,
+                stdout=stdout,
+                stderr=stderr,
+            )
         return _worktree_list(
             args,
             cwd=cwd,
             stdout=stdout,
             stderr=stderr,
         )
-    except (WorktreeError, ProjectRegistryError, RuntimeStateError, OSError) as error:
+    except (
+        WorktreeError,
+        SurfaceError,
+        ProjectRegistryError,
+        RuntimeStateError,
+        OSError,
+    ) as error:
         print(f"rt-worktree: {error}", file=stderr)
         return 2
 
