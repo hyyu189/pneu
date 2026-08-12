@@ -1,17 +1,17 @@
-# ROUTING.md — context-loading routing (非 surface 路由)
+# ROUTING.md — context-loading routing（非消息投递路由）
 
 conditional paths are indexes; read only when their trigger matches.
 
 ```yaml
 load_if:
-  roundtable:                              # 触发即用 roundtable skill（含通信纪律）
+  pneu:                                    # 触发即用 pneu skill（含通信纪律）
     when:
-      - inbound_roundtable_message         # [FROM→TO kind id=...] 到达
+      - inbound_pneu_message               # [FROM→TO kind id=...] 到达
       - peer_agent_coordination            # Claude / Codex / Hermes 互为 peer
       - rt_say_or_ack_or_refresh_or_resolve
       - handoff_delivery
-      - surface_or_routing_debug
-    skill: roundtable
+      - wake_or_delivery_debug
+    skill: pneu
     read:
       - .roundtable/agents.yaml
 

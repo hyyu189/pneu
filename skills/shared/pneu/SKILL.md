@@ -4,9 +4,9 @@ description: >-
   Use when active pneu coordination is required: an inbound [FROM→TO kind
   id=...] message arrives, the user mentions Hermes/Claude/Codex as peer agents,
   rt-say, rt-ack, rt-refresh, rt-resolve, handoff delivery, multi-instance agent
-  routing, or cmux surface-routing bugs. Do not use merely because a repo
+  routing, or wake/delivery debugging. Do not use merely because a repo
   contains .roundtable/agents.yaml.
-version: 8.3.0
+version: 8.4.0
 author: pneu contributors
 license: MIT
 platforms: [macos]
@@ -101,10 +101,19 @@ only creates files the repository does not carry.
 | `pneu worktree remove NAME [--keep-branch]` | Refuse active/ambiguous seats, unbind Codex, tombstone the registry row, remove the worktree, and delete only a merged branch. |
 | `pneu rc-host enable\|disable\|status` | Expert project-only Claude mobile/web worktree-spawn host; requires accepted workspace trust. |
 | `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit. |
-| `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: where does cmux think an agent sits. Not part of sending. |
+| `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: optional topology view (cmux adapter) of where an agent sits. Not part of sending. |
 
 Run them from a project root (a dir with `.roundtable/agents.yaml`). Outside
 one, set `ROUNDTABLE_PROJECT_DIR` or `RT_FALLBACK_PROJECT`.
+
+Bare `rt-*` names resolve only when `~/.local/bin` is on PATH — true in an
+ordinary interactive shell, not guaranteed in hook-spawned, phone-spawned, or
+otherwise bare-PATH contexts. When a wake reminder prints command forms, those
+hook-injected forms are canonical: package-managed absolute paths with the
+exact flags shown (for Claude, `--fenced` / `--no-nudge`), because the narrow
+setup permissions and lease validation match only them. The principle over the
+spelling: use the exact form your wake reminder printed; use bare names only
+in a shell whose PATH you control.
 
 On a full TTY, bare `pneu` uses one seat card with the last-used seat selected,
 exactly three status lines (active worktrees, unread mail, phone access), and
