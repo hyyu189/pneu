@@ -16,7 +16,7 @@ real vendor session can wake.
 | Hermes | Global skill link; packaged lifecycle plugin; marked plugin enablement; plan/apply/status/remove tests; two sequential RC7 development-host wake generations | RC8 artifact and clean-account plugin/wake repeat |
 | Codex | Shared executable resolver; global skill link; owned SessionStart auto-bind hook; owned app-server and wake plist generation; fail-closed service preflight tests; development-host cutover and thread/lease identity spike | Clean-account repeat and real send-to-wake-to-drain/ack |
 | OpenClaw | Isolated Gateway adapter; fenced lease and identity checks; project-scoped state and loopback Gateway protocol tests | Clean-account/terminal-matrix repeat before public support promotion |
-| Grok Build `0.2.118` | Isolated stdlib ACP supervisor; fenced lease and identity checks; bounded HOME/XDG/GROK_HOME/TMP/log state; exact mail-only permission policy; child-death recovery; focused fault, mutation, soak, three-seat interop, refreshed-credential two-generation E2E, and extracted release-artifact smoke | Clean-account/terminal-matrix repeat and an explicit vendor-supported token-refresh/preflight contract before public support promotion |
+| Grok Build `0.2.118` | Isolated stdlib ACP supervisor; fenced lease and identity checks; bounded HOME/XDG/GROK_HOME/TMP/log state; audit-logged full-permission wake policy (mailroom-only via `RT_GROK_WAKE_MAILROOM_ONLY=1`); child-death recovery; focused fault, mutation, soak, three-seat interop, refreshed-credential two-generation E2E, and extracted release-artifact smoke | Work-seat (write-action) wake E2E under the full-permission policy, clean-account/terminal-matrix repeat, and an explicit vendor-supported token-refresh/preflight contract before public support promotion |
 
 The Codex plist files are written but not loaded by setup. This is an
 intentional safety boundary, not evidence that the daemon is running.
@@ -40,10 +40,18 @@ The child environment is bounded to an adapter-owned root for `HOME`,
 `GROK_HOME`, XDG directories, `TMPDIR`, logs, and temporary state. It receives
 only the selected executable, project/registry paths, lease identity, and an
 existing credential supplied through the runtime boundary. The adapter refuses
-missing or ambiguous identity, stale lease revisions, shell operators, and
-commands outside the exact fenced `rt-inbox`/`rt-ack` policy. It reports a
-successful generation only after the triggered filenames leave `new/`; a
-timeout or failed child leaves mail durable for manual recovery.
+missing or ambiguous identity and stale lease revisions. Since the 2026-08-11
+owner decision the communication layer is not a permission gate: the ACP
+supervisor approves wake-turn permission requests by default and records every
+decision in the audit trail, so execution policy belongs to the harness side.
+Setting `RT_GROK_WAKE_MAILROOM_ONLY=1` restores the earlier fenced policy that
+rejects shell operators and any command outside the exact `rt-inbox`/`rt-ack`
+forms. The adapter reports a successful generation only after the triggered
+filenames leave `new/`; a timeout or failed child leaves mail durable for
+manual recovery. All recorded fault/mutation/soak/interop evidence predates
+the policy default change; a work-seat wake performing a real write action
+under the default policy has not yet been exercised end to end, so the
+adapter's verified surface remains the mail-drain loop.
 
 Focused product tests cover process-down and killed-turn recovery, auth and
 permission failures, bounded hung prompts, fence mutations, duplicate-safe

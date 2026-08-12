@@ -2,6 +2,15 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-08-11: **The communication layer is not a permission gate** (Ocean).
+  Harness-side permission models own execution policy; pneu adapters default
+  to full permission on wake turns. The Grok ACP supervisor — the one adapter
+  structurally forced into the approver role because the ACP client answers
+  `session/request_permission` — now approves by default with an audit trail;
+  `RT_GROK_WAKE_MAILROOM_ONLY=1` restores the fenced mailroom-only policy.
+  Claude/Codex/Hermes/OpenClaw keep approval inside the harness and need no
+  change. Support-claim discipline unchanged: Grok work-seat promotion still
+  requires a live write-action wake E2E.
 - 2026-08-07: **Quiet wake** (Ocean). The periodic empty-inbox heartbeat
   wake is retired in 1.1.0: an armed watcher is long-lived, renews its lease
   silently, and wakes the model only for mail or a configured reply alarm.

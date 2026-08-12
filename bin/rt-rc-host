@@ -227,7 +227,7 @@ def main(argv: list[str] | None = None, *, stdin=None, stdout=None, stderr=None)
         else:
             state = "on" if value.enabled else "off"
             health = "healthy" if value.healthy else value.detail
-            print(f"phone access: {state} — {health}", file=stdout)
+            print(f"Claude phone connection: {state} — {health}", file=stdout)
             if value.last_registration:
                 print(
                     "last registration: "

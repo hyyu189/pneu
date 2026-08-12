@@ -116,7 +116,7 @@ def test_isolation_bounds_child_state_and_path(tmp_path, monkeypatch):
         isolation.assert_isolated(environment)
 
 
-def test_wake_prompt_and_permission_policy_are_mail_only(tmp_path):
+def test_wake_prompt_and_opt_in_mailroom_policy_stay_exact(tmp_path):
     prompt = adapter.wake_prompt(tmp_path, "grok", ("one.md", "two.md"))
     assert "rt-inbox --fenced --archive-quiet-acks -f json" in prompt
     assert "RT_FROM=grok rt-ack <msg_id> handled" in prompt
@@ -125,6 +125,19 @@ def test_wake_prompt_and_permission_policy_are_mail_only(tmp_path):
     assert adapter._mail_command_allowed("RT_FROM=grok rt-ack message-id handled")
     assert not adapter._mail_command_allowed("pip install PyYAML")
     assert not adapter._mail_command_allowed("RT_FROM=grok rt-ack message-id; rm -rf x")
+
+
+def test_default_wake_policy_is_full_permission_with_mailroom_opt_in():
+    default_policy = adapter.wake_permission_policy(environment={})
+    assert default_policy("pip install PyYAML")
+    assert default_policy("git commit -am work")
+    assert default_policy("rt-inbox -f json")
+
+    restricted = adapter.wake_permission_policy(
+        environment={"RT_GROK_WAKE_MAILROOM_ONLY": "1"}
+    )
+    assert restricted is adapter._mail_command_allowed
+    assert not restricted("pip install PyYAML")
 
 
 def test_authenticated_session_reuses_child_and_waits_for_exact_drain(tmp_path):

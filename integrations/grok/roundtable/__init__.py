@@ -26,7 +26,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 
 ADAPTER_VERSION = "0.3.0"
@@ -333,6 +333,28 @@ def wake_prompt(project_root: str | Path, agent_id: str, names: tuple[str, ...])
     )
 
 
+def _any_command_allowed(command: str) -> bool:
+    """Default wake policy: the communication layer is not a permission gate.
+
+    Harness-side permission models own execution policy (owner decision
+    2026-08-11); the supervisor still records every decision in the audit
+    trail. The pre-1.3.2 fenced mailroom-only policy remains available as an
+    explicit opt-in through RT_GROK_WAKE_MAILROOM_ONLY=1.
+    """
+
+    del command
+    return True
+
+
+def wake_permission_policy(
+    environment: Mapping[str, str] | None = None,
+) -> Callable[[str], bool]:
+    env = os.environ if environment is None else environment
+    if env.get("RT_GROK_WAKE_MAILROOM_ONLY") == "1":
+        return _mail_command_allowed
+    return _any_command_allowed
+
+
 def _mail_command_allowed(command: str) -> bool:
     if not command or any(token in command for token in SHELL_OPERATORS):
         return False
@@ -370,12 +392,16 @@ class ACPClient:
         environment: dict[str, str],
         events_path: Path,
         popen_factory: Callable[..., subprocess.Popen] = subprocess.Popen,
-        permission_policy: Callable[[str], bool] = _mail_command_allowed,
+        permission_policy: Callable[[str], bool] | None = None,
     ) -> None:
         self.command = command
         self.events_path = events_path
         self.events_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.permission_policy = permission_policy
+        self.permission_policy = (
+            permission_policy
+            if permission_policy is not None
+            else wake_permission_policy()
+        )
         self.permission_decisions: list[dict[str, Any]] = []
         self._received: queue.Queue[dict[str, Any]] = queue.Queue()
         self._events_lock = threading.Lock()
@@ -875,5 +901,6 @@ __all__ = [
     "resolve_grok_api_key",
     "resolve_grok_bin",
     "session_key",
+    "wake_permission_policy",
     "wake_prompt",
 ]

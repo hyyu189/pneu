@@ -495,8 +495,18 @@ def _plist_payload(
 ) -> dict[str, Any]:
     host_dir = rc_hosts_dir() / project_uuid
     prefix = os.environ.get("ROUNDTABLE_INSTALL_PREFIX", "").strip()
+    # launchd starts the host with the bare system PATH, and every
+    # phone-spawned session inherits it, so name-resolve the pneu commands,
+    # the harness itself, and Homebrew tools explicitly.
+    path_entries = [str(home / ".local" / "bin")]
+    if prefix:
+        path_entries.append(str(Path(prefix) / "bin"))
+    path_entries.extend(
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    )
     environment = {
         "HOME": str(home),
+        "PATH": os.pathsep.join(dict.fromkeys(path_entries)),
         "RT_PROJECTS_FILE": str(projects_registry_path()),
         "RT_RC_HOST_PROJECT_UUID": project_uuid,
     }
@@ -869,12 +879,12 @@ def require_enabled(project: Path | str) -> dict[str, Any]:
                 state = candidate
     if state is None:
         raise RCHostError(
-            f"phone access is not enabled for {root}; "
+            f"the Claude phone connection is not enabled for {root}; "
             "run `pneu rc-host enable` from the project root"
         )
     configured, detail = _configuration_matches(state)
     if not configured:
-        raise RCHostError(f"phone access configuration is unsafe: {detail}")
+        raise RCHostError(f"Claude phone connection configuration is unsafe: {detail}")
     return state
 
 

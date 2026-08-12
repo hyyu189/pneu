@@ -10,6 +10,7 @@ import io
 import json
 import math
 import os
+import plistlib
 import shlex
 import stat
 import subprocess
@@ -104,6 +105,49 @@ def report_rc_hosts() -> None:
             f"process={process} last-registration={registered_at} "
             f"project={registered_project}"
         )
+        _report_rc_host_path(name, state)
+
+
+def _report_rc_host_path(name: str, state: dict) -> None:
+    """Report-only: phone-spawned sessions inherit the host plist PATH."""
+
+    plist_path = ((state.get("plist") or {}).get("path")) if isinstance(state, dict) else None
+    if not isinstance(plist_path, str) or not plist_path:
+        return
+    try:
+        with open(plist_path, "rb") as handle:
+            payload = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException, ValueError) as error:
+        print(f"WARN rc-host-path[{name}]: cannot read plist: {error}")
+        return
+    environment = payload.get("EnvironmentVariables")
+    path_value = environment.get("PATH") if isinstance(environment, dict) else None
+    if not isinstance(path_value, str) or not path_value:
+        print(
+            f"WARN rc-host-path[{name}]: plist has no PATH; phone-spawned "
+            "sessions inherit launchd's bare PATH and cannot resolve rt-* "
+            "commands by name"
+        )
+        print(f"  fix: pneu rc-host disable && pneu rc-host enable (regenerates the plist)")
+        return
+    unresolved = [
+        command
+        for command in ("rt-inbox", "rt-say", "rt-ack")
+        if not any(
+            os.access(Path(entry) / command, os.X_OK)
+            for entry in path_value.split(os.pathsep)
+            if entry
+        )
+    ]
+    if unresolved:
+        rendered = ", ".join(unresolved)
+        print(
+            f"WARN rc-host-path[{name}]: plist PATH cannot resolve {rendered}; "
+            "phone-spawned sessions will need absolute command paths"
+        )
+        print(f"  fix: pneu rc-host disable && pneu rc-host enable (regenerates the plist)")
+        return
+    print(f"OK rc-host-path[{name}]: plist PATH resolves rt-inbox/rt-say/rt-ack")
 
 
 def socket_check(path: Path) -> tuple[bool, str]:
