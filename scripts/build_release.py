@@ -187,6 +187,7 @@ REQUIRED_PROJECT_ROOT_FILES = frozenset(
         "_rtmigrate.py",
         "_rtrchost.py",
         "_rtruntime.py",
+        "_rtsurface.py",
     }
 )
 REQUIRED_PROJECT_PACKAGE_FILES = frozenset(
@@ -214,6 +215,7 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "_rtmigrate.py",
         "_rtrchost.py",
         "_rtruntime.py",
+        "_rtsurface.py",
         "pneu",
         "roundtable",
         "roundtable-init",

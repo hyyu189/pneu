@@ -30,6 +30,7 @@ CODEX_LAUNCH_INTENT_SCHEMA = "roundtable.codex-launch-intent.v1"
 CODEX_LAUNCH_INTENT_NAME = "codex-launch-intent.json"
 REPLY_EXPECTATIONS_SCHEMA = "roundtable.reply-expectations.v1"
 REPLY_EXPECTATIONS_NAME = "reply-expectations.json"
+SEAT_SURFACE_SCHEMA = "roundtable.seat-surface.v1"
 REPLY_DURATION_RE = re.compile(r"^(?P<amount>[1-9][0-9]*)(?P<unit>[smh])$")
 DEFAULT_HEARTBEAT_TTL = 30.0
 # Watchers renew more frequently than the health TTL.  Keeping the renewal
@@ -72,6 +73,7 @@ class SeatPaths:
     agent_dir: Path
     state_lock: Path
     lease: Path
+    surface: Path
 
 
 @dataclass(frozen=True)
@@ -291,6 +293,7 @@ def seat_paths(
         agent_dir=agent_dir,
         state_lock=agent_dir / "state.lock",
         lease=agent_dir / "lease.json",
+        surface=agent_dir / "surface.json",
     )
 
 
@@ -1284,6 +1287,66 @@ def claim(
             }
             _atomic_json(paths.lease, record)
             return _token(record)
+
+
+def record_seat_surface(
+    project: Path | str,
+    agent_id: str,
+    harness: str,
+    surface: dict[str, str],
+) -> Path:
+    """Record one advisory terminal location beside a seat's fenced state.
+
+    Surface placement is not ownership or liveness evidence. The caller records
+    it only after a terminal backend accepts the launch command; the harness
+    launcher remains responsible for claiming the actual seat lease.
+    """
+
+    canonical = canonical_project(project)
+    _agent_key(agent_id)
+    selected_harness = _validate_harness(harness)
+    if not isinstance(surface, dict):
+        raise RuntimeStateError("seat surface must be an object")
+    kind = surface.get("kind")
+    if kind == "herdr":
+        reference_name = "pane"
+    elif kind == "tmux":
+        reference_name = "target"
+    else:
+        raise RuntimeStateError(
+            f"seat surface kind must be 'herdr' or 'tmux', got {kind!r}"
+        )
+    reference = surface.get(reference_name)
+    if not isinstance(reference, str) or not reference or "\0" in reference:
+        raise RuntimeStateError(
+            f"seat surface {kind}.{reference_name} must be a non-empty string "
+            "without NUL"
+        )
+    if set(surface) != {"kind", reference_name}:
+        raise RuntimeStateError(
+            f"seat surface {kind} contains unsupported fields"
+        )
+
+    paths = seat_paths(canonical, agent_id)
+    _ensure_private_dir(paths.runtime_root)
+    _ensure_private_dir(paths.runtime_root / "projects")
+    _ensure_private_dir(paths.project_dir)
+    _ensure_private_dir(paths.agents_dir)
+    _ensure_private_dir(paths.agent_dir)
+    with _locked(paths.claim_lock):
+        _write_project_meta(paths, canonical)
+        with _locked(paths.state_lock):
+            payload = {
+                "schema": SEAT_SURFACE_SCHEMA,
+                "projectRoot": str(canonical),
+                "projectHash": project_hash(canonical),
+                "agentId": agent_id,
+                "harness": selected_harness,
+                "recordedAt": utc_now(),
+                "surface": dict(surface),
+            }
+            _atomic_json(paths.surface, payload)
+    return paths.surface
 
 
 def arm_codex_launch_intent(token: LeaseToken) -> Path:
