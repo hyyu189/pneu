@@ -45,9 +45,11 @@ stay silent in between.
 ## 5. Time window
 
 Ready now; any window works. One precondition on the launch side before
-rehearsal: the launch project's codex seat has no wake-bridge binding (its
-auto-bind request was consumed but no binding landed; a quiet ack receipt is
-sitting in its `new/`, keeping the bridge error-looping every scan). Fix:
-from inside that codex session, run `rt-codex-wake bind` in one turn, then
-drain its `new/`. Demo-worktree seats launched fresh through pneu bind
-themselves at activation and are not affected.
+rehearsal: the launch project's codex seat cannot receive bridge wakes — its
+current thread is ephemeral (it has never persisted a rollout), so the wake
+bridge correctly refuses to bind it, and re-running `bind` from a turn will
+keep failing for this session. Fix: relaunch that codex seat through the
+pneu launcher; the fresh persistent thread auto-binds within seconds. Then
+drain its `new/` (a quiet ack receipt is stuck there, keeping the bridge
+error-looping every scan). Demo-worktree seats launched fresh through pneu
+are not affected.
