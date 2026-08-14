@@ -808,3 +808,306 @@ def test_doctor_fails_release_on_failed_probe_or_below_floor(
     assert code == 1
     assert "FAIL version:" in output
     assert expected in output
+
+
+# --- D16-5 / D16-9: watcher lifecycle, unbound Codex seats, layout locks -----
+
+
+import fcntl  # noqa: E402
+import time  # noqa: E402
+
+import _rtruntime  # noqa: E402
+
+
+def _seat_project(tmp_path: Path, monkeypatch) -> Path:
+    project = (tmp_path / "seat-project").resolve()
+    project.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    return project
+
+
+def test_watcher_lifecycle_reports_an_unlogged_death_with_a_fix(
+    tmp_path, monkeypatch, capsys
+):
+    project = _seat_project(tmp_path, monkeypatch)
+    _rtruntime.log_watcher_event(project, "claude", "armed", watcher_pid=4242)
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="claude",
+        harness="claude-code",
+        watcher_live=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "WARN seat-watcher-lifecycle" in output
+    assert "verdict=unlogged-death" in output
+    assert "killed without a chance to log it" in output
+    assert str(_rtruntime.watcher_log_path(project, "claude")) in output
+    assert not report.failed
+
+
+def test_watcher_lifecycle_reports_a_recorded_crash(tmp_path, monkeypatch, capsys):
+    project = _seat_project(tmp_path, monkeypatch)
+    _rtruntime.log_watcher_event(project, "claude", "armed", watcher_pid=11)
+    _rtruntime.log_watcher_event(
+        project, "claude", "crash", error_type="OSError", traceback="boom"
+    )
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="claude",
+        harness="claude-code",
+        watcher_live=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "verdict=crashed" in output
+    assert "read the traceback in" in output
+
+
+def test_watcher_lifecycle_is_quiet_for_a_live_watcher(
+    tmp_path, monkeypatch, capsys
+):
+    project = _seat_project(tmp_path, monkeypatch)
+    _rtruntime.log_watcher_event(project, "claude", "armed", watcher_pid=os.getpid())
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="claude",
+        harness="claude-code",
+        watcher_live=True,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_watcher_lifecycle_skips_harnesses_without_a_host_watcher(
+    tmp_path, monkeypatch, capsys
+):
+    project = _seat_project(tmp_path, monkeypatch)
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="codex",
+        harness="codex",
+        watcher_live=False,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_unhealthy_seat_fix_names_the_recovery_action(tmp_path):
+    project = tmp_path / "project"
+    claude = doctor.watcher_recovery_fix(project, "claude", "claude-code")
+    hermes = doctor.watcher_recovery_fix(project, "hermes", "hermes-agent")
+    codex = doctor.watcher_recovery_fix(project, "codex", "codex")
+
+    assert "Stop hook re-arms" in claude
+    assert f"cd {project}" in claude
+    assert "pneu plugin" in hermes
+    assert codex == "restart the wake adapter for codex"
+
+
+def _write_wake_log(runtime: Path, records: list[dict]) -> None:
+    runtime.mkdir(parents=True, exist_ok=True)
+    path = runtime / doctor.WAKE_BRIDGE_LOG_NAME
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
+def test_unbound_active_codex_seat_reports_recent_auto_bind_rejection(
+    tmp_path, capsys
+):
+    project = tmp_path / "codex-project"
+    runtime = tmp_path / "runtime"
+    now = datetime.now(timezone.utc)
+    _write_wake_log(
+        runtime,
+        [
+            {
+                "ts": (now - timedelta(seconds=30)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "event": "auto_bind_rejected",
+                "path": str(runtime / "codex-bind-requests" / "abc.json"),
+                "error": "lease revision no longer current",
+            },
+            {
+                "ts": (now - timedelta(days=3)).isoformat().replace("+00:00", "Z"),
+                "event": "auto_bind_rejected",
+                "error": "ancient and irrelevant",
+            },
+        ],
+    )
+    report = doctor.Report()
+
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="active_healthy")},
+        {str(project): {"codex"}},
+        {},
+        runtime,
+        now=now,
+    )
+
+    output = capsys.readouterr().out
+    assert "WARN codex-unbound" in output
+    assert "no stored thread binding" in output
+    assert "1 recent auto-bind rejection(s)" in output
+    assert "lease revision no longer current" in output
+    assert "ancient and irrelevant" not in output
+    assert "pneu codex" in output
+    assert not report.failed
+
+
+def test_unbound_report_is_silent_for_a_bound_or_inactive_seat(tmp_path, capsys):
+    project = tmp_path / "codex-project"
+    runtime = tmp_path / "runtime"
+    report = doctor.Report()
+
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="active_healthy")},
+        {str(project): {"codex"}},
+        {str(project): {"threadId": "thread-1"}},
+        runtime,
+    )
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="vacant")},
+        {str(project): {"codex"}},
+        {},
+        runtime,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_unbound_seat_without_rejections_points_at_the_first_turn(
+    tmp_path, capsys
+):
+    project = tmp_path / "codex-project"
+    report = doctor.Report()
+
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="active_unhealthy")},
+        {str(project): {"codex"}},
+        {},
+        tmp_path / "runtime",
+    )
+
+    output = capsys.readouterr().out
+    assert "WARN codex-unbound" in output
+    assert "interact once with that Codex session" in output
+
+
+def _layout_lock(tmp_path: Path, name: str) -> Path:
+    lock_dir = tmp_path / "layout-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    path = lock_dir / name
+    path.touch(mode=0o600)
+    return path
+
+
+def test_layout_lock_residue_is_reported_without_removal(tmp_path, capsys):
+    registry = tmp_path / "projects.json"
+    stray = _layout_lock(
+        tmp_path, "11111111-1111-4111-8111-111111111111.writer.lock"
+    )
+    active = _layout_lock(
+        tmp_path, "22222222-2222-4222-8222-222222222222.writer.lock"
+    )
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(
+        report,
+        registry,
+        [{"uuid": "22222222-2222-4222-8222-222222222222", "status": "active"}],
+    )
+
+    output = capsys.readouterr().out
+    assert "reference UUIDs that are not in" in output
+    assert str(stray) in output
+    assert str(active) not in output
+    assert "report-only: leave the files in place" in output
+    assert stray.exists() and active.exists()
+    assert not report.failed
+
+
+def test_layout_lock_tombstoned_residue_is_summarized_not_enumerated(
+    tmp_path, capsys
+):
+    registry = tmp_path / "projects.json"
+    retired = _layout_lock(
+        tmp_path, "44444444-4444-4444-8444-444444444444.writer.lock"
+    )
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(
+        report,
+        registry,
+        [{"uuid": "44444444-4444-4444-8444-444444444444", "status": "tombstoned"}],
+    )
+
+    output = capsys.readouterr().out
+    assert "1 lock file(s) belong to tombstoned registrations" in output
+    assert str(retired) not in output
+    assert "WARN" not in output
+    assert retired.exists()
+
+
+def test_layout_lock_probe_distinguishes_a_live_holder(tmp_path, capsys):
+    registry = tmp_path / "projects.json"
+    held = _layout_lock(
+        tmp_path, "33333333-3333-4333-8333-333333333333.writer.lock"
+    )
+    descriptor = os.open(held, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert doctor.probe_layout_lock(held) == "held"
+        report = doctor.Report()
+        doctor.report_layout_lock_residue(report, registry, [])
+        output = capsys.readouterr().out
+        assert "held by a live holder" in output
+        assert "not in the project registry" in output
+    finally:
+        os.close(descriptor)
+    assert doctor.probe_layout_lock(held) == "free"
+
+
+def test_layout_lock_directory_absence_is_ok(tmp_path, capsys):
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(report, tmp_path / "projects.json", [])
+
+    assert "OK layout-locks: no layout lock directory yet" in capsys.readouterr().out
+    assert not report.failed
+
+
+def test_layout_lock_flags_an_unexpected_entry(tmp_path, capsys):
+    registry = tmp_path / "projects.json"
+    stray = _layout_lock(tmp_path, "not-a-lock.txt")
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(report, registry, [])
+
+    output = capsys.readouterr().out
+    assert "unexpected entry" in output
+    assert str(stray) in output

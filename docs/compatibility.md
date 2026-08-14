@@ -167,6 +167,24 @@ generation remains undrained, automatic re-wake pauses to prevent a model-turn
 loop; a changed generation receives a fresh bounded attempt set. Durable mail
 remains in `new/` throughout.
 
+Each watcher records its own lifecycle — arm, takeover, stand-down, fence
+rejection, wake, signal, crash traceback, and exit — into an append-only
+`watcher-lifecycle.jsonl` beside that seat's host-local lease. Logging is
+quiet: it never writes to the harness, never wakes anything, and never
+propagates a failure into the watch loop. `rt-doctor` reads it to explain an
+active seat whose watcher is not live, including the case where the last arm
+has no exit record at all, which proves the watcher was killed without a
+chance to report why.
+
+A crash-class death re-arms in place; a kill aimed at the watcher process is
+re-forked by the supervising hook process; and an idle watcher retires itself
+before Claude Code's hook timeout can cancel it, emitting one explicitly
+no-action wake so the Stop hook arms a fresh watcher. None of these can wake a
+session whose hook process is gone: that remains a deaf seat with durable mail
+until its next turn. Set `RT_WATCHER_SELF_HEAL=0`,
+`RT_WATCHER_NO_SUPERVISOR=1`, or `RT_WATCHER_MAX_LIFETIME_SECONDS=0` to
+disable the layers individually.
+
 Setup owns only these absolute command rules:
 
 ```text

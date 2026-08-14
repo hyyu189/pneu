@@ -505,9 +505,13 @@ def test_unmanaged_stop_hook_restores_matching_active_lease(tmp_path, monkeypatc
     assert rejected_environment == {}
 
     def fake_run(agent, explicit, **options):
+        options.pop("supervisor_pid", None)
         captured.update(agent=agent, explicit=explicit, options=options)
         return 0
 
+    # This asserts Stop-hook lease restoration, not process topology: keep the
+    # watcher in this process so the recorded call is observable here.
+    monkeypatch.setenv("RT_WATCHER_NO_SUPERVISOR", "1")
     monkeypatch.setattr(wait, "run", fake_run)
     monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
     try:
