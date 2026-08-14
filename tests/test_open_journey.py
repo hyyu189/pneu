@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import signal
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -22,7 +23,7 @@ TOOL = BIN / "rt-worktree"
 sys.path.insert(0, str(BIN))
 
 from _rtsurface import launcher_shell_command  # noqa: E402
-from _rtruntime import claim, release, seat_paths  # noqa: E402
+from _rtruntime import claim, inspect_seat, release, seat_paths  # noqa: E402
 
 
 def _load_worktree_module():
@@ -162,7 +163,13 @@ def _source_launcher_layout(tmp_path: Path, body: str) -> tuple[Path, Path]:
     return tool, launcher
 
 
-def _open_with_fake_launcher(monkeypatch, tool: Path, repository: Path):
+def _open_with_fake_launcher(
+    monkeypatch,
+    tool: Path,
+    repository: Path,
+    *,
+    surface: str = "herdr",
+):
     monkeypatch.setattr(
         WORKTREE,
         "_seat_launcher",
@@ -172,15 +179,54 @@ def _open_with_fake_launcher(monkeypatch, tool: Path, repository: Path):
             environ=os.environ,
         ),
     )
+    arguments = ["open", "demo", "--seat", "codex", "--surface", surface]
     stdout = io.StringIO()
     stderr = io.StringIO()
     code = WORKTREE.main(
-        ["open", "demo", "--seat", "codex", "--surface", "herdr"],
+        arguments,
         cwd=repository,
         stdout=stdout,
         stderr=stderr,
     )
     return code, stdout.getvalue(), stderr.getvalue()
+
+
+def _expected_print_command(tool: Path, target: Path, environ=None) -> str:
+    """Derive the printed command from the production launcher resolver."""
+
+    resolved = ORIGINAL_SEAT_LAUNCHER(
+        "codex",
+        tool_path=tool,
+        environ=os.environ if environ is None else environ,
+    )
+    launcher_command = launcher_shell_command(
+        resolved.path,
+        "codex",
+        environment=dict(resolved.environment),
+    )
+    return f"cd {shlex.quote(str(target))} && {launcher_command}"
+
+
+def _surfaceless_environment(tmp_path: Path) -> dict[str, str]:
+    """Copy the environment with every ambient surface signal removed.
+
+    ``PATH`` keeps only a private ``git`` link so the repository probe still
+    works while ``tmux`` is genuinely absent; otherwise the fallback assertion
+    would pass for the wrong reason on a host without tmux installed and fail
+    on a host that has it.
+    """
+
+    environment = os.environ.copy()
+    for name in ("HERDR_ENV", "HERDR_PANE_ID", "TMUX", "TMUX_PANE", "RT_SURFACE"):
+        environment.pop(name, None)
+    minimal_bin = tmp_path / "surfaceless-bin"
+    minimal_bin.mkdir()
+    git = shutil.which("git")
+    assert git is not None, "journey tests require git on PATH"
+    (minimal_bin / "git").symlink_to(git)
+    environment["PATH"] = str(minimal_bin)
+    assert shutil.which("tmux", path=environment["PATH"]) is None
+    return environment
 
 
 def _stop_launcher(pid_file: Path) -> None:
@@ -294,6 +340,83 @@ def test_open_journey_refuses_an_already_active_seat_before_spawning(
         assert not seat_paths(target, "codex", root=runtime).surface.exists()
     finally:
         assert release(token)
+
+
+def test_open_journey_print_fallback_prints_over_an_active_seat_without_touching_it(
+    journey_lab,
+    tmp_path,
+    monkeypatch,
+):
+    """Printing is navigation advice, so the launchable-seat gate must be skipped.
+
+    The seat is claimed first on purpose. With a vacant seat this journey
+    survives deleting the ``selection.kind != "print"`` guard in
+    ``_worktree_open``, because ``_require_launchable_seat`` only raises for
+    active or ambiguous seats. Holding the lease is what makes the guard
+    load-bearing for this test.
+    """
+
+    repository, target, runtime, _state_root = journey_lab
+    pid_file = tmp_path / "launcher.pid"
+    monkeypatch.setenv("RT_TEST_LAUNCHER_PID", str(pid_file))
+    tool, _launcher = _source_launcher_layout(
+        tmp_path,
+        "#!/bin/sh\n: > \"$RT_TEST_LAUNCHER_PID\"\n",
+    )
+    expected_command = _expected_print_command(tool, target)
+    token = claim(target, "codex", "codex")
+
+    try:
+        code, stdout, stderr = _open_with_fake_launcher(
+            monkeypatch,
+            tool,
+            repository,
+            surface="print",
+        )
+
+        assert code == 0, stderr
+        assert "status: not launched, printed" in stdout
+        assert f"command: {expected_command}" in stdout
+        # A printed command spawns nothing, records nothing, and waits for
+        # nothing: no launcher process, no advisory surface record, and the
+        # lease we are holding is still exactly ours.
+        assert not pid_file.exists()
+        assert not seat_paths(target, "codex", root=runtime).surface.exists()
+        inspection = inspect_seat(target, "codex")
+        assert inspection.status in {"active_healthy", "active_unhealthy"}
+        assert inspection.token is not None
+        assert inspection.token.session_id == token.session_id
+        assert inspection.token.revision == token.revision
+    finally:
+        assert release(token)
+
+
+def test_open_journey_ambient_fallback_prints_when_no_surface_is_available(
+    journey_lab,
+    tmp_path,
+):
+    """End-to-end ambient route: no HERDR_ENV, no TMUX, no tmux on PATH."""
+
+    repository, target, runtime, _state_root = journey_lab
+    environment = _surfaceless_environment(tmp_path)
+    expected_command = _expected_print_command(TOOL, target, environ=environment)
+
+    result = subprocess.run(
+        [sys.executable, str(TOOL), "open", "demo", "--seat", "codex"],
+        cwd=repository,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "status: not launched, printed" in result.stdout
+    assert f"command: {expected_command}" in result.stdout
+    assert "worktree opened:" not in result.stdout
+    assert not seat_paths(target, "codex", root=runtime).surface.exists()
+    assert inspect_seat(target, "codex").status == "vacant"
 
 
 def test_source_launcher_command_injects_explicit_state_and_runtime(

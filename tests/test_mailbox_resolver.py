@@ -676,11 +676,18 @@ def test_v1_upgrade_backup_collision_precedes_identity_writes(
     assert not _rtlib.project_identity_path(root).exists()
 
 
+# The parameter values become part of the collected node id, so they must be
+# literals: a collection-time ``uuid.uuid4()`` makes every xdist worker report a
+# different node id and the run aborts with "Different tests were collected".
+# This case only needs a *valid* UUID, not a unique one.
+_VALID_UUID_PARAM = "6b3f2c1e-0d4a-4f8b-9c2d-7e5a1b6f3049"
+
+
 @pytest.mark.parametrize(
     ("uuid_value", "layout", "diagnostic"),
     [
         ("not-a-uuid", "local", "uuid"),
-        (str(uuid.uuid4()), "distributed", "layout"),
+        (_VALID_UUID_PARAM, "distributed", "layout"),
     ],
 )
 def test_malformed_uuid_or_layout_fails_closed(
