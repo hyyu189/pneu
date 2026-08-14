@@ -152,13 +152,30 @@ def test_codex_setup_honors_one_static_codex_home_and_runtime_override(
     assert (codex_home / "skills" / "pneu").is_symlink()
     assert not (home / ".codex").exists()
     assert runtime.is_dir()
-    for label in harness_setup.CODEX_LABELS:
+    for label in harness_setup.CODEX_SERVICE_LABELS:
         plist_path = home / "Library" / "LaunchAgents" / f"{label}.plist"
         payload = plistlib.loads(plist_path.read_bytes())
         environment = payload["EnvironmentVariables"]
         assert environment["CODEX_HOME"] == str(codex_home)
         assert environment["RT_RUNTIME_DIR"] == str(runtime)
         assert environment["RT_CODEX_RUNTIME_DIR"] == str(runtime)
+    # The login-time join agent carries no environment on purpose: it sets one
+    # launchd variable and must not ship a snapshot of anything else.
+    join_payload = plistlib.loads(
+        (
+            home
+            / "Library"
+            / "LaunchAgents"
+            / f"{harness_setup.CODEX_DAEMON_JOIN_LABEL}.plist"
+        ).read_bytes()
+    )
+    assert "EnvironmentVariables" not in join_payload
+    assert join_payload["ProgramArguments"][1:] == [
+        "setenv",
+        harness_setup.CODEX_DAEMON_JOIN_VARIABLE,
+        harness_setup.CODEX_DAEMON_JOIN_VALUE,
+    ]
+    assert join_payload["RunAtLoad"] is True
     app_payload = plistlib.loads(
         (
             home
@@ -1195,7 +1212,9 @@ def test_codex_remove_unloads_exact_jobs_and_refuses_inside_codex(
     )
     assert code == 0
     assert removed["launchctl_invoked"] is True
-    expected = []
+    # The Desktop join switch is unset before any managed job is booted out,
+    # so Desktop is never pointed at a daemon that has already been removed.
+    expected = [f"unsetenv {harness_setup.CODEX_DAEMON_JOIN_VARIABLE}"]
     domain = f"gui/{os.getuid()}"
     for label in harness_setup.CODEX_LABELS:
         expected.extend(
@@ -1220,7 +1239,7 @@ def test_partial_codex_unload_never_claims_a_full_rollback(
     )
     assert code == 0
     domain = f"gui/{os.getuid()}"
-    app_server, wake = harness_setup.CODEX_LABELS
+    app_server, wake, _join = harness_setup.CODEX_LABELS
     log = home / "launchctl-partial.log"
     launchctl = home / "partial-launchctl"
     _write_executable(
@@ -1266,6 +1285,7 @@ def test_partial_codex_unload_never_claims_a_full_rollback(
             home / "Library" / "LaunchAgents" / f"{label}.plist"
         ).read_bytes() == payload
     assert log.read_text().splitlines() == [
+        f"unsetenv {harness_setup.CODEX_DAEMON_JOIN_VARIABLE}",
         f"print {domain}/{app_server}",
         f"bootout {domain}/{app_server}",
         f"print {domain}/{wake}",

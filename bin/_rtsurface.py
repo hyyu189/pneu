@@ -21,6 +21,20 @@ LEASE_CONTEXT_ENV_NAMES = (
 )
 TMUX_TARGET_FORMAT = "#{session_name}:#{window_index}.#{pane_index}"
 ENVIRONMENT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Minimal, explicitly addressable surface identifiers.  These are the only
+# environment values a launcher may persist as a seat capability: never the
+# whole environment, HOME, PATH, or any token.
+HERDR_CAPABILITY_ENV = (
+    ("pane", "HERDR_PANE_ID"),
+    ("workspace", "HERDR_WORKSPACE_ID"),
+    ("tab", "HERDR_TAB_ID"),
+    ("endpoint", "HERDR_SOCKET_PATH"),
+)
+# An operator-provided executable that genuinely runs inside a Herdr
+# environment.  It exists because the daemon must never fabricate HERDR_ENV=1
+# for itself: faking that variable machine-wide would corrupt `--current`
+# semantics for every thread on the host.
+HERDR_BROKER_ENV = "RT_HERDR_BROKER"
 
 
 class SurfaceError(RuntimeError):
@@ -147,6 +161,147 @@ def detect_surface(
             tmux_session=session,
         )
     return SurfaceSelection("print", "fallback")
+
+
+def _capability_text(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    rendered = value.strip()
+    if not rendered or "\0" in rendered:
+        return None
+    return rendered
+
+
+def capability_surface_from_environment(
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str] | None:
+    """Capture one seat's addressable surface from a real launch environment.
+
+    The launcher is a child of the user's shell, so it is the only process that
+    can observe an ambient Herdr or tmux surface truthfully.  Only explicit
+    identifiers are captured; the caller stores them with the lease so a later
+    daemon-side tool can address that exact pane without inheriting anything.
+    """
+
+    selected = os.environ if environ is None else environ
+    if selected.get("HERDR_ENV") == "1":
+        captured: dict[str, str] = {"kind": "herdr"}
+        for name, variable in HERDR_CAPABILITY_ENV:
+            value = _capability_text(selected.get(variable))
+            if value is not None:
+                captured[name] = value
+        return captured if "pane" in captured else None
+    tmux = _capability_text(selected.get("TMUX"))
+    pane = _capability_text(selected.get("TMUX_PANE"))
+    if tmux and pane:
+        captured = {"kind": "tmux", "target": pane}
+        endpoint = _capability_text(tmux.split(",")[0])
+        if endpoint:
+            captured["endpoint"] = endpoint
+        return captured
+    return None
+
+
+def capability_surface_arguments(surface: Mapping[str, Any]) -> list[str]:
+    """Return the explicit addressing arguments for one recorded surface.
+
+    Explicit addressing is the whole point: ``--current`` and other ambient
+    forms would resolve against whatever pane the calling process happens to
+    sit in, which for a daemon-executed tool is not the seat.
+    """
+
+    kind = surface.get("kind")
+    if kind == "herdr":
+        pane = _capability_text(surface.get("pane"))
+        if pane is None:
+            raise SurfaceError("herdr capability surface has no pane identifier")
+        return ["--pane", pane]
+    if kind == "tmux":
+        target = _capability_text(surface.get("target"))
+        if target is None:
+            raise SurfaceError("tmux capability surface has no target identifier")
+        return ["-t", target]
+    raise SurfaceError(f"unsupported capability surface kind: {kind!r}")
+
+
+def capability_surface_command(
+    surface: Mapping[str, Any],
+    arguments: list[str],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> list[str]:
+    """Build one explicit surface command, using a broker when required.
+
+    Herdr's CLI answers to an ambient session socket.  When this process is not
+    genuinely inside a Herdr pane, the command is delegated to the configured
+    broker executable instead of asserting a fabricated ``HERDR_ENV=1``.
+    """
+
+    selected = os.environ if environ is None else environ
+    kind = surface.get("kind")
+    if kind == "herdr":
+        if selected.get("HERDR_ENV") == "1":
+            executable = _which("herdr", selected)
+            if executable is None:
+                raise SurfaceError(
+                    "herdr capability surface is recorded but the `herdr` "
+                    "executable is unavailable"
+                )
+            return [str(executable), *arguments]
+        broker = _capability_text(selected.get(HERDR_BROKER_ENV))
+        if broker is None:
+            raise SurfaceError(
+                "herdr capability surface cannot be operated from this process: "
+                f"it is not inside a Herdr pane and {HERDR_BROKER_ENV} is not "
+                "configured; pneu never fabricates HERDR_ENV=1"
+            )
+        path = Path(broker)
+        if not path.is_absolute():
+            raise SurfaceError(
+                f"{HERDR_BROKER_ENV} must be an absolute path: {broker}"
+            )
+        if not os.access(path, os.X_OK):
+            raise SurfaceError(
+                f"{HERDR_BROKER_ENV} is not an executable file: {broker}"
+            )
+        return [str(path), *arguments]
+    if kind == "tmux":
+        executable = _which("tmux", selected)
+        if executable is None:
+            raise SurfaceError(
+                "tmux capability surface is recorded but the `tmux` executable "
+                "is unavailable"
+            )
+        endpoint = _capability_text(surface.get("endpoint"))
+        prefix = ["-S", endpoint] if endpoint else []
+        return [str(executable), *prefix, *arguments]
+    raise SurfaceError(f"unsupported capability surface kind: {kind!r}")
+
+
+def probe_capability_surface(
+    surface: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+    runner=subprocess.run,
+) -> None:
+    """Fail closed when the recorded pane or endpoint no longer exists."""
+
+    kind = surface.get("kind")
+    address = capability_surface_arguments(surface)
+    if kind == "herdr":
+        arguments = ["pane", "layout", *address]
+    elif kind == "tmux":
+        arguments = ["display-message", "-p", *address, "#{pane_id}"]
+    else:
+        raise SurfaceError(f"unsupported capability surface kind: {kind!r}")
+    command = capability_surface_command(surface, arguments, environ=environ)
+    selected = os.environ if environ is None else environ
+    try:
+        _run_checked(kind, command, environ=selected, runner=runner)
+    except SurfaceError as error:
+        raise SurfaceError(
+            f"recorded {kind} surface is no longer available: {error}"
+        ) from error
 
 
 def launcher_shell_command(

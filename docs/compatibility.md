@@ -403,6 +403,112 @@ development host that Codex's SessionStart `session_id` is the ID returned by
 current fenced lease. It is still not a public support claim: a clean-account
 repeat and the complete credentialed send-to-wake-to-drain/ack gate remain.
 
+## Codex capability binding
+
+Fence semantics are harness-uniform: the fence exists to stop stale sessions
+and leases, cross-project and cross-seat confusion, and concurrent handoffs.
+Codex is only harder because its client and its tool processes live in
+different process trees, so ambient `RT_*` variables break in transit where
+Claude's lifecycle hooks and the Hermes plugin have session-local transport.
+
+Identity is therefore bound out of band and resolved by lookup. When a fenced
+tool finds no ambient `RT_*` values it resolves, in order:
+
+1. the native `CODEX_THREAD_ID` present in every daemon-executed tool process;
+2. the exact thread binding recorded for this project;
+3. the current seat lease, revalidated live;
+4. the private seat-capability record, which carries
+   `threadId` + `bindingRevision` + `roundtableSessionId` + `leaseRevision`
+   plus at most a minimal addressable surface.
+
+Nothing in that chain is a snapshot. A superseded lease, a changed
+`bindingRevision`, a project or cwd mismatch, or a thread that is not the exact
+bound thread resolves to nothing rather than to a weaker capability. A `/btw`
+side child, an ordinary fork, and a sub-agent thread therefore resolve to
+nothing by default; capability requires an explicit rebind. Conversely, any
+client driving the exact bound thread — TUI, Desktop, phone, or Remote — is
+operating the same seat with the same fences. That is the intended
+compatibility, not a gap: the control boundary is the thread, not the client.
+
+The capability record lives beside the lease in host-local runtime state and is
+removed with it. `surface.json` remains what it was designed to be: an advisory
+navigation artifact, never ownership or liveness evidence. Surface capability
+stores only explicit identifiers — pane, workspace, tab, target, or a private
+socket endpoint — and never an environment, `HOME`, `PATH`, or token. pneu
+never fabricates `HERDR_ENV=1` inside the shared daemon, because that variable
+asserts that the caller is genuinely inside a Herdr pane and changes
+`--current` semantics for every thread on the host. A process that is not
+inside a Herdr pane operates the recorded pane through an explicitly
+configured `RT_HERDR_BROKER` executable that genuinely runs in a Herdr
+environment, or it refuses.
+
+The SessionStart hook skips a thread whose payload carries explicit fork or
+ephemeral evidence. That evidence is not guaranteed to be present, so the wake
+bridge remains the authority: `thread/read` reports `ephemeral` and
+`parentThreadId` for certain, and a request whose thread proves to be a child
+is skipped, its dead queue entry removed, and the launch intent it may have
+claimed handed back so the real root thread can still bind.
+
+## Canonical app-server host
+
+Codex `0.147` enforces a cross-process single writer per persistent thread
+under one `CODEX_HOME`, so a live thread belongs to exactly one app-server
+host. Two hosts can coexist on a machine: the Desktop app's private stdio
+app-server and the pneu shared daemon. `pneu setup apply` therefore joins
+Desktop to the shared daemon through the supported upstream switch only:
+
+- it sets `CODEX_APP_SERVER_USE_LOCAL_DAEMON=1` in the launchd user domain,
+  which is where a GUI app's environment comes from;
+- it owns `com.roundtable.codex-daemon-join`, a login agent that sets the same
+  variable again, because `launchctl setenv` does not survive logout or reboot;
+- both appear in the setup preview and the ownership manifest, and removal
+  unsets the variable **before** the daemon, its socket, and its plists are
+  removed, so Desktop is never pointed at a daemon that no longer exists;
+- Desktop must be restarted before the switch takes effect.
+
+Modifying the Desktop app bundle or its app-server code is a permanent
+non-goal: it would break code signing, be destroyed by the app's auto-updates,
+and violate the rule that pneu owns only what pneu installs. The same red line
+covers global command hijacking; no wrapper, alias, or PATH shim goes around
+`codex`.
+
+The shared daemon's connection domain is machine-wide. Any client of the
+control socket can see and drive any thread on it; there is no per-seat ACL
+upstream. Seat isolation remains pneu's own layer of leases, fences, and
+bindings above the daemon, and `rt-doctor` says so in the `codex-hosts` line
+rather than implying the daemon enforces seat boundaries.
+
+`rt-doctor` adds three report-only checks:
+
+- `codex-hosts`: how many managed and other app-server hosts are running,
+  with the trust-domain statement above. Writer-lock ownership itself is not
+  inspected and is never claimed.
+- `codex-daemon-join`: whether the switch is set, and whether Desktop actually
+  joined. A private stdio host still running while the switch is set is
+  reported as drift with a fix hint, because the switch is a semi-documented
+  upstream internal that a Desktop update could rename or ignore.
+- `codex-headroom`: the managed daemon's open file descriptors against its
+  limit. The 256-descriptor session default is what produced `Too many open
+  files` during a batch workload, so the managed job now requests 4096 and
+  doctor warns at 70% of the effective limit.
+
+### Promotion gate
+
+Canonical-host status is not promoted by default in this release.
+
+- Unknown 1 — phone/cloud reachability of Desktop-originated threads once they
+  are hosted by the shared daemon — was checked empirically on the development
+  host: reachability worked after the switch. That is one host, not a support
+  claim.
+- Unknown 2 — Desktop behavior when the shared daemon is unavailable during an
+  upgrade or reload window — remains **unverified**. Whether Desktop falls back
+  gracefully to its private host or fails hard is not established, and pneu
+  does not guess. The test procedure is: with the switch set and Desktop
+  quit, `launchctl bootout gui/$(id -u)/com.roundtable.codex-app-server`, open
+  Desktop, and record whether it starts a private host, reports an error, or
+  hangs; then reload the daemon and record whether Desktop recovers without a
+  restart. Until that runs, expect to reopen Desktop after a pneu upgrade.
+
 ## Validation matrix
 
 The `0.144.6` rows record the exact pairings a live gate has exercised. The

@@ -24,7 +24,7 @@ HOOK = BIN / "rt-codex-session-start"
 sys.path.insert(0, str(BIN))
 
 import _rtruntime
-from _rtlib import register_project, resolve_project_mailbox
+from _rtlib import load_project_registry, register_project, resolve_project_mailbox
 
 
 def load_wake_module():
@@ -1031,3 +1031,157 @@ def test_hook_trust_gate_ignores_unresolvable_cwd_instead_of_crashing(tmp_path):
 
     with pytest.raises(wake.IdentityError, match="found 0"):
         bridge._hook_trust_gate(project)
+
+
+def test_session_start_hook_skips_a_fork_child_thread(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+
+    payload = hook_payload(project, "btw-child")
+    payload["parent_thread_id"] = "thread-1"
+    result = run_hook(payload, environment)
+
+    queue = tmp_path / "runtime" / "codex-bind-requests"
+    assert result.returncode == 0, result.stderr
+    assert not queue.exists() or list(queue.glob("*.json")) == []
+    assert [record["outcome"] for record in trace_records(tmp_path)] == [
+        "child_thread"
+    ]
+    # The launch intent stays unclaimed, so the real root thread can still bind.
+    assert run_hook(hook_payload(project, "thread-1"), environment).returncode == 0
+    assert len(list(queue.glob("*.json"))) == 1
+
+
+def test_session_start_hook_skips_an_ephemeral_thread(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+
+    payload = hook_payload(project, "side-thread")
+    payload["ephemeral"] = True
+
+    assert run_hook_in_process(payload, environment) == 0
+    queue = tmp_path / "runtime" / "codex-bind-requests"
+    assert not queue.exists() or list(queue.glob("*.json")) == []
+
+
+def test_ephemeral_thread_never_consumes_the_seat_binding(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+    # An older build (or a manual publication) can still queue a request whose
+    # thread turns out to be a /btw child once the bridge reads it.
+    assert run_hook(hook_payload(project, "side-thread"), environment).returncode == 0
+    queue = tmp_path / "runtime" / "codex-bind-requests"
+    store = wake.StateStore(tmp_path / "wake-state.json")
+    client = Client(project, ["side-thread"])
+    client.threads["side-thread"]["ephemeral"] = True
+    events = []
+    original_log = wake.log_event
+    wake.log_event = lambda event, **fields: events.append((event, fields))
+    try:
+        changed = wake.drain_bind_requests(
+            client,
+            store,
+            [project],
+            requests_dir=queue,
+        )
+    finally:
+        wake.log_event = original_log
+
+    assert changed == set()
+    assert store.bindings == {}
+    assert list(queue.iterdir()) == []
+    skipped = [fields for event, fields in events if event == "auto_bind_skipped_ephemeral"]
+    assert len(skipped) == 1
+    assert skipped[0]["project"] == str(project)
+    assert skipped[0]["thread_id"] == "side-thread"
+    assert skipped[0]["request_consumed"] is True
+    assert skipped[0]["launch_intent_released"] is True
+
+    # The handed-back intent lets the real root thread claim the seat.
+    assert run_hook(hook_payload(project, "thread-1"), environment).returncode == 0
+    assert wake.drain_bind_requests(
+        Client(project, ["thread-1"]),
+        store,
+        [project],
+        requests_dir=queue,
+    ) == {str(project)}
+    assert store.bindings[str(project)]["threadId"] == "thread-1"
+
+
+def test_auto_bind_rejection_names_the_project_and_thread(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+    assert run_hook(hook_payload(project, "thread-1"), environment).returncode == 0
+    queue = tmp_path / "runtime" / "codex-bind-requests"
+    store = wake.StateStore(tmp_path / "wake-state.json")
+    client = Client(project, ["thread-1"])
+    client.threads["thread-1"]["cwd"] = str(tmp_path / "elsewhere")
+    events = []
+    original_log = wake.log_event
+    wake.log_event = lambda event, **fields: events.append((event, fields))
+    try:
+        wake.drain_bind_requests(client, store, [project], requests_dir=queue)
+    finally:
+        wake.log_event = original_log
+
+    rejected = [fields for event, fields in events if event == "auto_bind_rejected"]
+    assert len(rejected) == 1
+    assert rejected[0]["project"] == str(project)
+    assert rejected[0]["thread_id"] == "thread-1"
+
+
+def test_binding_records_the_project_registration_generation(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, _token = claim_environment(tmp_path, project)
+    assert run_hook(hook_payload(project, "thread-1"), environment).returncode == 0
+    store = wake.StateStore(tmp_path / "wake-state.json")
+
+    wake.drain_bind_requests(
+        Client(project, ["thread-1"]),
+        store,
+        [project],
+        requests_dir=tmp_path / "runtime" / "codex-bind-requests",
+    )
+
+    binding = store.bindings[str(project)]
+    entries, _warnings = load_project_registry()
+    entry = next(item for item in entries if item["root"] == project)
+    assert binding["projectUuid"] == entry["uuid"]
+    assert binding["projectRegisteredAt"] == entry["registered_at"]
+
+
+def test_binding_removal_is_logged_and_clears_capability(tmp_path):
+    project = write_project(tmp_path / "project")
+    environment, token = claim_environment(tmp_path, project)
+    assert run_hook(hook_payload(project, "thread-1"), environment).returncode == 0
+    store = wake.StateStore(tmp_path / "wake-state.json")
+    wake.drain_bind_requests(
+        Client(project, ["thread-1"]),
+        store,
+        [project],
+        requests_dir=tmp_path / "runtime" / "codex-bind-requests",
+    )
+    capability = _rtruntime.read_seat_capability(project, "codex")
+    assert capability["threadId"] == "thread-1"
+    assert capability["bindingRevision"] == store.bindings[str(project)][
+        "bindingRevision"
+    ]
+    assert capability["roundtableSessionId"] == token.session_id
+
+    events = []
+    original_log = wake.log_event
+    wake.log_event = lambda event, **fields: events.append((event, fields))
+    try:
+        removed = wake.remove_binding(store, project, reason="manual_unbind")
+    finally:
+        wake.log_event = original_log
+
+    assert removed is True
+    assert store.bindings == {}
+    assert _rtruntime.read_seat_capability(project, "codex") is None
+    logged = [fields for event, fields in events if event == "binding_removed"]
+    assert len(logged) == 1
+    assert logged[0]["project"] == str(project)
+    assert logged[0]["thread_id"] == "thread-1"
+    assert logged[0]["reason"] == "manual_unbind"
+    assert logged[0]["capability_cleared"] is True

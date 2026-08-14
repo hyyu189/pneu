@@ -8,6 +8,7 @@ MANIFEST_SCHEMA = "roundtable.install.v1"
 MANAGED_MARKER = ".roundtable-managed.json"
 
 MANAGED_HELPERS = (
+    "_rtcapability.py",
     "_rtcodex.py",
     "_rtlauncher.py",
     "_rtlib.py",
@@ -52,6 +53,7 @@ TOOLS = (
     "rt-say",
     "rt-startup-advisory",
     "rt-stop-gate",
+    "rt-surface",
     "rt-wait-inbox",
     "rt-worktree",
 )
@@ -59,4 +61,5 @@ TOOLS = (
 LAUNCH_AGENT_LABELS = (
     "com.roundtable.codex-wake",
     "com.roundtable.codex-app-server",
+    "com.roundtable.codex-daemon-join",
 )

@@ -677,6 +677,47 @@ def _structural_registry_warnings(warnings):
     ]
 
 
+def _resolve_native_fence(canonical, tool, values, fix):
+    """Resolve an absent ambient fence from the caller's native session.
+
+    A Codex tool process is a child of the shared app-server, not of the seat
+    launcher, so ``RT_*`` never reaches it.  The native thread id does, and it
+    is enough: the recorded thread binding names the seat, and the live lease
+    still decides whether that seat may act.  Nothing here trusts a snapshot;
+    the whole chain is revalidated on every call.
+    """
+
+    from _rtcapability import (
+        CapabilityError,
+        CapabilityUnavailable,
+        backfill_environment,
+        resolve_native_capability,
+    )
+
+    try:
+        capability = resolve_native_capability(canonical)
+    except CapabilityUnavailable:
+        return None
+    except CapabilityError as error:
+        raise SystemExit(
+            f"{tool}: --fenced could not resolve this native session's seat: "
+            f"{error}{fix}"
+        ) from None
+    configured_agent = values.get("RT_FROM", "")
+    if configured_agent and configured_agent != capability.agent_id:
+        raise SystemExit(
+            f"{tool}: RT_FROM={configured_agent!r} does not match the bound "
+            f"seat {capability.agent_id!r} for {canonical}{fix}"
+        )
+    configured_root = values.get("RT_PROJECT_ROOT", "")
+    if configured_root and configured_root != str(capability.project_root):
+        raise SystemExit(
+            f"{tool}: fenced project {configured_root} does not match the "
+            f"bound seat project {capability.project_root}{fix}"
+        )
+    return backfill_environment(capability)
+
+
 def authenticate_fenced_sender(project, tool):
     """Authenticate the sender's exact launcher lease.
 
@@ -695,6 +736,12 @@ def authenticate_fenced_sender(project, tool):
         "RT_LEASE_REVISION": os.environ.get("RT_LEASE_REVISION", "").strip(),
     }
     missing = [name for name, value in values.items() if not value]
+    if missing:
+        resolved = _resolve_native_fence(canonical, tool, values, fix)
+        if resolved is not None:
+            values.update(resolved)
+            values["RT_FROM"] = values["RT_FROM"].strip().lower()
+            missing = [name for name, value in values.items() if not value]
     if missing:
         raise SystemExit(
             f"{tool}: --fenced requires a Roundtable-launched seat; missing "

@@ -38,7 +38,19 @@ HARNESSES = ("claude", "hermes", "codex")
 CODEX_LABELS = (
     "com.roundtable.codex-app-server",
     "com.roundtable.codex-wake",
+    # Re-applies the Desktop join switch at login; `launchctl setenv` alone
+    # does not survive logout or reboot.
+    "com.roundtable.codex-daemon-join",
 )
+CODEX_DAEMON_JOIN_LABEL = "com.roundtable.codex-daemon-join"
+# The two long-running service jobs, as opposed to the login-time join agent
+# that only sets one launchd variable.
+CODEX_SERVICE_LABELS = (
+    "com.roundtable.codex-app-server",
+    "com.roundtable.codex-wake",
+)
+CODEX_DAEMON_JOIN_VARIABLE = "CODEX_APP_SERVER_USE_LOCAL_DAEMON"
+CODEX_DAEMON_JOIN_VALUE = "1"
 CODEX_RELOAD_MARKER_SCHEMA = "roundtable.codex-app-server-reload-required.v1"
 CODEX_RELOAD_MARKER_NAME = "codex-app-server-reload-required.json"
 # rt-wait-inbox is a long-lived async hook that renews its lease silently while
@@ -1341,6 +1353,16 @@ def _call_plist_builder(
     return value
 
 
+def _daemon_join_builder(module: Any) -> Any:
+    builder = getattr(module, "daemon_join_plist", None)
+    if builder is None:
+        raise SetupError(
+            "the installed pneu Codex module predates the canonical-daemon "
+            "join agent; reinstall pneu so setup and its Codex module match"
+        )
+    return builder
+
+
 def _codex_payloads(
     home: Path,
     prefix: Path,
@@ -1362,6 +1384,11 @@ def _codex_payloads(
                 ),
                 "com.roundtable.codex-wake": _call_plist_builder(
                     module.wake_plist,
+                    socket,
+                    ensure_runtime=ensure_runtime,
+                ),
+                CODEX_DAEMON_JOIN_LABEL: _call_plist_builder(
+                    _daemon_join_builder(module),
                     socket,
                     ensure_runtime=ensure_runtime,
                 ),
@@ -1559,10 +1586,23 @@ def _prepare_codex(
             "config": config,
             "plists": plists,
             "skill": skill,
+            # The join switch is an owned change like any other: it appears in
+            # the preview, is recorded here, and is undone before the daemon
+            # it points at is removed.
+            "daemon_join": {
+                "label": CODEX_DAEMON_JOIN_LABEL,
+                "variable": CODEX_DAEMON_JOIN_VARIABLE,
+                "value": CODEX_DAEMON_JOIN_VALUE,
+            },
         },
         {
             "config": config_operation,
             "plists": writes,
+            "daemon_join": {
+                "variable": CODEX_DAEMON_JOIN_VARIABLE,
+                "value": CODEX_DAEMON_JOIN_VALUE,
+                "changed": (existing_record or {}).get("daemon_join") is None,
+            },
             "reload_marker": {
                 "path": marker_path,
                 "payload": marker_payload,
@@ -1802,13 +1842,23 @@ def _validate_codex(
     added_only: bool,
 ) -> None:
     plists = record.get("plists")
-    if not isinstance(plists, list) or len(plists) != len(CODEX_LABELS):
+    if (
+        not isinstance(plists, list)
+        or not plists
+        or len(plists) > len(CODEX_LABELS)
+    ):
         raise SetupError("invalid Codex LaunchAgent ownership record")
     by_label = {
         item.get("label"): item for item in plists if isinstance(item, dict)
     }
+    if set(by_label) - set(CODEX_LABELS):
+        raise SetupError("unknown Codex LaunchAgent ownership record")
     for label in CODEX_LABELS:
         item = by_label.get(label)
+        if item is None:
+            # A manifest written before this label existed claims nothing
+            # about it; the upgrade path adds it as a normal owned write.
+            continue
         path = home / "Library" / "LaunchAgents" / f"{label}.plist"
         if (
             not isinstance(item, dict)
@@ -1822,12 +1872,22 @@ def _validate_codex(
         raw = _read_regular(path)
         if raw is None or _digest(raw[0]) != item["digest"]:
             raise SetupError(f"managed Codex LaunchAgent drift at {path}")
-    app_record = by_label["com.roundtable.codex-app-server"]
+    app_record = by_label.get("com.roundtable.codex-app-server")
+    if app_record is None:
+        raise SetupError("invalid Codex LaunchAgent ownership record")
     _validate_codex_reload_marker(
         prefix,
         Path(app_record["path"]),
         app_record["digest"],
     )
+    daemon_join = record.get("daemon_join")
+    if daemon_join is not None and (
+        not isinstance(daemon_join, dict)
+        or daemon_join.get("variable") != CODEX_DAEMON_JOIN_VARIABLE
+        or daemon_join.get("value") != CODEX_DAEMON_JOIN_VALUE
+        or daemon_join.get("label") != CODEX_DAEMON_JOIN_LABEL
+    ):
+        raise SetupError("invalid Codex daemon-join ownership record")
     config = record.get("config")
     if config is not None:
         expected_path = _selected_codex_home(home) / "hooks.json"
@@ -1951,8 +2011,68 @@ def _apply_prepared(
             path: Path = item["path"]
             _ensure_user_dir(home, path.parent)
             _atomic_write(path, item["payload"], 0o600)
+        _apply_codex_daemon_join(operation)
     if not operation.get("existing"):
         _apply_link(home, record["skill"])
+
+
+def _codex_daemon_join_env(arguments: list[str]) -> tuple[bool, bool, str]:
+    """Return (launchctl_invoked, succeeded, detail)."""
+
+    try:
+        launchctl = _launchctl_path()
+    except SetupError as error:
+        return False, False, str(error)
+    try:
+        result = subprocess.run(
+            [launchctl, *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except OSError as error:
+        return True, False, str(error)
+    if result.returncode != 0:
+        return True, False, result.stderr.strip() or f"exit {result.returncode}"
+    return True, True, ""
+
+
+def _apply_codex_daemon_join(operation: dict[str, Any]) -> None:
+    """Set the Desktop join switch now; the login agent re-applies it later.
+
+    Desktop is a GUI app, so its environment comes from the launchd user
+    domain and nothing else.  A failure here is not fatal: the owned login
+    agent applies the same value at the next login and doctor reports the
+    drift meanwhile.  Failing the whole setup on a semi-documented upstream
+    switch would be the worse trade.
+    """
+
+    join = operation.get("daemon_join")
+    if not isinstance(join, dict) or not join.get("changed"):
+        # Apply exactly what the preview announced.  A switch later unset by
+        # hand is drift, not an upgrade: doctor reports it and the owned login
+        # agent re-applies it, so a silent re-set here would hide the fact.
+        return
+    _invoked, applied, detail = _codex_daemon_join_env(
+        ["setenv", join["variable"], join["value"]]
+    )
+    join["applied"] = applied
+    join["detail"] = detail
+
+
+def _unset_codex_daemon_join(record: dict[str, Any]) -> tuple[bool, str]:
+    """Point Desktop back at its own host before the daemon can disappear.
+
+    Ordering is the whole point: leaving the switch set while the socket it
+    names is removed would aim Desktop at a daemon that no longer exists.
+    """
+
+    join = record.get("daemon_join")
+    if not isinstance(join, dict):
+        return False, ""
+    invoked, _ok, detail = _codex_daemon_join_env(["unsetenv", join["variable"]])
+    return invoked, detail
 
 
 def _apply_mutation_paths(
@@ -2216,8 +2336,8 @@ def _launchctl_path() -> str:
     raise SetupError(f"launchctl is not executable: {configured}")
 
 
-def _unload_codex_jobs(record: dict[str, Any]) -> tuple[bool, bool]:
-    """Return (launchctl_invoked, live_state_may_have_changed)."""
+def _require_outside_codex() -> None:
+    """Refuse a live Codex teardown from inside the session being torn down."""
 
     if os.environ.get("CODEX_THREAD_ID"):
         raise SetupError(
@@ -2225,6 +2345,12 @@ def _unload_codex_jobs(record: dict[str, Any]) -> tuple[bool, bool]:
             "session; run this command from Terminal.app, iTerm, Ghostty, "
             "or another shell outside Codex"
         )
+
+
+def _unload_codex_jobs(record: dict[str, Any]) -> tuple[bool, bool]:
+    """Return (launchctl_invoked, live_state_may_have_changed)."""
+
+    _require_outside_codex()
     launchctl = _launchctl_path()
     domain = f"gui/{os.getuid()}"
     invoked = False
@@ -2394,6 +2520,13 @@ def _actions(
             actions.append(f"write {item['path']} (not loaded)")
         elif planned.get("changed"):
             actions.append(f"update {item['path']} (reload deferred)")
+    join = (operation or {}).get("daemon_join")
+    if isinstance(join, dict) and join.get("changed"):
+        actions.append(
+            f"set {join['variable']}={join['value']} in the launchd user "
+            "domain so Codex Desktop joins the pneu daemon "
+            "(restart Desktop to take effect)"
+        )
     return actions or ["no changes"]
 
 
@@ -2709,14 +2842,32 @@ def _remove(
     launchctl_invoked = False
     external_changed = False
     try:
-        if _codex_unload_required(harnesses, manifest):
-            if not unload_codex:
-                raise SetupError(
-                    "Codex LaunchAgents may still be loaded; from a normal "
-                    "terminal outside Codex, rerun with `roundtable-setup remove "
-                    "--unload-codex`"
-                )
-            launchctl_invoked, external_changed = _unload_codex_jobs(owned["codex"])
+        unload_required = _codex_unload_required(harnesses, manifest)
+        if unload_required and not unload_codex:
+            raise SetupError(
+                "Codex LaunchAgents may still be loaded; from a normal "
+                "terminal outside Codex, rerun with `roundtable-setup remove "
+                "--unload-codex`"
+            )
+        if unload_required:
+            _require_outside_codex()
+        if "codex" in selected_owned:
+            # Unset before anything else in the codex teardown: the daemon,
+            # its socket, its plists, and the login agent all disappear below,
+            # and a switch left pointing at a removed daemon is worse than no
+            # switch at all.  A user-domain variable cannot be restored by a
+            # filesystem rollback, so a real invocation is reported as an
+            # external change.
+            unset_invoked, _unset_detail = _unset_codex_daemon_join(
+                owned["codex"]
+            )
+            if unset_invoked:
+                launchctl_invoked = True
+                external_changed = True
+        if unload_required:
+            unload_invoked, unload_changed = _unload_codex_jobs(owned["codex"])
+            launchctl_invoked = launchctl_invoked or unload_invoked
+            external_changed = external_changed or unload_changed
         for harness in selected_owned:
             _remove_record(harness, home, owned[harness])
             if harness == "codex":
@@ -2735,8 +2886,8 @@ def _remove(
                 manifest_path.unlink()
     except Exception as error:
         if isinstance(error, _LaunchctlOperationError):
-            launchctl_invoked = error.invoked
-            external_changed = error.external_changed
+            launchctl_invoked = launchctl_invoked or error.invoked
+            external_changed = external_changed or error.external_changed
         changed, restored, rollback_errors = _rollback_snapshots(snapshots)
         writes = bool(changed or external_changed)
         raise SetupMutationError(

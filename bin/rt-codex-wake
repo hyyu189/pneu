@@ -58,10 +58,13 @@ from _rtruntime import (
     RuntimeStateError,
     bind_request_guard,
     clear_codex_launch_intent_if_stale,
+    clear_seat_capability,
     harness_lease_records,
     inspect_seat,
     legacy_harness_guard,
     load_validated_lease,
+    record_seat_capability,
+    release_codex_launch_intent_thread,
     seat_claim_guard,
     seat_shared_guard,
     update_wake,
@@ -96,6 +99,16 @@ HUMAN_DECISION_METHODS = frozenset(
 
 class IdentityError(RuntimeError):
     pass
+
+
+class EphemeralThread(IdentityError):
+    """A ``/btw`` side child, fork, or sub-agent thread is never a seat.
+
+    These threads inherit nothing by default: capability requires an explicit
+    rebind of a real root thread.  The distinct type lets the drain path
+    report them as the permanent, expected skip they are instead of burying
+    them in the generic rejection counter.
+    """
 
 
 class HumanGate(RuntimeError):
@@ -139,6 +152,39 @@ def atomic_json(path: Path, payload: dict) -> None:
             tmp.unlink()
         except FileNotFoundError:
             pass
+
+
+def project_registration(project: Path) -> dict:
+    """Return the registry identity a binding must keep matching.
+
+    A project can be tombstoned and re-registered at the same path with a new
+    UUID.  Recording that generation makes a binding self-invalidating: the
+    launcher can tell "this thread belongs to this project" from "this thread
+    belonged to whatever used to live at this path".  An unreadable registry
+    yields no fields, and a binding without them stays compatible instead of
+    being discarded on a guess.
+    """
+
+    try:
+        entries, _warnings = load_project_registry()
+    except (ProjectRegistryError, OSError):
+        return {}
+    for entry in active_project_entries(entries, available_only=False):
+        try:
+            root = Path(entry["root"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if root != project:
+            continue
+        identity = {}
+        project_uuid = entry.get("uuid")
+        registered_at = entry.get("registered_at")
+        if isinstance(project_uuid, str) and project_uuid:
+            identity["projectUuid"] = project_uuid
+        if isinstance(registered_at, str) and registered_at:
+            identity["projectRegisteredAt"] = registered_at
+        return identity
+    return {}
 
 
 class StateStore:
@@ -224,6 +270,10 @@ class StateStore:
         lease: LeaseToken | None = None,
     ) -> None:
         thread_id = thread["id"]
+        # Read the registry before taking the state lock: rt-projects takes the
+        # registry lock first and only then reaches this store, so acquiring
+        # them in that order here too keeps the pair deadlock-free.
+        registration = project_registration(project)
         with self._lock(True):
             loaded = self._read()
             if loaded is not None:
@@ -240,6 +290,7 @@ class StateStore:
                 "sessionId": thread.get("sessionId"),
                 "bindingRevision": uuid.uuid4().hex,
                 "boundAt": utc_now(),
+                **registration,
             }
             if lease is not None:
                 binding.update(
@@ -264,6 +315,7 @@ class StateStore:
         """Auto-bind with CAS semantics; never replace an explicit binding."""
         key = str(project)
         thread_id = thread["id"]
+        registration = project_registration(project)
         with self._lock(True):
             loaded = self._read()
             if loaded is not None:
@@ -291,6 +343,7 @@ class StateStore:
                 "sessionId": thread.get("sessionId"),
                 "bindingRevision": uuid.uuid4().hex,
                 "boundAt": now,
+                **registration,
             }
             if lease is not None:
                 binding.update(
@@ -327,6 +380,7 @@ class StateStore:
             raise IdentityError(f"unsupported bind request source: {source!r}")
         key = str(project)
         thread_id = thread["id"]
+        registration = project_registration(project)
         with self._lock(True):
             loaded = self._read()
             if loaded is not None:
@@ -369,6 +423,7 @@ class StateStore:
                 "boundAt": now,
                 "roundtableSessionId": lease.session_id,
                 "leaseRevision": lease.revision,
+                **registration,
             }
             self.bindings[key] = binding
             self.data.setdefault("projects", {})[key] = {
@@ -404,6 +459,7 @@ class StateStore:
             raise IdentityError(
                 f"binding adoption lease is for harness {lease.harness!r}"
             )
+        registration = project_registration(project)
         with self._lock(True):
             loaded = self._read()
             if loaded is not None:
@@ -443,6 +499,7 @@ class StateStore:
                     "roundtableSessionId": lease.session_id,
                     "leaseRevision": lease.revision,
                     "adoptedAt": now,
+                    **registration,
                 }
             )
             self.bindings[key] = adopted
@@ -1168,9 +1225,9 @@ def validate_thread(
             f"threadSource is not user: {thread_source!r}"
         )
     if thread.get("parentThreadId") is not None:
-        raise IdentityError("refusing to bind a sub-agent thread")
+        raise EphemeralThread("refusing to bind a sub-agent thread")
     if thread.get("ephemeral") is not False:
-        raise IdentityError("refusing to bind an ephemeral thread")
+        raise EphemeralThread("refusing to bind an ephemeral thread")
     return thread
 
 
@@ -1184,6 +1241,66 @@ def read_thread(client: AppServerClient, thread_id: str) -> dict:
     if not isinstance(thread, dict):
         raise IdentityError("thread/read returned an invalid thread")
     return thread
+
+
+def _request_field(payload: dict, name: str) -> str | None:
+    """Report an unvalidated request identity for diagnostics only.
+
+    A rejection log without the project and thread it names cannot be acted
+    on.  The value is echoed for the operator, never used for routing.
+    """
+
+    if not isinstance(payload, dict):
+        return None
+    value = payload.get(name)
+    if not isinstance(value, str) or not value or "\0" in value:
+        return None
+    return value[:512]
+
+
+def _request_project(payload: dict) -> str | None:
+    return _request_field(payload, "projectRoot")
+
+
+def _request_thread_id(payload: dict) -> str | None:
+    return _request_field(payload, "threadId")
+
+
+def record_bind_capability(
+    project: Path,
+    lease: LeaseToken,
+    binding: dict,
+) -> None:
+    """Complete stage 2 of capability binding for one freshly bound thread.
+
+    The launcher recorded the surface under this lease; this adds the native
+    thread and binding revision so a daemon-executed tool carrying only
+    ``CODEX_THREAD_ID`` can resolve the exact seat.  The caller already holds
+    ``seat_shared_guard``, hence ``claim_lock_held``.
+    """
+
+    try:
+        record_seat_capability(
+            project,
+            lease.agent_id,
+            "codex",
+            session_id=lease.session_id,
+            revision=lease.revision,
+            thread_id=binding.get("threadId"),
+            binding_revision=binding.get("bindingRevision"),
+            claim_lock_held=True,
+        )
+    except (RuntimeStateError, OSError) as error:
+        # The binding and lease remain authoritative for identity, so a
+        # capability write failure degrades surface use only.  Never fail the
+        # bind for it, but never hide it either.
+        log_event(
+            "seat_capability_write_failed",
+            project=str(project),
+            agent=lease.agent_id,
+            thread_id=binding.get("threadId"),
+            error=str(error),
+        )
 
 
 def drain_bind_requests(
@@ -1235,6 +1352,9 @@ def drain_bind_requests(
         if path.name.startswith("."):
             continue
         identity = None
+        payload = {}
+        project = None
+        thread_id = None
         try:
             payload, identity = _read_bind_request(path)
             (
@@ -1278,6 +1398,7 @@ def drain_bind_requests(
                     current.revision,
                     native_session_id=thread_id,
                 )
+                record_bind_capability(project, current, binding)
             set_thread_name_best_effort(client, project, agent_id, thread_id)
             if did_change:
                 changed.add(str(project))
@@ -1312,6 +1433,38 @@ def drain_bind_requests(
             # Do not unlink an entry that was never proven to be the private
             # regular file we intended to inspect.
             log_event("auto_bind_request_unsafe", path=str(path), error=str(error))
+        except EphemeralThread as error:
+            # A /btw side child, fork, or sub-agent thread can never become a
+            # seat, so this entry is dead on arrival.  Remove it: leaving it in
+            # place would retry the same permanent refusal at poll cadence and
+            # keep the lease's single request slot occupied against the real
+            # root thread.  The seat's own binding is untouched, and the launch
+            # intent this child may have claimed is handed back so the real
+            # root thread can still bind.
+            consumed = bool(identity) and _consume_bind_request(path, identity)
+            released = False
+            if isinstance(project, Path) and isinstance(thread_id, str):
+                try:
+                    released = release_codex_launch_intent_thread(
+                        project,
+                        thread_id,
+                    )
+                except (RuntimeStateError, OSError) as release_error:
+                    log_event(
+                        "launch_intent_release_failed",
+                        project=str(project),
+                        thread_id=thread_id,
+                        error=str(release_error),
+                    )
+            log_event(
+                "auto_bind_skipped_ephemeral",
+                path=str(path),
+                project=_request_project(payload),
+                thread_id=_request_thread_id(payload),
+                error=str(error),
+                request_consumed=consumed,
+                launch_intent_released=released,
+            )
         except (MalformedBindRequest, IdentityError, FenceRejected, RuntimeStateError) as error:
             if identity is None and isinstance(error, MalformedBindRequest):
                 identity = error.identity
@@ -1319,6 +1472,8 @@ def drain_bind_requests(
             log_event(
                 "auto_bind_rejected",
                 path=str(path),
+                project=_request_project(payload),
+                thread_id=_request_thread_id(payload),
                 error=str(error),
                 request_consumed=consumed,
             )
@@ -2557,12 +2712,26 @@ def bind_command(args) -> int:
                         current.revision,
                         native_session_id=thread_id,
                     )
+                    record_bind_capability(
+                        project,
+                        current,
+                        store.bindings.get(str(project)) or {},
+                    )
             except (FenceRejected, RuntimeStateError) as error:
                 raise IdentityError(
                     f"Codex seat changed before bind: {error}"
                 ) from error
         agent_id = lease.agent_id if lease is not None else "codex"
         set_thread_name_best_effort(client, project, agent_id, thread_id)
+        binding = store.bindings.get(str(project)) or {}
+        log_event(
+            "manual_bind",
+            project=str(project),
+            agent=agent_id,
+            thread_id=thread_id,
+            binding_revision=binding.get("bindingRevision"),
+            fenced=lease is not None,
+        )
         print(f"bound project={project} agent={agent_id} thread={thread_id}")
         return 0
     finally:
@@ -2649,7 +2818,12 @@ def handoff_command(args) -> int:
                 project,
                 lock_held=True,
             )
-            removed_binding = store.unbind(project)
+            removed_binding = remove_binding(
+                store,
+                project,
+                reason="handoff",
+                claim_lock_held=True,
+            )
     finally:
         client.close()
 
@@ -2729,10 +2903,60 @@ def codex_resume_launcher_args(thread_id: str) -> tuple[str, str]:
     return "resume", thread_id
 
 
+def remove_binding(
+    store: StateStore,
+    project: Path,
+    *,
+    reason: str,
+    claim_lock_held: bool = False,
+) -> bool:
+    """Remove one thread binding, drop its capability, and record the event.
+
+    Every binding removal is a routing-visible ownership change: without a log
+    line, "the seat was unbound" and "the bridge never saw this project" are
+    indistinguishable afterwards, which is exactly the diagnosis a silent
+    removal makes impossible.
+    """
+
+    binding = store.bindings.get(str(project))
+    agent_id = binding.get("agent") if isinstance(binding, dict) else None
+    thread_id = binding.get("threadId") if isinstance(binding, dict) else None
+    binding_revision = (
+        binding.get("bindingRevision") if isinstance(binding, dict) else None
+    )
+    removed = store.unbind(project)
+    capability_cleared = False
+    if isinstance(agent_id, str) and agent_id:
+        try:
+            capability_cleared = clear_seat_capability(
+                project,
+                agent_id,
+                claim_lock_held=claim_lock_held,
+            )
+        except (RuntimeStateError, OSError) as error:
+            log_event(
+                "seat_capability_clear_failed",
+                project=str(project),
+                agent=agent_id,
+                error=str(error),
+            )
+    if removed or capability_cleared:
+        log_event(
+            "binding_removed",
+            project=str(project),
+            agent=agent_id,
+            thread_id=thread_id,
+            binding_revision=binding_revision,
+            reason=reason,
+            capability_cleared=capability_cleared,
+        )
+    return removed
+
+
 def unbind_command(args) -> int:
     project = Path(args.project).expanduser().resolve()
     store = StateStore(args.state_file)
-    removed = store.unbind(project)
+    removed = remove_binding(store, project, reason="manual_unbind")
     print(f"{'unbound' if removed else 'not bound'} project={project} agent=codex")
     return 0 if removed else 1
 

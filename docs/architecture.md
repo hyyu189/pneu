@@ -268,6 +268,25 @@ when no Codex harness lease record exists anywhere in that project; the guard
 remains held through binding or `turn/start`, so a legacy action and the first
 unified claim also have a deterministic order.
 
+Codex is the one harness whose client and tool processes live in different
+process trees, so its launcher environment cannot be the transport. Identity is
+bound out of band in two stages and resolved by lookup afterwards. At launch,
+the launcher — a child of the real user shell — claims a fresh lease and writes
+a private seat-capability record holding the lease identity plus at most a
+minimal addressable surface (a pane, a target, an endpoint; never an
+environment, `HOME`, `PATH`, or token). After `thread/start` or `thread/resume`,
+the SessionStart path and wake bridge bind the native thread to that lease by
+compare-and-swap, and the same record gains `threadId` and `bindingRevision`.
+Every later fenced tool call resolves `CODEX_THREAD_ID` to the exact binding,
+revalidates the live lease, and then jointly validates the capability record
+against both; a superseded lease, a changed binding revision, a project
+mismatch, or any thread that is not the exact bound thread resolves to nothing.
+`surface.json` stays what it always was — advisory navigation metadata — while
+this private record is the one with fencing authority. Environment backfill
+exists only as last-mile compatibility inside a single validated child process,
+never as identity truth, and never as a mutation of the daemon's own
+environment.
+
 Claude's automatically approved mail actions are not ambient PATH authority.
 The hook names the installed wrappers by absolute path, and each fenced inbox,
 acknowledgement, or send operation revalidates all four launcher fields against

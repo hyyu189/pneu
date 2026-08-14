@@ -20,13 +20,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from _rtcodex import (
+    APP_SERVER_FILE_LIMIT,
+    APP_SERVER_FILE_WARN_RATIO,
     AppServerClient,
+    DAEMON_JOIN_VARIABLE,
     DEFAULT_SOCKET,
     MINIMUM_CODEX_RELEASE,
     RUNTIME_DIR,
     WAKE_LABEL,
+    app_server_process_inventory,
     codex_protocol_probe,
     codex_version,
+    daemon_join_switch,
+    daemon_resource_headroom,
     daemon_version,
     launchd_loaded,
     minimum_release_text,
@@ -677,6 +683,140 @@ def bridge_check(
     if rpc_age > max_age:
         return False, f"last successful bridge RPC is stale ({rpc_age:.1f}s > {max_age:.1f}s)"
     return True, f"{detail}, heartbeat age={age:.1f}s, last RPC age={rpc_age:.1f}s"
+
+
+def report_app_server_hosts(
+    report: Report,
+    socket_path: Path,
+    *,
+    inventory=None,
+    switch=None,
+    headroom=None,
+) -> None:
+    """Report the host census, the join switch, and daemon fd headroom.
+
+    All three are report-only.  The trust domain matters more than the
+    numbers: any client of the control socket can see and drive any thread on
+    it, so joining Desktop widens the client set on this machine.  Seat
+    isolation is pneu's own layer -- leases, fences, and bindings -- and the
+    daemon enforces none of it.
+    """
+
+    census = (
+        app_server_process_inventory(socket_path) if inventory is None else inventory
+    )
+    if not census.inspected:
+        report.item(
+            "WARN",
+            "codex-hosts",
+            f"could not inventory app-server hosts: {census.detail}",
+            "none; this check is report-only",
+        )
+    else:
+        rendered_private = ", ".join(
+            f"pid={entry['pid']} kind={entry.get('kind', 'unknown')}"
+            for entry in census.private
+        )
+        summary = (
+            f"managed={len(census.managed)} other={len(census.private)}"
+            + (f" [{rendered_private}]" if rendered_private else "")
+            + "; the control socket is a machine-wide trust domain, not seat "
+            "isolation"
+        )
+        if len(census.managed) > 1:
+            report.item(
+                "WARN",
+                "codex-hosts",
+                f"more than one managed app-server answers {socket_path}: {summary}",
+                "stop the extra host from a terminal outside Codex, then run "
+                "`roundtable codex`",
+            )
+        else:
+            report.item("OK", "codex-hosts", summary)
+
+    value, switch_detail = daemon_join_switch() if switch is None else switch
+    if value is None:
+        report.item(
+            "OK",
+            "codex-daemon-join",
+            f"{switch_detail}; Codex Desktop keeps its own private app-server "
+            "host",
+            "run `roundtable-setup apply --harness codex` to join Desktop to "
+            "the canonical daemon; if this host already applied it, the owned "
+            f"login agent re-applies it at the next login, or run `launchctl "
+            f"setenv {DAEMON_JOIN_VARIABLE} 1` now",
+        )
+    elif value != "1":
+        report.item(
+            "WARN",
+            "codex-daemon-join",
+            f"{switch_detail} is set to an unexpected value",
+            f"run `launchctl setenv {DAEMON_JOIN_VARIABLE} 1` or "
+            "`roundtable-setup apply --harness codex`",
+        )
+    elif census.inspected and census.private:
+        # Drift: the switch is a semi-documented upstream internal, so a
+        # Desktop update can rename or ignore it.  A private host that is
+        # still running while the switch is on is the observable symptom.
+        report.item(
+            "WARN",
+            "codex-daemon-join",
+            f"{switch_detail} but a private app-server host is still running; "
+            "Desktop has not joined the canonical daemon",
+            "quit and reopen Codex Desktop; if it persists after a Desktop "
+            "update, the join switch may no longer be honored upstream",
+        )
+    else:
+        report.item(
+            "OK",
+            "codex-daemon-join",
+            f"{switch_detail}; no competing private app-server host is running. "
+            "Desktop behavior while the shared daemon is unavailable "
+            "(upgrade or reload windows) is not established; expect to reopen "
+            "Desktop after a pneu upgrade",
+        )
+
+    if not census.inspected or not census.managed:
+        report.item(
+            "SKIP",
+            "codex-headroom",
+            "skipped because no managed app-server host was found",
+        )
+        return
+    measurement = (
+        daemon_resource_headroom(
+            census.managed[0]["pid"],
+            APP_SERVER_FILE_LIMIT,
+        )
+        if headroom is None
+        else headroom
+    )
+    open_files = measurement.get("open_files")
+    limit = measurement.get("limit")
+    source = measurement.get("limit_source") or "unknown"
+    if open_files is None or not limit:
+        report.item(
+            "WARN",
+            "codex-headroom",
+            "could not measure app-server file-descriptor headroom: "
+            + str(measurement.get("error") or "no limit reported"),
+            "none; this check is report-only",
+        )
+        return
+    detail = (
+        f"pid={measurement['pid']} open files={open_files} of {limit} "
+        f"({source})"
+    )
+    if open_files >= limit * APP_SERVER_FILE_WARN_RATIO:
+        report.item(
+            "WARN",
+            "codex-headroom",
+            f"{detail}; the shared daemon is close to its descriptor limit",
+            "run `roundtable-setup apply --harness codex`, then let the next "
+            "`roundtable codex` launch perform the coordinated reload",
+        )
+    else:
+        report.item("OK", "codex-headroom", detail)
 
 
 def process_cwd(pid: int) -> Path | None:
@@ -1906,6 +2046,7 @@ def main() -> int:
             bridge_detail,
             bridge_fix,
         )
+        report_app_server_hosts(report, args.socket)
     report_bind_request_queue(
         report,
         args.runtime_dir,

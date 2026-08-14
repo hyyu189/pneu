@@ -103,7 +103,8 @@ only creates files the repository does not carry.
 | `pneu worktree list` | List registered siblings in the current Git-derived group with branch, UUID, and seat status. |
 | `pneu worktree remove NAME [--keep-branch]` | Refuse active/ambiguous seats, unbind Codex, tombstone the registry row, remove the worktree, and delete only a merged branch. |
 | `pneu rc-host enable\|disable\|status` | Expert project-only Claude mobile/web worktree-spawn host; requires accepted workspace trust. |
-| `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit. |
+| `rt-doctor` | Health checks: daemon, socket, RPC, version, bridge, registry, anchor audit, app-server host census. |
+| `rt-surface <show\|probe\|run -- ARGS>` | Drive this seat's recorded terminal surface through its explicit address; `{surface}` is replaced with that address. Ambient addressing is refused. |
 | `rt-resolve <agent>` / `rt-refresh` | Diagnostic only: optional topology view (cmux adapter) of where an agent sits. Not part of sending. |
 
 Run them from a project root (a dir with `.roundtable/agents.yaml`). Outside
@@ -326,6 +327,19 @@ prints a prominent advisory to interact once (or resume) before expecting the
 seat to arm or bind. Manual
 `rt-codex-wake bind <project-root>` is a diagnostic fallback only. An unbound
 session has no waker, but its mail still waits durably like any offline agent's.
+
+**Capability (Codex)** — a Codex tool process is a child of the shared
+app-server, not of the launcher, so ambient `RT_*` never reaches it. Fenced
+tools therefore resolve identity from the native `CODEX_THREAD_ID` -> the exact
+thread binding -> the live lease -> the seat-capability record, revalidating the
+whole chain on every call. The bound thread is the seat's control entry: any
+client driving that exact thread -- TUI, Desktop, phone, or Remote -- operates
+the same seat under the same fences. A `/btw` side child, a fork, or a new
+thread inherits nothing and resolves to nothing; capability needs an explicit
+rebind. Nothing is backfilled into the daemon's environment, and pneu never
+fabricates `HERDR_ENV=1`: `rt-surface` addresses the seat's recorded pane
+explicitly, through a genuine Herdr broker when the calling process is not
+itself inside a pane.
 
 `rt-wait-inbox` remains an implementation and diagnostic tool. Except for
 Grok's documented native `monitor` activation turn, arming is owned by the

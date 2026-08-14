@@ -28,9 +28,11 @@ from _rtruntime import (
     arm_codex_launch_intent,
     claim,
     inspect_seat,
+    record_seat_capability,
     release,
     runtime_root,
 )
+from _rtsurface import SurfaceError, capability_surface_from_environment
 
 
 COMMANDS = {
@@ -643,7 +645,43 @@ def claim_launch_seat(root: Path | None, harness: str, agent_id: str | None):
         "RT_LEASE_REVISION": str(token.revision),
     }
     os.environ.update(environment)
+    if harness == "codex":
+        record_launch_capability(token, harness)
     return token
+
+
+def record_launch_capability(token, harness: str) -> None:
+    """Store this launch's addressable surface beside the fresh Codex lease.
+
+    Stage 1 of capability binding: only the launcher, a child of the real user
+    shell, can observe an ambient Herdr or tmux surface truthfully.  The
+    association with a native thread is added later by the wake bridge under
+    the same lease fence.  A failure here costs surface capability, never the
+    launch: identity still resolves from the binding and the live lease.
+    """
+
+    try:
+        surface = capability_surface_from_environment()
+    except SurfaceError as error:
+        print(
+            f"rt-{harness}: surface capability unavailable: {error}",
+            file=sys.stderr,
+        )
+        surface = None
+    try:
+        record_seat_capability(
+            token.project_root,
+            token.agent_id,
+            harness,
+            session_id=token.session_id,
+            revision=token.revision,
+            surface=surface,
+        )
+    except (RuntimeStateError, OSError) as error:
+        print(
+            f"rt-{harness}: could not record seat capability: {error}",
+            file=sys.stderr,
+        )
 
 
 def _same_process_lease(
@@ -955,6 +993,24 @@ def _confirm_codex_reload(status, *, stdin=None, stderr=None) -> bool:
         return answer in {"y", "yes"}
 
     return _read_choice(stdin, stderr, "Reload now? [y/N]: ", parse=parse)
+
+
+def launch_status(harness: str, message: str, *, stream=None) -> None:
+    """Narrate one stage of an otherwise silent launch window.
+
+    A Codex seat launch can spend seconds on service repair, seat claiming,
+    and intent arming before the TUI paints anything.  Without these lines a
+    slow launch is indistinguishable from a hung one.  They go to stderr and
+    only to a terminal, so pipelines and tests see the unchanged contract.
+    """
+
+    selected = sys.stderr if stream is None else stream
+    try:
+        if not selected.isatty():
+            return
+    except (AttributeError, ValueError):
+        return
+    print(f"rt-{harness}: {message}", file=selected, flush=True)
 
 
 def preflight_codex_services(*, ready_action=None) -> None:
@@ -1359,6 +1415,7 @@ def launch(harness: str, argv: list[str]) -> int:
         # concurrent reload cannot slip between them.
         def claim_and_arm_codex():
             preflight_codex_resume(root, argv)
+            launch_status(harness, "claiming the project seat")
             token = claim_launch_seat(root, harness, agent_id)
             try:
                 arm_codex_launch_intent(token)
@@ -1382,8 +1439,13 @@ def launch(harness: str, argv: list[str]) -> int:
                 raise SelectionError(
                     f"rt-codex: could not arm native-thread binding: {error}"
                 ) from error
+            launch_status(
+                harness,
+                f"binding thread to seat {token.agent_id!r} on its first turn",
+            )
             return token
 
+        launch_status(harness, "checking the Codex app-server service")
         preflight_codex_services(ready_action=claim_and_arm_codex)
     else:
         claim_launch_seat(root, harness, agent_id)
@@ -1410,7 +1472,10 @@ def launch(harness: str, argv: list[str]) -> int:
     if harness == "codex" and root is not None:
         print_codex_primer_skip_advisory(argv)
         command.extend(append_codex_seat_overrides(codex_argv))
-        command.extend(codex_seat_primer_args(argv))
+        primer = codex_seat_primer_args(argv)
+        if primer:
+            launch_status(harness, "priming the seat")
+        command.extend(primer)
     elif harness == "claude":
         command.extend(argv)
         command.extend(claude_remote_control_args(root, agent_id, argv))

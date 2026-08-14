@@ -17,7 +17,7 @@ import stat
 import subprocess
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -31,6 +31,15 @@ CODEX_LAUNCH_INTENT_NAME = "codex-launch-intent.json"
 REPLY_EXPECTATIONS_SCHEMA = "roundtable.reply-expectations.v1"
 REPLY_EXPECTATIONS_NAME = "reply-expectations.json"
 SEAT_SURFACE_SCHEMA = "roundtable.seat-surface.v1"
+SEAT_CAPABILITY_SCHEMA = "roundtable.seat-capability.v1"
+SEAT_CAPABILITY_NAME = "capability.json"
+# Surface capability is an explicit address, never an environment snapshot.
+# Only these keys may be persisted: no HOME, PATH, tokens, or full environment.
+SEAT_CAPABILITY_SURFACE_FIELDS = {
+    "herdr": ("pane", frozenset({"workspace", "tab", "session", "endpoint"})),
+    "tmux": ("target", frozenset({"session", "endpoint"})),
+}
+SEAT_CAPABILITY_VALUE_MAX = 512
 REPLY_DURATION_RE = re.compile(r"^(?P<amount>[1-9][0-9]*)(?P<unit>[smh])$")
 DEFAULT_HEARTBEAT_TTL = 30.0
 # Watchers renew more frequently than the health TTL.  Keeping the renewal
@@ -74,6 +83,7 @@ class SeatPaths:
     state_lock: Path
     lease: Path
     surface: Path
+    capability: Path
 
 
 @dataclass(frozen=True)
@@ -294,6 +304,7 @@ def seat_paths(
         state_lock=agent_dir / "state.lock",
         lease=agent_dir / "lease.json",
         surface=agent_dir / "surface.json",
+        capability=agent_dir / SEAT_CAPABILITY_NAME,
     )
 
 
@@ -1363,6 +1374,224 @@ def record_seat_surface(
     return paths.surface
 
 
+def _capability_value(value: Any, label: str) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or "\0" in value
+        or len(value) > SEAT_CAPABILITY_VALUE_MAX
+    ):
+        raise RuntimeStateError(
+            f"seat capability {label} must be a non-empty string without NUL "
+            f"of at most {SEAT_CAPABILITY_VALUE_MAX} characters"
+        )
+    return value
+
+
+def validate_capability_surface(surface: Any) -> dict[str, str]:
+    """Validate one minimal, explicitly addressable surface capability.
+
+    The daemon never fabricates ``HERDR_ENV``; a surface consumer addresses the
+    recorded pane or endpoint explicitly.  Only the allowlisted identifiers
+    below may be stored, so no environment, ``HOME``, ``PATH``, or token can
+    reach this record.
+    """
+
+    if not isinstance(surface, dict):
+        raise RuntimeStateError("seat capability surface must be an object")
+    kind = surface.get("kind")
+    if kind not in SEAT_CAPABILITY_SURFACE_FIELDS:
+        expected = " | ".join(sorted(SEAT_CAPABILITY_SURFACE_FIELDS))
+        raise RuntimeStateError(
+            f"seat capability surface kind must be one of {expected}, got {kind!r}"
+        )
+    required, optional = SEAT_CAPABILITY_SURFACE_FIELDS[kind]
+    unsupported = set(surface) - {"kind", required} - set(optional)
+    if unsupported:
+        rendered = ", ".join(sorted(unsupported))
+        raise RuntimeStateError(
+            f"seat capability surface {kind} contains unsupported fields: {rendered}"
+        )
+    validated = {
+        "kind": kind,
+        required: _capability_value(surface.get(required), f"{kind}.{required}"),
+    }
+    for name in sorted(optional):
+        if name in surface:
+            validated[name] = _capability_value(surface[name], f"{kind}.{name}")
+    return validated
+
+
+def _validate_seat_capability(
+    payload: Any,
+    project: Path,
+    agent_id: str,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise RuntimeStateError("seat capability record is not an object")
+    if payload.get("schema") != SEAT_CAPABILITY_SCHEMA:
+        raise RuntimeStateError("seat capability schema is invalid")
+    if payload.get("projectRoot") != str(project):
+        raise RuntimeStateError("seat capability project root does not match")
+    if payload.get("projectHash") != project_hash(project):
+        raise RuntimeStateError("seat capability project hash does not match")
+    if payload.get("agentId") != agent_id:
+        raise RuntimeStateError("seat capability agent identity does not match")
+    for name in ("harness", "roundtableSessionId", "leaseRevision"):
+        _capability_value(payload.get(name), name)
+    for name in ("threadId", "bindingRevision"):
+        value = payload.get(name)
+        if value is not None:
+            _capability_value(value, name)
+    surface = payload.get("surface")
+    if surface is not None:
+        payload["surface"] = validate_capability_surface(surface)
+    return payload
+
+
+def read_seat_capability(
+    project: Path | str,
+    agent_id: str,
+) -> dict[str, Any] | None:
+    """Read one seat-capability record without validating the live fence."""
+
+    canonical = canonical_project(project)
+    paths = seat_paths(canonical, agent_id)
+    if _path_info(paths.capability) is None:
+        return None
+    with _locked(paths.state_lock, shared=True):
+        payload = _read_json(paths.capability)
+    if payload is None:
+        raise RuntimeStateError(
+            f"seat capability record is unreadable for {agent_id!r} in {canonical}"
+        )
+    return _validate_seat_capability(payload, canonical, agent_id)
+
+
+def record_seat_capability(
+    project: Path | str,
+    agent_id: str,
+    harness: str,
+    *,
+    session_id: Any,
+    revision: Any,
+    surface: Any = UNCHANGED,
+    thread_id: Any = UNCHANGED,
+    binding_revision: Any = UNCHANGED,
+    claim_lock_held: bool = False,
+) -> Path:
+    """Associate a seat's native thread and surface capability with its lease.
+
+    The record is private, keyed to the seat's runtime directory, and carries
+    the whole association tuple (``threadId`` + ``bindingRevision`` +
+    ``roundtableSessionId`` + ``leaseRevision``).  ``surface.json`` remains the
+    advisory navigation artifact; this record is the one a capability resolver
+    revalidates against the current binding and lease at every use.
+
+    ``claim_lock_held`` is for callers already inside ``seat_shared_guard``:
+    that guard holds the project claim lock shared, so re-acquiring it
+    exclusively here would deadlock the same process against itself.
+    """
+
+    canonical = canonical_project(project)
+    _agent_key(agent_id)
+    selected_harness = _validate_harness(harness)
+    paths = seat_paths(canonical, agent_id)
+    _ensure_private_dir(paths.runtime_root)
+    _ensure_private_dir(paths.runtime_root / "projects")
+    _ensure_private_dir(paths.project_dir)
+    _ensure_private_dir(paths.agents_dir)
+    _ensure_private_dir(paths.agent_dir)
+    with nullcontext() if claim_lock_held else _locked(paths.claim_lock):
+        if not claim_lock_held:
+            _write_project_meta(paths, canonical)
+        with _locked(paths.state_lock):
+            lease = _load_fenced_record(
+                paths,
+                canonical,
+                agent_id,
+                session_id,
+                revision,
+            )
+            if lease.get("harness") != selected_harness:
+                raise FenceRejected(
+                    f"seat harness changed for {agent_id!r} in {canonical}"
+                )
+            existing = _read_json(paths.capability)
+            previous: dict[str, Any] = {}
+            if existing is not None:
+                try:
+                    candidate = _validate_seat_capability(
+                        existing,
+                        canonical,
+                        agent_id,
+                    )
+                except RuntimeStateError:
+                    candidate = None
+                # A record written under an older lease generation carries no
+                # authority for this one; start clean instead of inheriting a
+                # thread or pane the new seat never claimed.
+                if candidate is not None and (
+                    candidate.get("roundtableSessionId") == lease.get("sessionId")
+                    and str(candidate.get("leaseRevision"))
+                    == str(lease.get("revision"))
+                ):
+                    previous = candidate
+            payload = {
+                "schema": SEAT_CAPABILITY_SCHEMA,
+                "projectRoot": str(canonical),
+                "projectHash": project_hash(canonical),
+                "agentId": agent_id,
+                "harness": selected_harness,
+                "roundtableSessionId": lease["sessionId"],
+                "leaseRevision": str(lease["revision"]),
+                "threadId": previous.get("threadId"),
+                "bindingRevision": previous.get("bindingRevision"),
+                "surface": previous.get("surface"),
+                "recordedAt": utc_now(),
+            }
+            if thread_id is not UNCHANGED:
+                payload["threadId"] = (
+                    None
+                    if thread_id is None
+                    else _capability_value(thread_id, "threadId")
+                )
+            if binding_revision is not UNCHANGED:
+                payload["bindingRevision"] = (
+                    None
+                    if binding_revision is None
+                    else _capability_value(binding_revision, "bindingRevision")
+                )
+            if surface is not UNCHANGED:
+                payload["surface"] = (
+                    None if surface is None else validate_capability_surface(surface)
+                )
+            _atomic_json(paths.capability, payload)
+    return paths.capability
+
+
+def clear_seat_capability(
+    project: Path | str,
+    agent_id: str,
+    *,
+    claim_lock_held: bool = False,
+) -> bool:
+    """Remove a seat-capability record whose lease is gone or superseded."""
+
+    canonical = canonical_project(project)
+    paths = seat_paths(canonical, agent_id)
+    with nullcontext() if claim_lock_held else _locked(paths.claim_lock):
+        with _locked(paths.state_lock):
+            if _path_info(paths.capability) is None:
+                return False
+            _validate_read_path(paths.capability, directory=False)
+            try:
+                paths.capability.unlink()
+            except FileNotFoundError:
+                return False
+            return True
+
+
 def arm_codex_launch_intent(token: LeaseToken) -> Path:
     """Publish the fenced Codex lease that the next root SessionStart may use.
 
@@ -1587,6 +1816,45 @@ def resolve_codex_launch_intent(
         payload["lastSessionStartAt"] = utc_now()
         _atomic_json(intent_path, payload)
         return current
+
+
+def release_codex_launch_intent_thread(
+    project: Path | str,
+    native_session_id: str,
+) -> bool:
+    """Un-claim a launch intent taken by a thread that can never be a seat.
+
+    A ``/btw`` side child runs its own SessionStart in the parent's cwd, so it
+    can reach an unclaimed intent first.  Once the bridge proves that thread is
+    ephemeral or forked, holding the claim would strand the launch: the real
+    root thread would be refused as a mismatch forever.  Only the exact named
+    thread is released, and only by a caller that has proven it unbindable.
+    """
+
+    if (
+        not isinstance(native_session_id, str)
+        or not native_session_id
+        or "\0" in native_session_id
+    ):
+        raise RuntimeStateError("native Codex session ID is invalid")
+    canonical = canonical_project(project)
+    lookup = seat_paths(canonical, "__codex-launch-intent__")
+    intent_path = lookup.project_dir / CODEX_LAUNCH_INTENT_NAME
+    if _path_info(intent_path) is None:
+        return False
+    with _locked(lookup.claim_lock):
+        payload = _read_json(intent_path)
+        if payload is None:
+            return False
+        _agent_id, _session, _revision, active, _armed_at = (
+            _validate_codex_launch_intent(payload, canonical)
+        )
+        if active != native_session_id:
+            return False
+        payload["activeNativeSessionId"] = None
+        payload["releasedAt"] = utc_now()
+        _atomic_json(intent_path, payload)
+        return True
 
 
 def clear_codex_launch_intent_if_stale(
@@ -2115,4 +2383,13 @@ def release(token: LeaseToken) -> bool:
                 paths.lease.unlink()
             except FileNotFoundError:
                 return False
+            # Capability is a property of the released lease generation, so it
+            # can never outlive it.  Unlink inline: both guards are already
+            # held here, and re-entering them would deadlock this process.
+            if _path_info(paths.capability) is not None:
+                try:
+                    _validate_read_path(paths.capability, directory=False)
+                    paths.capability.unlink()
+                except (FileNotFoundError, RuntimeStateError):
+                    pass
             return True
