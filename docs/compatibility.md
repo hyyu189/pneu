@@ -16,7 +16,7 @@ real vendor session can wake.
 | Hermes | Global skill link; packaged lifecycle plugin; marked plugin enablement; plan/apply/status/remove tests; two sequential RC7 development-host wake generations | RC8 artifact and clean-account plugin/wake repeat |
 | Codex | Shared executable resolver; global skill link; owned SessionStart auto-bind hook; owned app-server and wake plist generation; fail-closed service preflight tests; development-host cutover and thread/lease identity spike | Clean-account repeat and real send-to-wake-to-drain/ack |
 | OpenClaw | Isolated Gateway adapter; fenced lease and identity checks; project-scoped state and loopback Gateway protocol tests | Clean-account/terminal-matrix repeat before public support promotion |
-| Grok Build `1.0.0` (inspected) | Native TUI launcher with a fenced seat environment, read-only credential-presence preflight, pinned monitor-arming first turn, explicit-argument/`RT_GROK_NO_PRIMER` opt-outs, neutral `GROK.md`, and fixture-driven doctor advisory; isolated ACP supervisor retained only for labs | Credentialed live native-TUI send-to-monitor-wake-to-drain/ack, resume re-arm, and clean-account/terminal-matrix repeats before any public support claim |
+| Grok Build `1.0.3` (inspected) | Native TUI launcher with a fenced seat environment, read-only credential-presence preflight, pinned monitor-arming first turn, explicit-argument/`RT_GROK_NO_PRIMER` opt-outs, neutral `GROK.md`, and fixture-driven doctor advisory; isolated ACP supervisor retained only for labs; 2026-08-14 development-host credentialed live native-TUI send-to-monitor-wake-to-drain/ack on Grok Build `1.0.3` / Grok 4.6 | Resume re-arm and clean-account/terminal-matrix repeats before any public support claim |
 
 The Codex plist files are written but not loaded by setup. This is an
 intentional safety boundary, not evidence that the daemon is running.
@@ -49,6 +49,18 @@ through unchanged and skip the primer, as does `RT_GROK_NO_PRIMER=1`, with a
 prominent re-arm advisory. The monitor dies with its native session, so every
 resume also requires one re-arm turn before automatic wake can be trusted.
 
+A 2026-08-14 development-host run on Grok Build `1.0.3` with model Grok 4.6
+proved that native path: a bare project-anchored `rt-grok` launch created
+exactly one persistent monitor on the seat maildir `new/` path, used no
+other tool, and replied `ready` (29 s turn; a second project seat repeated
+the same contract in 25 s). A live send then completed monitor-wake,
+`rt-inbox` drain, a single `rt-ack`, archive to `cur/`, and a quiet receipt
+to the sender mailbox in 11.0 s wall clock. The ack's own `new/`-to-`cur/`
+move raised a second monitor event; the follow-up turn re-drained an empty
+inbox and correctly took no action, so the protocol stayed correct at
+roughly two model turns per handled message. Resume re-arm, a clean-account
+repeat, and the terminal matrix were not exercised in that run.
+
 `rt-doctor` reads bounded fixture-equivalent evidence from Grok session records
 and reports whether an active seat appears to have the expected persistent
 monitor. This is a report-only advisory over an undocumented observation
@@ -60,9 +72,10 @@ invocable only as internal ACP mail-drain lab machinery. They retain their
 isolated HOME/XDG/GROK_HOME/TMP/log boundary, fenced identity checks, permission
 policy experiments, and prior fault/mutation/soak evidence, but `rt-grok` never
 selects them. Their earlier credentialed two-generation E2E is lab evidence,
-not evidence for the native TUI seat. Grok remains unpromoted until Ocean runs
-the credentialed live TUI wake acceptance and the clean-account/terminal
-matrix passes.
+not evidence for the native TUI seat. The 2026-08-14 native TUI wake is
+development-host evidence, not a public support claim. Grok remains
+unpromoted until resume re-arm and the clean-account/terminal matrix also
+pass, and promotion stays Ocean's call.
 
 ## Codex executable selection
 
