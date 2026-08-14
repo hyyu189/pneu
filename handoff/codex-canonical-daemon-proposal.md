@@ -57,6 +57,30 @@ Risks and mitigations:
   CLI↔daemon consistency gate already refuse mismatches; keep them as the
   gate for this too.
 
+### Adoption mechanics — detect, configure, never patch
+
+- **Detect (doctor, report-only):** a dual-host inventory check — whether a
+  Desktop private stdio app-server process is present, which threads and
+  writer locks it holds, whether the shared daemon is reachable, and whether
+  the join switch is set. Same family as the existing hook-trust gate,
+  version floor, and CLI↔daemon consistency gate.
+- **Configure (explicit opt-in through the upstream switch only):** Desktop
+  is a GUI app whose environment comes from the launchd user domain, so
+  enabling means `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`.
+  pneu may manage this as an explicit `pneu setup apply` step: visible in
+  the setup preview, recorded in the ownership manifest, reversed on
+  disable/uninstall, with a note that Desktop must restart to take effect.
+  The default is untouched.
+- **Never patch:** modifying the Desktop app bundle or its app-server code
+  is a non-goal, permanently. It would break code signing, be destroyed by
+  the app's auto-updates, and violate the ownership discipline (own only
+  what pneu installs) — the same red line as the no-global-command-hijack
+  rule.
+- **Drift probe:** the switch is a semi-documented upstream internal. When
+  enabled, doctor must verify Desktop actually joined (daemon client
+  inventory) and warn with a fix hint if a Desktop update renames or breaks
+  the switch — never silent breakage.
+
 ### Trust-domain statement (must ship with Proposal A)
 
 The shared daemon's remote/connection domain is machine-wide, not Roundtable
