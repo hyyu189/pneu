@@ -64,13 +64,28 @@ Risks and mitigations:
   writer locks it holds, whether the shared daemon is reachable, and whether
   the join switch is set. Same family as the existing hook-trust gate,
   version floor, and CLI↔daemon consistency gate.
-- **Configure (explicit opt-in through the upstream switch only):** Desktop
-  is a GUI app whose environment comes from the launchd user domain, so
-  enabling means `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`.
-  pneu may manage this as an explicit `pneu setup apply` step: visible in
-  the setup preview, recorded in the ownership manifest, reversed on
-  disable/uninstall, with a note that Desktop must restart to take effect.
-  The default is untouched.
+- **Configure (automatic within `pneu setup apply`, upstream switch only):**
+  Desktop is a GUI app whose environment comes from the launchd user domain,
+  so enabling means `launchctl setenv CODEX_APP_SERVER_USE_LOCAL_DAEMON 1`.
+  Operator ruling: this is applied automatically by the codex section of
+  `pneu setup apply` — the apply step is already the user's consent moment
+  for pneu-managed changes, the variable name is codex-specific, and the
+  change is reversible, so no separate decision point is warranted. It
+  appears in the setup preview and the ownership manifest like every other
+  owned change. Persistence: `launchctl setenv` does not survive
+  logout/reboot, so pneu owns a re-apply-at-login mechanism; uninstall must
+  unset the variable BEFORE removing the daemon (never leave the switch
+  pointing at a socket that no longer exists). Desktop restart required to
+  take effect.
+- **Promotion gate (answer before this ships default-on):** two honest
+  unknowns for the Stage-3 soak: (1) whether Desktop-originated threads
+  lose phone/cloud reachability when hosted by the shared daemon — the
+  routing capture showed reachability is decided by cloud-side session
+  registration whose locus (host process vs app client) is not yet
+  established; a regression here is the one trade-off that goes back to the
+  operator. (2) Desktop behavior when the shared daemon is unavailable
+  (upgrade/reload windows): graceful fallback to the private host, or hard
+  failure.
 - **Never patch:** modifying the Desktop app bundle or its app-server code
   is a non-goal, permanently. It would break code signing, be destroyed by
   the app's auto-updates, and violate the ownership discipline (own only
