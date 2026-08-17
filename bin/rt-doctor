@@ -19,6 +19,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 from _rtcodex import (
     AppServerClient,
@@ -841,31 +842,75 @@ def harness_family(harness: str | None) -> str | None:
         "codex": "codex",
         "hermes": "hermes",
         "hermes-agent": "hermes",
+        "openclaw": "openclaw",
+        "openclaw-gateway": "openclaw",
         "grok": "grok",
         "grok-build": "grok",
     }.get(harness)
 
 
-def _grok_monitor_text_matches(text: str, expected_maildir: Path) -> bool:
-    """Recognize one persisted Stop/background-task monitor evidence record."""
+def _grok_content_text(record: dict) -> str:
+    content = record.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        item.get("text", "")
+        for item in content
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    )
 
-    if str(expected_maildir) not in text:
+
+def _grok_monitor_requested(record: dict, expected_maildir: Path) -> bool:
+    if record.get("type") != "assistant":
         return False
-    lowered = text.lower()
-    if "monitor" not in lowered:
+    calls = record.get("tool_calls")
+    if not isinstance(calls, list):
         return False
-    if "backgroundtasks" not in lowered and "background_tasks" not in lowered:
-        return False
-    return bool(
-        re.search(
-            r"[\"']?persistent[\"']?\s*[:=]\s*(?:true|True)",
-            text,
+    for call in calls:
+        if not isinstance(call, dict) or call.get("name") != "monitor":
+            continue
+        arguments = call.get("arguments")
+        if not isinstance(arguments, str):
+            continue
+        try:
+            payload = json.loads(arguments)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("persistent") is not True:
+            continue
+        command = payload.get("command")
+        if isinstance(command, str) and str(expected_maildir) in command:
+            return True
+    return False
+
+
+def _grok_monitor_started(record: dict) -> bool:
+    return (
+        record.get("type") == "tool_result"
+        and bool(re.match(r"^Monitor started \(task [^,]+, persistent", _grok_content_text(record)))
+    )
+
+
+def _grok_monitor_ended(record: dict, expected_maildir: Path) -> bool:
+    text = _grok_content_text(record)
+    return (
+        record.get("type") == "user"
+        and "<system-reminder>" in text
+        and str(expected_maildir) in text
+        and bool(
+            re.search(
+                r'Monitor "[^\"]+" ended: \[monitor ended: killed by signal max_runtime\]',
+                text,
+            )
         )
     )
 
 
 def grok_monitor_evidence(
     sessions_root: Path,
+    project_root: Path,
     expected_maildir: Path,
 ) -> tuple[str, str]:
     """Inspect bounded, read-only Grok session evidence for one seat monitor.
@@ -876,6 +921,7 @@ def grok_monitor_evidence(
     """
 
     sessions_root = sessions_root.expanduser().absolute()
+    project_root = project_root.expanduser().absolute()
     expected_maildir = expected_maildir.expanduser().absolute()
     try:
         root_info = sessions_root.lstat()
@@ -887,56 +933,119 @@ def grok_monitor_evidence(
         return "unreadable", f"session evidence root is not a real directory: {sessions_root}"
 
     problems: list[str] = []
+    session_scopes: list[Path] = []
+    try:
+        entries = sorted(sessions_root.iterdir(), key=lambda entry: entry.name)
+    except OSError as error:
+        return "unreadable", f"cannot inspect {sessions_root}: {error}"
+    for entry in entries:
+        if unquote(entry.name) != str(project_root):
+            continue
+        try:
+            info = entry.lstat()
+        except OSError as error:
+            problems.append(f"cannot inspect session scope {entry}: {error}")
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            problems.append(f"session scope is not a real directory: {entry}")
+            continue
+        session_scopes.append(entry)
+    if not session_scopes:
+        if problems:
+            return "unreadable", problems[0]
+        return "absent", f"no Grok session scope for {project_root}"
 
     def record_walk_error(error: OSError) -> None:
         problems.append(str(error))
 
     examined = 0
+    latest: tuple[int, int, str, Path] | None = None
     try:
-        walker = os.walk(
-            sessions_root,
-            topdown=True,
-            onerror=record_walk_error,
-            followlinks=False,
-        )
-        for directory, directories, filenames in walker:
-            current = Path(directory)
-            directories[:] = sorted(
-                name
-                for name in directories
-                if not (current / name).is_symlink()
+        for scope in session_scopes:
+            walker = os.walk(
+                scope,
+                topdown=True,
+                onerror=record_walk_error,
+                followlinks=False,
             )
-            for filename in sorted(filenames):
-                path = current / filename
-                if path.suffix.lower() not in GROK_MONITOR_SUFFIXES:
-                    continue
-                examined += 1
-                if examined > GROK_MONITOR_MAX_FILES:
-                    problems.append(
-                        f"scan exceeded {GROK_MONITOR_MAX_FILES} candidate files"
-                    )
-                    break
-                try:
-                    info = path.lstat()
-                    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                        problems.append(f"unsafe session evidence file: {path}")
+            for directory, directories, filenames in walker:
+                current = Path(directory)
+                directories[:] = sorted(
+                    name
+                    for name in directories
+                    if not (current / name).is_symlink()
+                )
+                for filename in sorted(filenames):
+                    path = current / filename
+                    if path.suffix.lower() not in GROK_MONITOR_SUFFIXES:
                         continue
-                    if info.st_size > GROK_MONITOR_MAX_BYTES:
+                    examined += 1
+                    if examined > GROK_MONITOR_MAX_FILES:
                         problems.append(
-                            f"session evidence file exceeds {GROK_MONITOR_MAX_BYTES} bytes: {path}"
+                            f"scan exceeded {GROK_MONITOR_MAX_FILES} candidate files"
                         )
                         continue
-                    text = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError) as error:
-                    problems.append(f"cannot read {path}: {error}")
-                    continue
-                if _grok_monitor_text_matches(text, expected_maildir):
-                    return "present", f"monitor evidence found in {path}"
+                    try:
+                        info = path.lstat()
+                        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                            problems.append(f"unsafe session evidence file: {path}")
+                            continue
+                        if info.st_size > GROK_MONITOR_MAX_BYTES:
+                            problems.append(
+                                f"session evidence file exceeds {GROK_MONITOR_MAX_BYTES} bytes: {path}"
+                            )
+                            continue
+                        lines = path.read_text(encoding="utf-8").splitlines()
+                    except (OSError, UnicodeError) as error:
+                        problems.append(f"cannot read {path}: {error}")
+                        continue
+                    pending_start = False
+                    for line_number, line in enumerate(lines):
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        if _grok_monitor_requested(record, expected_maildir):
+                            pending_start = True
+                        if pending_start and _grok_monitor_started(record):
+                            candidate = (
+                                info.st_mtime_ns,
+                                line_number,
+                                "present",
+                                path,
+                            )
+                            if latest is None or candidate[:2] >= latest[:2]:
+                                latest = candidate
+                            pending_start = False
+                        if _grok_monitor_ended(record, expected_maildir):
+                            candidate = (
+                                info.st_mtime_ns,
+                                line_number,
+                                "ended",
+                                path,
+                            )
+                            if latest is None or candidate[:2] >= latest[:2]:
+                                latest = candidate
+                            pending_start = False
+                if examined > GROK_MONITOR_MAX_FILES:
+                    break
             if examined > GROK_MONITOR_MAX_FILES:
                 break
     except OSError as error:
         problems.append(f"cannot walk {sessions_root}: {error}")
 
+    if latest is not None:
+        _modified, _line_number, state, path = latest
+        suffix = (
+            f"; {len(problems)} file(s) not inspected: {problems[0]}"
+            if problems
+            else ""
+        )
+        if state == "present":
+            return "present", f"active monitor evidence found in {path}{suffix}"
+        return "absent", f"latest monitor evidence ended in {path}{suffix}"
     if problems:
         return "unreadable", problems[0]
     return (
@@ -986,6 +1095,7 @@ def report_grok_monitor_liveness(
 
             state, detail = grok_monitor_evidence(
                 sessions_root,
+                project,
                 expected_maildir,
             )
             if state == "present":
@@ -1185,8 +1295,8 @@ def inspect_project_seats(
                 )
             if (
                 declared_harness is not None
-                and harness_family(str(declared_harness))
-                != harness_family(harness)
+                and (harness_family(str(declared_harness)) or str(declared_harness))
+                != (harness_family(harness) or harness)
             ):
                 report.item(
                     "FAIL",

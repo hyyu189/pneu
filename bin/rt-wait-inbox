@@ -69,7 +69,7 @@ CLAUDE_FENCE_ENVIRONMENT = (
 # does not control: reaching it is an unannounced kill that leaves the seat deaf
 # until the session's next turn.  The watcher retires itself before that bound
 # so the wake it emits re-arms a fresh watcher through the ordinary Stop hook.
-CLAUDE_HOOK_TIMEOUT_SECONDS = 15_000.0
+CLAUDE_HOOK_TIMEOUT_SECONDS = 1_209_600.0
 WATCHER_LIFETIME_MARGIN_SECONDS = 300.0
 DEFAULT_WATCHER_MAX_LIFETIME_SECONDS = (
     CLAUDE_HOOK_TIMEOUT_SECONDS - WATCHER_LIFETIME_MARGIN_SECONDS
@@ -80,19 +80,9 @@ SELF_HEAL_MAX_RESTARTS = 5
 SELF_HEAL_WINDOW_SECONDS = 300.0
 SELF_HEAL_BACKOFF_SECONDS = 0.5
 SELF_HEAL_MAX_BACKOFF_SECONDS = 5.0
-# Kill-class self-heal: the hook process supervises a forked watcher so a kill
-# aimed at the watcher alone does not end the seat's only wake channel.
-SUPERVISOR_POLL_SECONDS = 1.0
-SUPERVISOR_MAX_RESTARTS = 3
-SUPERVISOR_ESCALATE_AFTER_SECONDS = 30.0
-SUPERVISOR_REAP_SECONDS = 5.0
-SUPERVISOR_CHILD_FAILURE_CODE = 70
-
 _RECEIVED_SIGNAL: int | None = None
 # Import time is the closest available stand-in for when the hook process
-# started, and a forked watcher inherits it, so a re-forked child keeps
-# measuring its planned lifetime against the hook's own clock rather than
-# restarting it.
+# started, anchoring planned retirement to the hook's own clock.
 _PROCESS_STARTED = time.monotonic()
 
 
@@ -503,7 +493,6 @@ def run(
     claude_hook: bool = False,
     claude_stop_hook: bool = False,
     stop_hook_active: bool = False,
-    supervisor_pid: int | None = None,
 ) -> int:
     """Arm one watch attempt, healing crash-class deaths in place.
 
@@ -535,7 +524,6 @@ def run(
                 claude_hook=claude_hook,
                 claude_stop_hook=claude_stop_hook,
                 stop_hook_active=stop_hook_active,
-                supervisor_pid=supervisor_pid,
                 deadline=deadline,
                 lifetime=lifetime,
                 attempt=attempt,
@@ -603,7 +591,6 @@ def _watch(
     claude_hook: bool,
     claude_stop_hook: bool,
     stop_hook_active: bool,
-    supervisor_pid: int | None,
     deadline: float | None,
     lifetime: float | None,
     attempt: int,
@@ -705,7 +692,6 @@ def _watch(
             attempt=attempt,
             watcher_pid=watcher_pid,
             ppid=os.getppid(),
-            supervisor_pid=supervisor_pid,
             session_id=session_id,
             lease_revision=revision,
             generation=list(pending_at_stop),
@@ -743,7 +729,6 @@ def _watch(
         mail = pending_at_stop
         waited_seconds = 0
         superseded = overdue is None
-        orphaned = False
         retired = False
         if superseded:
             lifecycle.event("fence_rejected", phase="reply-alarm-reconcile")
@@ -753,23 +738,10 @@ def _watch(
             not mail
             and not overdue
             and not superseded
-            and not orphaned
             and not retired
         ):
             time.sleep(poll_seconds)
             waited_seconds += poll_seconds
-            if supervisor_pid is not None and os.getppid() != supervisor_pid:
-                # The hook process that owns this seat's only wake channel is
-                # gone, so a surviving watcher would renew a heartbeat nobody
-                # can act on.  Stand down instead of faking a healthy seat.
-                lifecycle.event(
-                    "supervisor_exited",
-                    supervisor_pid=supervisor_pid,
-                    ppid=os.getppid(),
-                    waited_seconds=waited_seconds,
-                )
-                orphaned = True
-                break
             if deadline is not None and time.monotonic() >= deadline:
                 retired = True
                 break
@@ -813,9 +785,6 @@ def _watch(
                 break
             mail = candidate_mail
 
-        if orphaned:
-            exit_code, exit_reason = 0, "supervisor-exited"
-            return 0
         if retired:
             lifecycle.event(
                 "lifetime_rearm",
@@ -1227,191 +1196,6 @@ def _restore_claude_lease_environment(
     return token.agent_id
 
 
-def _supervisor_enabled(claude_hook: bool) -> bool:
-    """Return whether this hook invocation should supervise a forked watcher.
-
-    Supervision is limited to the Claude async-wake hooks: those are the paths
-    whose only wake channel is this process's own exit status, and the ones
-    where an unexplained idle death was observed.  Terminal and Hermes watchers
-    keep the single-process shape their callers already manage.
-    """
-
-    if not claude_hook:
-        return False
-    if os.environ.get("RT_WATCHER_NO_SUPERVISOR", "").strip() == "1":
-        return False
-    return hasattr(os, "fork") and hasattr(os, "waitpid")
-
-
-def _supervisor_lifecycle(agent: str) -> _Lifecycle:
-    try:
-        return _Lifecycle(_project_root(), agent)
-    except (ProjectRegistryError, RuntimeStateError, OSError):
-        return _Lifecycle(None, agent)
-
-
-def _reap_child(pid: int, timeout: float = SUPERVISOR_REAP_SECONDS) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            waited, _status = os.waitpid(pid, os.WNOHANG)
-        except (ChildProcessError, OSError):
-            return
-        if waited == pid:
-            return
-        time.sleep(0.05)
-    with contextlib.suppress(OSError):
-        os.kill(pid, signal.SIGKILL)
-    with contextlib.suppress(ChildProcessError, OSError):
-        os.waitpid(pid, 0)
-
-
-def _supervise(agent: str, execute, *, claude_hook: bool) -> int:
-    """Run the watcher in a forked child and re-fork it if it is killed.
-
-    This never detaches.  The hook's own process stays in the foreground and
-    exits with the watcher's status, so Claude Code's ``asyncRewake`` contract —
-    the hook process itself must exit 2 to deliver a wake — is preserved.  What
-    the supervisor adds is that a kill aimed at the watcher process alone no
-    longer removes the seat's only wake channel.  A kill aimed at the process
-    group, including Claude Code's own hook-timeout cancellation, still ends
-    both processes; the child detects an exited supervisor and stands down
-    rather than renewing a heartbeat that nothing can act on.
-    """
-
-    lifecycle = _supervisor_lifecycle(agent)
-    supervisor_pid = os.getpid()
-    started = time.monotonic()
-    pending: list[int] = []
-
-    def forward(signum, _frame) -> None:
-        pending.append(signum)
-
-    previous: dict[int, object] = {}
-    for name in ("SIGTERM", "SIGINT", "SIGHUP"):
-        number = getattr(signal, name, None)
-        if number is None:
-            continue
-        with contextlib.suppress(OSError, ValueError):
-            previous[number] = signal.signal(number, forward)
-
-    restarts = 0
-    while True:
-        try:
-            child_pid = os.fork()
-        except OSError as error:
-            lifecycle.event("supervisor_unavailable", error=str(error))
-            for number, handler in previous.items():
-                with contextlib.suppress(OSError, ValueError):
-                    signal.signal(number, handler)
-            return execute(None)
-        if child_pid == 0:
-            code = SUPERVISOR_CHILD_FAILURE_CODE
-            try:
-                for number, handler in previous.items():
-                    with contextlib.suppress(OSError, ValueError):
-                        signal.signal(number, handler)
-                code = execute(supervisor_pid)
-            except BaseException as error:  # noqa: BLE001 - never die silently
-                lifecycle.event(
-                    "crash",
-                    phase="supervised-child",
-                    error_type=type(error).__name__,
-                    error=str(error),
-                    traceback=traceback.format_exc(),
-                )
-            finally:
-                sys.stdout.flush()
-                sys.stderr.flush()
-                os._exit(
-                    code
-                    if isinstance(code, int) and 0 <= code <= 255
-                    else SUPERVISOR_CHILD_FAILURE_CODE
-                )
-        lifecycle.event(
-            "supervisor_armed",
-            supervisor_pid=supervisor_pid,
-            child_pid=child_pid,
-            restarts=restarts,
-        )
-        status = None
-        # Start with a tight poll so a watcher that exits immediately — a
-        # stand-down, or mail that was already pending — is propagated without
-        # adding latency, then relax to the steady-state idle cadence.
-        poll = 0.02
-        while True:
-            if pending:
-                signum = pending.pop(0)
-                lifecycle.event(
-                    "supervisor_signal",
-                    signal=_signal_name(signum),
-                    child_pid=child_pid,
-                )
-                with contextlib.suppress(OSError):
-                    os.kill(child_pid, signum)
-                _reap_child(child_pid)
-                return 0
-            try:
-                waited, waited_status = os.waitpid(child_pid, os.WNOHANG)
-            except ChildProcessError:
-                waited, waited_status = child_pid, 0
-            except OSError as error:
-                lifecycle.event(
-                    "supervisor_wait_failed",
-                    child_pid=child_pid,
-                    error=str(error),
-                )
-                return 0
-            if waited == child_pid:
-                status = waited_status
-                break
-            time.sleep(poll)
-            poll = min(SUPERVISOR_POLL_SECONDS, poll * 2)
-
-        if os.WIFEXITED(status):
-            code = os.WEXITSTATUS(status)
-            lifecycle.event(
-                "supervisor_child_exit",
-                child_pid=child_pid,
-                code=code,
-            )
-            if code != SUPERVISOR_CHILD_FAILURE_CODE:
-                return code
-        else:
-            code = None
-            lifecycle.event(
-                "watcher_killed",
-                child_pid=child_pid,
-                signal=_signal_name(
-                    os.WTERMSIG(status) if os.WIFSIGNALED(status) else None
-                ),
-                status=status,
-            )
-        restarts += 1
-        if restarts > SUPERVISOR_MAX_RESTARTS:
-            lifecycle.event("supervisor_exhausted", restarts=restarts)
-            if (
-                claude_hook
-                and time.monotonic() - started >= SUPERVISOR_ESCALATE_AFTER_SECONDS
-            ):
-                log_path = lifecycle.path
-                print(
-                    "rt-wait-inbox: this seat's inbox watcher died "
-                    f"{restarts} times and cannot be kept armed. Mail stays "
-                    "durable in new/, but this seat will not wake on its own "
-                    "until it is relaunched."
-                    + (f" Lifecycle log: {log_path}" if log_path else ""),
-                    file=sys.stderr,
-                )
-                return 2
-            return 0
-        lifecycle.event(
-            "supervisor_restart",
-            attempt=restarts,
-            previous_child_pid=child_pid,
-        )
-
-
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     follow_generation = bool(
@@ -1477,7 +1261,7 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    def execute(supervisor_pid: int | None) -> int:
+    def execute() -> int:
         try:
             if follow_generation:
                 return wait_last_wake_drained(argv[0])
@@ -1488,7 +1272,6 @@ def main(argv: list[str] | None = None) -> int:
                 claude_hook=claude_hook,
                 claude_stop_hook=claude_stop_hook,
                 stop_hook_active=stop_hook_active,
-                supervisor_pid=supervisor_pid,
             )
         except FenceRejected:
             print("rt-wait-inbox: seat lease or watcher was superseded")
@@ -1500,9 +1283,7 @@ def main(argv: list[str] | None = None) -> int:
             print(message, file=sys.stderr)
             return 2
 
-    if follow_generation or not _supervisor_enabled(claude_hook):
-        return execute(None)
-    return _supervise(argv[0], execute, claude_hook=claude_hook)
+    return execute()
 
 
 if __name__ == "__main__":

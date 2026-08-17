@@ -10,6 +10,7 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
 
@@ -19,6 +20,7 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtlib  # noqa: E402
+import _rtlauncher  # noqa: E402
 
 
 def load_doctor():
@@ -112,6 +114,47 @@ agents:
     return project
 
 
+def _monitor_records(expected_maildir: Path, *, ended: bool = False) -> str:
+    records = [
+        {
+            "type": "assistant",
+            "tool_calls": [
+                {
+                    "name": "monitor",
+                    "arguments": json.dumps(
+                        {
+                            "persistent": True,
+                            "command": f"watch {expected_maildir}",
+                        }
+                    ),
+                }
+            ],
+        },
+        {
+            "type": "tool_result",
+            "content": "Monitor started (task test-task, persistent)",
+        },
+    ]
+    if ended:
+        records.append(
+            {
+                "type": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "<system-reminder>\n"
+                            'Monitor "test-task" ended: [monitor ended: killed by signal max_runtime].\n'
+                            f"Command: watch {expected_maildir}\n"
+                            "</system-reminder>"
+                        ),
+                    }
+                ],
+            }
+        )
+    return "".join(json.dumps(record) + "\n" for record in records)
+
+
 @pytest.mark.parametrize(
     ("fixture", "expected_level", "expected_state"),
     [
@@ -121,36 +164,18 @@ agents:
     ],
 )
 def test_grok_monitor_advisory_uses_bounded_session_fixtures(
-    tmp_path,
-    capsys,
-    fixture,
-    expected_level,
-    expected_state,
+    tmp_path, capsys, fixture, expected_level, expected_state
 ):
     registry = tmp_path / "registry" / "projects.yaml"
     project = _registered_grok_project(tmp_path / "grok-project", registry)
     mailbox = _rtlib.resolve_project_mailbox(project, registry)
     expected_maildir = mailbox.inbox_dir / "grok" / "new"
     sessions = tmp_path / "fixture-home" / ".grok" / "sessions"
-    session = sessions / "session-1"
+    session = sessions / quote(str(project), safe="") / "session-1"
     session.mkdir(parents=True)
     evidence = session / "updates.jsonl"
     if fixture == "present":
-        evidence.write_text(
-            json.dumps(
-                {
-                    "hookEventName": "Stop",
-                    "backgroundTasks": [
-                        {
-                            "tool": "monitor",
-                            "persistent": True,
-                            "watch": str(expected_maildir),
-                        }
-                    ],
-                }
-            )
-            + "\n"
-        )
+        evidence.write_text(_monitor_records(expected_maildir))
     elif fixture == "absent":
         evidence.write_text(
             json.dumps({"hookEventName": "Stop", "backgroundTasks": []}) + "\n"
@@ -183,6 +208,91 @@ def test_grok_monitor_advisory_uses_bounded_session_fixtures(
         assert "re-arm its persistent pneu mailbox monitor" in output
         assert "resume always requires one re-arm turn" in output
     assert not report.failed
+
+
+def test_grok_monitor_evidence_rejects_other_project_and_ended_monitor(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    expected_maildir = project / ".roundtable" / "inbox" / "grok" / "new"
+    sessions = tmp_path / "fixture-home" / ".grok" / "sessions"
+    other = tmp_path / "other-project"
+    other.mkdir()
+    other_session = sessions / quote(str(other), safe="") / "session"
+    other_session.mkdir(parents=True)
+    (other_session / "chat_history.jsonl").write_text(
+        _monitor_records(expected_maildir)
+    )
+
+    state, detail = doctor.grok_monitor_evidence(sessions, project, expected_maildir)
+    assert state == "absent"
+    assert "no Grok session scope" in detail
+
+    own_session = sessions / quote(str(project), safe="") / "session"
+    own_session.mkdir(parents=True)
+    (own_session / "chat_history.jsonl").write_text(
+        _monitor_records(expected_maildir, ended=True)
+    )
+    state, detail = doctor.grok_monitor_evidence(sessions, project, expected_maildir)
+    assert state == "absent"
+    assert "latest monitor evidence ended" in detail
+
+
+def test_grok_monitor_evidence_keeps_present_record_with_oversized_sibling(
+    tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    expected_maildir = project / ".roundtable" / "inbox" / "grok" / "new"
+    sessions = tmp_path / "fixture-home" / ".grok" / "sessions"
+    session = sessions / quote(str(project), safe="") / "session"
+    session.mkdir(parents=True)
+    (session / "chat_history.jsonl").write_text(_monitor_records(expected_maildir))
+    (session / "updates.jsonl").write_bytes(
+        b"x" * (doctor.GROK_MONITOR_MAX_BYTES + 1)
+    )
+
+    state, detail = doctor.grok_monitor_evidence(sessions, project, expected_maildir)
+
+    assert state == "present"
+    assert "1 file(s) not inspected" in detail
+
+
+def test_doctor_harness_families_cover_every_launcher_alias():
+    for family, aliases in _rtlauncher.CONFIG_HARNESSES.items():
+        for alias in aliases:
+            assert doctor.harness_family(alias) == family
+    assert doctor.launch_fix(Path("/project"), "openclaw", "openclaw-gateway") == (
+        "cd /project && RT_FROM=openclaw rt-openclaw"
+    )
+
+
+def test_openclaw_runtime_unknown_harness_fails_seat_identity(
+    tmp_path, monkeypatch, capsys
+):
+    project = tmp_path / "openclaw-project"
+    project.mkdir()
+    monkeypatch.setattr(
+        doctor,
+        "configured_instances",
+        lambda _project: [("openclaw", "openclaw")],
+    )
+    monkeypatch.setattr(
+        doctor,
+        "inspect_seat",
+        lambda *_args: {
+            "status": "vacant",
+            "record": {"agentId": "openclaw", "harness": "unknown-runtime"},
+        },
+    )
+    report = doctor.Report()
+
+    doctor.inspect_project_seats(report, {str(project): project})
+
+    output = capsys.readouterr().out
+    assert "FAIL seat-identity:" in output
+    assert "configured harness=openclaw" in output
+    assert "runtime record declares harness='unknown-runtime'" in output
+    assert report.failed
 
 
 def test_native_grok_owner_health_defers_only_monitor_health_to_advisory(

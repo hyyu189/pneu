@@ -1,10 +1,9 @@
-"""Watcher lifecycle logging, crash/kill self-heal, and the pty arm journey.
+"""Watcher lifecycle logging, crash self-heal, and the pty arm journey.
 
 The armed Claude inbox watcher died twice while idle on a live host with no
-record of why.  These cases pin the two properties that make that
-unreproducible failure diagnosable and survivable: every exit path leaves a
-durable lifecycle record, and a watcher that dies without producing one is
-re-armed by the hook process that owns the seat's wake channel.
+record of why. These cases pin the two properties that make that unreproducible
+failure diagnosable: every catchable exit path leaves a durable lifecycle
+record, while an uncatchable watcher kill is reported as an unlogged death.
 """
 
 from __future__ import annotations
@@ -211,6 +210,9 @@ def test_hook_timeout_constant_matches_the_packaged_claude_hook(monkeypatch):
         wait.DEFAULT_WATCHER_MAX_LIFETIME_SECONDS
         < wait.CLAUDE_HOOK_TIMEOUT_SECONDS
     )
+    # Bun truncates any setTimeout delay above 2**31-1 ms, so a hook timeout
+    # beyond ~24.8 days is silently clamped instead of honored.
+    assert wait.CLAUDE_HOOK_TIMEOUT_SECONDS * 1000 < 2**31 - 1
 
 
 def test_arm_and_mail_exit_are_recorded_with_identity(tmp_path, monkeypatch):
@@ -241,7 +243,6 @@ def test_arm_and_mail_exit_are_recorded_with_identity(tmp_path, monkeypatch):
     exit_record = last_event(project, "exit")
     assert exit_record["code"] == 2
     assert exit_record["reason"] == "mail"
-    assert last_event(project, "supervisor_child_exit")["code"] == 2
 
 
 def test_duplicate_hook_stand_down_is_recorded(tmp_path, monkeypatch):
@@ -270,27 +271,21 @@ def test_duplicate_hook_stand_down_is_recorded(tmp_path, monkeypatch):
 
 
 def test_planned_lifetime_retires_the_watcher_with_a_quiet_notice(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, watchers
 ):
     project = write_project(tmp_path / "project")
     environment = claim_environment(monkeypatch, tmp_path / "runtime", project)
     environment["RT_WATCHER_MAX_LIFETIME_SECONDS"] = "0.2"
 
-    result = subprocess.run(
-        [sys.executable, str(BIN / "rt-wait-inbox"), "--claude-hook", "claude"],
-        cwd=project,
-        env=environment,
-        text=True,
-        capture_output=True,
-        check=False,
-        timeout=JOURNEY_TIMEOUT,
-    )
+    watcher = watchers(project, environment, "--claude-hook", "claude")
+    wait_for_event(project, lambda record: record["event"] == "armed")
 
-    assert result.returncode == 2
-    assert "planned" in result.stderr
-    assert "do not drain the inbox for this notice" in result.stderr.lower()
+    assert watcher.process.wait(timeout=JOURNEY_TIMEOUT) == 2
+    text = watcher.text().lower()
+    assert "planned" in text
+    assert "do not drain the inbox for this notice" in text
     stream = [record["event"] for record in events(project)]
-    assert "lifetime_rearm" in stream
+    assert stream[-3:] == ["armed", "lifetime_rearm", "exit"]
     assert last_event(project, "exit")["reason"] == "lifetime-rearm"
     # The retirement is not a mail generation, so it cannot arm the Stop-hook
     # breaker against the next real message.
@@ -299,7 +294,7 @@ def test_planned_lifetime_retires_the_watcher_with_a_quiet_notice(
     assert inspection.token.last_wake_messages == ()
 
 
-def test_sigterm_records_a_signal_exit_on_both_processes(
+def test_sigterm_records_a_signal_exit(
     tmp_path, monkeypatch, watchers
 ):
     project = write_project(tmp_path / "project")
@@ -310,11 +305,6 @@ def test_sigterm_records_a_signal_exit_on_both_processes(
     watcher.process.send_signal(signal.SIGTERM)
     assert watcher.process.wait(timeout=JOURNEY_TIMEOUT) == 0
 
-    forwarded = wait_for_event(
-        project, lambda record: record["event"] == "supervisor_signal"
-    )
-    assert forwarded["signal"] == "SIGTERM"
-    assert forwarded["child_pid"] == armed["watcher_pid"]
     signalled = wait_for_event(
         project,
         lambda record: record["event"] == "exit" and record.get("signal") == "SIGTERM",
@@ -325,72 +315,16 @@ def test_sigterm_records_a_signal_exit_on_both_processes(
     assert not inspection.wake_healthy
 
 
-def test_killed_watcher_is_re_armed_and_still_delivers_mail(
+def test_killed_watcher_leaves_the_seat_deaf_and_unlogged(
     tmp_path, monkeypatch, watchers
 ):
-    """The self-heal journey: an uncatchable kill must not deafen the seat."""
+    """A real hook watcher cannot log or recover from SIGKILL."""
 
     project = write_project(tmp_path / "project")
     environment = claim_environment(monkeypatch, tmp_path / "runtime", project)
-    watcher = watchers(project, environment, "--claude-hook", "claude")
-
-    first = wait_for_event(project, lambda record: record["event"] == "armed")
-    assert first["supervisor_pid"] == watcher.process.pid
-    assert first["watcher_pid"] != watcher.process.pid
-    deadline = time.monotonic() + JOURNEY_TIMEOUT
-    while time.monotonic() < deadline:
-        if _rtruntime.inspect_seat(project, "claude").wake_healthy:
-            break
-        time.sleep(0.05)
-    assert _rtruntime.inspect_seat(project, "claude").wake_healthy
-
-    os.kill(first["watcher_pid"], signal.SIGKILL)
-
-    killed = wait_for_event(
-        project, lambda record: record["event"] == "watcher_killed"
-    )
-    assert killed["signal"] == "SIGKILL"
-    assert killed["child_pid"] == first["watcher_pid"]
-    restart = wait_for_event(
-        project, lambda record: record["event"] == "supervisor_restart"
-    )
-    assert restart["attempt"] == 1
-    second = wait_for_event(
-        project,
-        lambda record: record["event"] == "armed"
-        and record["watcher_pid"] != first["watcher_pid"],
-    )
-    assert second["supervisor_pid"] == watcher.process.pid
-    assert watcher.process.poll() is None
-
-    deliver(project, "message-after-heal.md")
-    assert watcher.process.wait(timeout=JOURNEY_TIMEOUT) == 2
-    text = watcher.text()
-    assert "message-after-heal.md" in text
-    assert "Roundtable mail arrived" in text
-    wake = wait_for_event(project, lambda record: record["event"] == "wake")
-    assert wake["messages"] == ["message-after-heal.md"]
-
-
-def test_unsupervised_kill_leaves_the_seat_deaf_and_unlogged(
-    tmp_path, monkeypatch, watchers
-):
-    """Mutation counterpart: without supervision the same kill is terminal.
-
-    This is the failing half of the self-heal journey.  If the supervisor is
-    removed, ``test_killed_watcher_is_re_armed_and_still_delivers_mail``
-    degrades into exactly this behavior.
-    """
-
-    project = write_project(tmp_path / "project")
-    environment = claim_environment(monkeypatch, tmp_path / "runtime", project)
-    environment["RT_WATCHER_NO_SUPERVISOR"] = "1"
     watcher = watchers(project, environment, "--claude-hook", "claude")
 
     armed = wait_for_event(project, lambda record: record["event"] == "armed")
-    # Absent fields are omitted from a record: an unsupervised watcher has no
-    # supervisor pid to report.
-    assert "supervisor_pid" not in armed
     assert armed["watcher_pid"] == watcher.process.pid
 
     os.kill(watcher.process.pid, signal.SIGKILL)
@@ -408,38 +342,6 @@ def test_unsupervised_kill_leaves_the_seat_deaf_and_unlogged(
     )
     assert summary["verdict"] == "unlogged-death"
     assert summary["last_exit"] is None
-
-
-def test_supervised_child_stands_down_when_the_hook_process_dies(
-    tmp_path, monkeypatch, watchers
-):
-    project = write_project(tmp_path / "project")
-    environment = claim_environment(monkeypatch, tmp_path / "runtime", project)
-    watcher = watchers(project, environment, "--claude-hook", "claude")
-    armed = wait_for_event(project, lambda record: record["event"] == "armed")
-
-    os.kill(watcher.process.pid, signal.SIGKILL)
-    watcher.process.wait(timeout=JOURNEY_TIMEOUT)
-
-    orphaned = wait_for_event(
-        project, lambda record: record["event"] == "supervisor_exited"
-    )
-    assert orphaned["supervisor_pid"] == watcher.process.pid
-    wait_for_event(
-        project,
-        lambda record: record["event"] == "exit"
-        and record.get("reason") == "supervisor-exited",
-    )
-    deadline = time.monotonic() + JOURNEY_TIMEOUT
-    while time.monotonic() < deadline:
-        try:
-            os.kill(armed["watcher_pid"], 0)
-        except OSError:
-            break
-        time.sleep(0.05)
-    with pytest.raises(OSError):
-        os.kill(armed["watcher_pid"], 0)
-    assert not _rtruntime.inspect_seat(project, "claude").wake_healthy
 
 
 def test_crash_self_heals_in_place_and_records_the_traceback(

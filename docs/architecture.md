@@ -321,7 +321,7 @@ declared dead merely because it has not emitted a recent heartbeat.
 The armed Claude inbox watcher is the seat's only wake channel while the
 session is idle, and it left no record of its own death. It now writes an
 append-only JSONL lifecycle log beside its lease. Every transition is
-recorded: `armed` (with watcher PID, parent PID, supervisor PID, session id,
+recorded: `armed` (with watcher PID, parent PID, session id,
 lease revision, pending generation, hook mode, and planned lifetime),
 `takeover`, `stand_down`, `fence_rejected`, `wake`, `reply_overdue`,
 `signal`-bearing exits, `crash` with the full traceback, and one `exit` record
@@ -338,19 +338,13 @@ renders exactly that verdict (`unlogged-death`) with the arm-to-death uptime,
 so an operator can compare it against the Claude hook timeout before
 suspecting pneu.
 
-Recovery is layered, and each layer covers a different death:
+Recovery has two layers:
 
 1. **Crash class — in-process restart.** A watch attempt that dies from an
    exception logs the traceback, revalidates its lease, and re-arms in place
    with backoff, bounded to five restarts in five minutes. A seat whose lease
    is gone is never re-armed. `RT_WATCHER_SELF_HEAL=0` disables this.
-2. **Kill class — a supervised fork.** For the Claude async hooks, the hook
-   process forks the watcher and waits. If the watcher dies without producing
-   an exit status of its own, the supervisor re-forks it, up to three times.
-   This does not detach: the hook's own process remains the one that exits 2,
-   so the `asyncRewake` contract that the 2026-07-23 anti-daemonization ruling
-   protects is unchanged. `RT_WATCHER_NO_SUPERVISOR=1` disables it.
-3. **Timeout class — a planned retirement.** Claude Code cancels a hook that
+2. **Timeout class — a planned retirement.** Claude Code cancels a hook that
    outlives its configured timeout, so an idle watcher has a bounded lifetime
    it does not control. The watcher retires itself five minutes before that
    bound and exits 2 with a notice that states no mail arrived and no drain is
@@ -362,20 +356,14 @@ Recovery is layered, and each layer covers a different death:
 
 The honest limits:
 
-- A process-group kill — including Claude Code's own hook-timeout
-  cancellation — ends the supervisor and the watcher together. Supervision
-  does not survive it; the planned retirement is what keeps the seat from
-  reaching it.
+- A kill aimed at the watcher is not recovered. It leaves the seat deaf until
+  its next turn; the lifecycle log and `rt-doctor` report the resulting
+  `unlogged-death` verdict. Planned retirement keeps an idle watcher from the
+  configured hook timeout, but cannot recover an earlier kill.
 - Nothing can wake an idle Claude session whose hook process is gone. There
   is no external channel: only a process Claude Code itself spawned can
   deliver a wake. When every layer is exhausted, the seat is deaf until its
   next turn, and mail stays durable in `new/` exactly as for an offline seat.
-- A supervised watcher whose supervisor dies first stands down instead of
-  continuing to renew a heartbeat nothing can act on, so a dead wake channel
-  is never reported as a healthy seat.
-- Repeated unexplained deaths escalate once: after the restart budget is
-  exhausted, the hook exits 2 with the lifecycle log path, converting silent
-  deafness into one visible turn.
 
 ### Selector state machine
 

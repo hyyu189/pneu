@@ -1443,15 +1443,11 @@ def test_claude_stop_hook_complete_fence_still_reaches_managed_run(
         "RT_FROM": "claude",
         "RT_SESSION_ID": "complete-session",
         "RT_LEASE_REVISION": "complete-revision",
-        # This asserts hook dispatch, not process topology: run the watcher in
-        # this process so the recorded call is observable here.
-        "RT_WATCHER_NO_SUPERVISOR": "1",
     }.items():
         monkeypatch.setenv(name, value)
     captured = {}
 
     def fake_run(agent, explicit, **options):
-        options.pop("supervisor_pid", None)
         captured.update(agent=agent, explicit=explicit, options=options)
         return 17
 
