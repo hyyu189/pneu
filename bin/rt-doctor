@@ -19,6 +19,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+import _rtlauncher
 from _rtcodex import (
     AppServerClient,
     DEFAULT_SOCKET,
@@ -829,6 +830,12 @@ def launch_fix(project: Path, agent_id: str, harness: str) -> str:
     normalized = harness_family(harness)
     if normalized is None:
         return f"restart {agent_id} from {project}"
+    if normalized not in _rtlauncher.COMMANDS:
+        return (
+            f"{agent_id} is configured for {normalized}, which is demoted from "
+            "pneu's launchable seat set; see "
+            "docs/compatibility.md#openclaw-internal-gateway-lab"
+        )
     return f"cd {project} && RT_FROM={agent_id} rt-{normalized}"
 
 
@@ -839,6 +846,8 @@ def harness_family(harness: str | None) -> str | None:
         "codex": "codex",
         "hermes": "hermes",
         "hermes-agent": "hermes",
+        "openclaw": "openclaw",
+        "openclaw-gateway": "openclaw",
         "grok": "grok",
         "grok-build": "grok",
     }.get(harness)

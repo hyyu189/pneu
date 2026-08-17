@@ -49,7 +49,6 @@ ALIASES = {
     "claude": "rt-claude",
     "hermes": "rt-hermes",
     "codex": "rt-codex",
-    "openclaw": "rt-openclaw",
     "grok": "rt-grok",
     "send": "rt-say",
     "inbox": "rt-inbox",
@@ -57,12 +56,11 @@ ALIASES = {
     "worktree": "rt-worktree",
     "rc-host": "rt-rc-host",
 }
-HARNESS_ORDER = ("claude", "codex", "hermes", "openclaw", "grok")
+HARNESS_ORDER = ("claude", "codex", "hermes", "grok")
 HARNESS_CONFIG = {
     "claude": ("claude", "claude-code"),
     "codex": ("codex", "codex"),
     "hermes": ("hermes", "hermes-agent"),
-    "openclaw": ("openclaw", "openclaw-gateway"),
     "grok": ("grok", "grok-build"),
 }
 PROMPT_ATTEMPTS = 3
@@ -85,7 +83,6 @@ commands:
   claude     Launch a Claude seat
   hermes     Launch a Hermes seat
   codex      Launch a Codex seat
-  openclaw   Launch an isolated OpenClaw Gateway seat
   grok       Launch a native Grok TUI seat with monitor activation
   send       Send a durable message
   inbox      Read a durable inbox
@@ -98,9 +95,9 @@ ASCII_GUIDE = """
 +------------------------------------------------------------------+
 | pneu = a local mailroom for coding-agent seats             |
 +------------------------------------------------------------------+
-| Claude Code  Codex  Hermes  OpenClaw  Grok Build                 |
-|       \\         |       |       |          /                     |
-|        +--------+-------+-------+---------+                      |
+| Claude Code       Codex       Hermes       Grok Build            |
+|       \\            |           |             /                  |
+|        +-----------+-----------+-------------+                   |
 |                         |                                        |
 |                         v                                        |
 |                project mailbox: new/  ->  cur/                   |
@@ -115,19 +112,18 @@ Delivery and wake-up are separate:
   3. The agent acts, then rt-ack archives the message.
   4. If the agent is offline, the message waits in new/.
 
-Five supported harnesses:
+Four selectable harnesses:
   Claude  SessionStart/Stop hooks arm and re-arm the tripwire.
   Hermes  the session-start plugin owns the tripwire lifecycle.
   Codex   the app-server and Unix-socket notification bridge wake the seat;
           the SessionStart hook binds the native thread to its lease.
-  OpenClaw  the isolated Gateway seat reads the durable mailbox.
-  Grok Build the isolated ACP seat reads the durable mailbox.
+  Grok Build runs its native TUI with a persistent mailbox monitor.
 
 Tripwire means "watch for mail and request a harness-native turn".
 It is not the mailbox and it is not keyboard injection.
 
-OpenClaw and Grok Build need their vendor command installed. If one is missing,
-the launcher names the command and tells you how to fix it.
+Grok Build needs its vendor command installed. If it is missing, the launcher
+names the command and tells you how to fix it.
 
 Tip: run `pneu guide` any time to show this tutorial again.
 """.lstrip()
@@ -297,9 +293,9 @@ def ensure_harness_setup(
 ) -> None:
     """Run the installed package's ownership-safe setup once per harness."""
 
-    if harness in {"grok", "openclaw"}:
-        # Grok's native TUI uses a model-armed monitor and OpenClaw owns an
-        # isolated Gateway; neither installs hooks, plugins, or LaunchAgents.
+    if harness == "grok":
+        # Grok's native TUI uses a model-armed monitor and installs no hooks,
+        # plugins, or LaunchAgents.
         return
 
     configured_prefix = environ.get("ROUNDTABLE_INSTALL_PREFIX")

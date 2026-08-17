@@ -215,6 +215,8 @@ def create_isolation(
     else:
         base_path = _as_path(tempfile.gettempdir()) / "roundtable-runtime"
     root = base_path / "openclaw" / _project_key(project)
+    if _under(root, project):
+        raise OpenClawError("OpenClaw isolation root must not be inside the project")
     paths = OpenClawIsolation(
         root=root,
         state_dir=root / "state",

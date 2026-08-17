@@ -37,9 +37,6 @@ COMMANDS = {
     "claude": ["claude"],
     "codex": ["codex", "--remote", "unix://"],
     "hermes": ["hermes"],
-    # OpenClaw is launched through rt-openclaw-wake, not attached to a
-    # pre-existing native Gateway service.
-    "openclaw": ["openclaw"],
     # Grok is the vendor's native interactive TUI. Its mailbox monitor is
     # armed by the launcher-primed first turn below.
     "grok": ["grok"],
@@ -48,27 +45,23 @@ HARNESS_LABELS = {
     "claude": "Claude Code",
     "codex": "Codex",
     "hermes": "Hermes",
-    "openclaw": "OpenClaw",
     "grok": "Grok Build",
 }
 HARNESS_INSTALL_HINTS = {
     "claude": "Install Claude Code from Anthropic, then run pneu again",
     "codex": "Install Codex CLI from OpenAI, then run pneu again",
     "hermes": "Install Hermes Agent, then run pneu again",
-    "openclaw": "Install OpenClaw using its vendor installer, then run pneu again",
     "grok": "Install Grok Build using its vendor installer, then run pneu again",
 }
 EXECUTABLE_OVERRIDES = {
     "claude": "RT_CLAUDE_BIN",
     "hermes": "RT_HERMES_BIN",
-    "openclaw": "RT_OPENCLAW_BIN",
     "grok": "RT_GROK_BIN",
 }
 CONFIG_HARNESSES = {
     "claude": frozenset({"claude", "claude-code"}),
     "codex": frozenset({"codex"}),
     "hermes": frozenset({"hermes", "hermes-agent"}),
-    "openclaw": frozenset({"openclaw", "openclaw-gateway"}),
     "grok": frozenset({"grok", "grok-build"}),
 }
 CMUX_SHIM_PARTS = frozenset({"cmux-cli-shims"})
@@ -240,7 +233,6 @@ def _adapter_module(harness: str):
     """Load the installed adapter module used by an optional harness resolver."""
 
     relative = {
-        "openclaw": Path("integrations/openclaw/roundtable/__init__.py"),
         "grok": Path("integrations/grok/roundtable/__init__.py"),
     }[harness]
     module = _ADAPTER_MODULES.get(harness)
@@ -275,7 +267,6 @@ def _adapter_module(harness: str):
 
 def _adapter_harness_bin(harness: str) -> Path:
     resolver_name = {
-        "openclaw": "resolve_openclaw_bin",
         "grok": "resolve_grok_bin",
     }[harness]
     try:
@@ -358,7 +349,7 @@ def harness_bin(harness: str) -> Path:
         except CodexRuntimeError as error:
             raise SelectionError(f"rt-codex: {error}") from error
 
-    if harness in {"openclaw", "grok"}:
+    if harness == "grok":
         return _adapter_harness_bin(harness)
 
     override_name = EXECUTABLE_OVERRIDES[harness]
@@ -689,18 +680,6 @@ def normalize_runtime_environment() -> Path:
     os.environ["RT_RUNTIME_DIR"] = rendered
     os.environ["RT_CODEX_RUNTIME_DIR"] = rendered
     return selected
-
-
-def openclaw_adapter_bin() -> Path:
-    """Resolve the managed OpenClaw wake bridge beside this launcher."""
-
-    candidate = Path(__file__).resolve().parent / "rt-openclaw-wake"
-    if candidate.is_file() and os.access(candidate, os.X_OK):
-        return candidate
-    raise SelectionError(
-        "rt-openclaw: managed rt-openclaw-wake is unavailable; reinstall "
-        "Roundtable or use the source-tree launcher"
-    )
 
 
 def codex_seat_overrides() -> list[str]:
@@ -1189,7 +1168,7 @@ def choose_launch_cwd(
     create_index = len(roots) + 1 + int(can_setup_here)
     unanchored_index = (
         create_index + 1
-        if harness not in {"codex", "openclaw", "grok"}
+        if harness not in {"codex", "grok"}
         else None
     )
     if setup_here_index is not None:
@@ -1315,12 +1294,6 @@ def launch(harness: str, argv: list[str]) -> int:
                 "so its host service lease and native-thread binding are safe; "
                 "choose or initialize a project, or run native `codex` directly"
             )
-        if harness == "openclaw":
-            raise SelectionError(
-                "rt-openclaw: Roundtable OpenClaw requires a Roundtable project "
-                "anchor so its Gateway lease and durable mailbox are safe; "
-                "choose or initialize a project, or run native `openclaw` directly"
-            )
         if harness == "grok":
             raise SelectionError(
                 "rt-grok: Roundtable Grok requires a project anchor so its TUI "
@@ -1328,7 +1301,7 @@ def launch(harness: str, argv: list[str]) -> int:
                 "project, or run native `grok` directly"
             )
     agent_id = set_launch_identity(root, harness)
-    if root is not None or harness in {"codex", "openclaw", "grok"}:
+    if root is not None or harness in {"codex", "grok"}:
         normalize_runtime_environment()
     executable = harness_bin(harness)
     if harness == "hermes" and root is not None:
@@ -1387,15 +1360,6 @@ def launch(harness: str, argv: list[str]) -> int:
         preflight_codex_services(ready_action=claim_and_arm_codex)
     else:
         claim_launch_seat(root, harness, agent_id)
-    if harness == "openclaw":
-        # Transfer the already-claimed lease to the managed adapter in this
-        # same PID. The native OpenClaw CLI is never allowed to discover or
-        # attach to the user's personal Gateway.
-        os.environ["RT_OPENCLAW_BIN"] = str(executable)
-        adapter = openclaw_adapter_bin()
-        command = [str(adapter), "--gateway-bin", str(executable), *argv]
-        os.execv(command[0], command)
-        return 127
     command = [*COMMANDS[harness]]
     if harness == "claude" and root is not None and not argv:
         # A bare Claude launch may open the user's FleetView/Remote Control

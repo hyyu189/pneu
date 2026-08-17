@@ -10,7 +10,8 @@ core.
 | Layer | Responsibility | Required for delivery |
 | --- | --- | --- |
 | Product core | Project config and identity, atomic maildir delivery, ledger, inbox, acknowledgement, and drain state | Yes |
-| Harness adapters | Codex app-server wake; Claude lifecycle hooks and optional project rc-host; Hermes lifecycle plugin; native Grok TUI monitor; isolated OpenClaw Gateway supervisor; internal Grok ACP lab | Only for automatic wake or phone spawn; offline delivery still succeeds |
+| Harness adapters | Codex app-server wake; Claude lifecycle hooks and optional project rc-host; Hermes lifecycle plugin; native Grok TUI monitor | Only for automatic wake or phone spawn; offline delivery still succeeds |
+| Internal harness labs | Isolated OpenClaw Gateway supervisor and Grok ACP supervisor; never selected as user-facing seats | No |
 | Terminal integrations | Optional workspace topology, surface diagnostics, project navigation, and notifications | No |
 
 The data path is:

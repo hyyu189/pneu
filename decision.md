@@ -2,6 +2,17 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-08-17: **Shipped surfaces have no zero-cost parking state** (Ocean).
+  For anything already in a release, the honest framing is retain / keep
+  shipping / stop shipping: "do nothing" is not the null option because it
+  ships the surface again. Nor does "we do not use it" lower the priority; it
+  removes the team's validation path, so the project's support-claim discipline
+  raises the bar instead. Applied to OpenClaw under the TUI-first ruling, this
+  removes its headless Gateway adapter from the shipped seat surface, retains
+  `rt-openclaw-wake` and the Gateway adapter only as internal lab machinery,
+  and requires the isolation root guard before any state is created. A future
+  seat still requires a healthy current-version install, a trust boundary for
+  the user's own Gateway, and a live-render probe of a human-controlled surface.
 - 2026-08-12: **Seats are interactive TUIs** (Ocean). A pneu seat launched
   by a user — from the launcher card or an explicit seat command such as
   `rt-grok` — is an interactive TUI session. pneu exists to build a network

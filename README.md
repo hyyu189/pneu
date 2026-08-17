@@ -12,7 +12,7 @@ daemon, account, or network.
 
 An agent sends a message with `rt-say`. The command atomically writes a file
 into the recipient's `new/` mailbox; that write is delivery. A Claude Code,
-Codex, Hermes, OpenClaw, or Grok Build integration may wake the recipient. The
+Codex, Hermes, or Grok Build integration may wake the recipient. The
 recipient acts and runs `rt-ack`, which sends the quiet receipt and archives
 the message to `cur/`.
 Offline seats keep their mail until they return.
@@ -102,12 +102,15 @@ Wake-up is an adapter layered over delivery:
 - Claude Code uses asynchronous SessionStart/Stop lifecycle hooks.
 - Codex uses its app-server and Unix-socket bridge.
 - Hermes uses its session-start plugin.
-- OpenClaw uses an isolated Gateway adapter.
 - Grok Build runs its native interactive TUI. A bare `rt-grok` launch seeds one
   visible activation turn that creates a session-scoped persistent mailbox
   monitor; resumes and launches with explicit native arguments require one
   manual re-arm turn. `rt-doctor` reports monitor evidence as an advisory.
   The packaged ACP supervisor is an internal lab tool and is never the seat.
+
+OpenClaw has no user-facing pneu seat. Its isolated Gateway adapter remains
+packaged only as directly invocable internal lab machinery; `rt-openclaw`
+refuses instead of selecting it.
 
 Project-anchored `rt-claude` launches enable Remote Control as
 `<agent>@<project-name>` by default; pass `--remote-control` to choose the name

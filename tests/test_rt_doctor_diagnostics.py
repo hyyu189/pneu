@@ -19,6 +19,7 @@ BIN = ROOT / "bin"
 sys.path.insert(0, str(BIN))
 
 import _rtlib  # noqa: E402
+import _rtlauncher  # noqa: E402
 
 
 def load_doctor():
@@ -32,6 +33,23 @@ def load_doctor():
 
 
 doctor = load_doctor()
+
+
+def test_doctor_harness_families_cover_every_launcher_alias():
+    for family, aliases in _rtlauncher.CONFIG_HARNESSES.items():
+        for alias in aliases:
+            assert doctor.harness_family(alias) == family
+
+
+def test_openclaw_family_and_demoted_launch_fix_stay_explicit():
+    assert doctor.harness_family("openclaw") == "openclaw"
+    assert doctor.harness_family("openclaw-gateway") == "openclaw"
+    assert "openclaw" not in _rtlauncher.COMMANDS
+    assert doctor.launch_fix(Path("/project"), "openclaw", "openclaw-gateway") == (
+        "openclaw is configured for openclaw, which is demoted from pneu's "
+        "launchable seat set; see "
+        "docs/compatibility.md#openclaw-internal-gateway-lab"
+    )
 
 
 def test_doctor_reports_each_rc_host_on_one_report_only_line(monkeypatch, capsys):
