@@ -355,7 +355,13 @@ def _mutation_lock(prefix: Path) -> Iterator[None]:
             os.close(descriptor)
 
 
-def _atomic_write(path: Path, payload: bytes, mode: int) -> None:
+def _atomic_rewrite_owned(path: Path, payload: bytes, mode: int) -> None:
+    """Rewrite or create a managed file beneath an existing owned directory.
+
+    This is the ownership-safe contract.  Bootstrap publication into fresh
+    installer trees uses ``cli._atomic_publish_bootstrap`` instead.
+    """
+
     if _lexists(path):
         _inspect_owned(path, kind="file")
     _inspect_owned(path.parent, kind="directory")
@@ -499,7 +505,7 @@ def _restore_snapshot(snapshot: _PathSnapshot) -> None:
     if snapshot.kind == "file":
         assert isinstance(snapshot.payload, bytes)
         assert isinstance(snapshot.mode, int)
-        _atomic_write(path, snapshot.payload, snapshot.mode)
+        _atomic_rewrite_owned(path, snapshot.payload, snapshot.mode)
         return
     assert snapshot.kind == "symlink"
     assert isinstance(snapshot.payload, str)
@@ -694,7 +700,7 @@ def _backup(prefix: Path, label: str, payload: bytes) -> Path:
         if stat.S_IMODE(path.stat().st_mode) != 0o600:
             os.chmod(path, 0o600)
         return path
-    _atomic_write(path, payload, 0o600)
+    _atomic_rewrite_owned(path, payload, 0o600)
     return path
 
 
@@ -780,7 +786,7 @@ def _new_manifest(prefix: Path, home: Path) -> dict[str, Any]:
 
 
 def _write_manifest(prefix: Path, manifest: dict[str, Any]) -> None:
-    _atomic_write(_manifest_path(prefix), _json_bytes(manifest), 0o600)
+    _atomic_rewrite_owned(_manifest_path(prefix), _json_bytes(manifest), 0o600)
 
 
 def _claude_groups(prefix: Path) -> dict[str, dict[str, Any]]:
@@ -1925,7 +1931,7 @@ def _apply_config(
     if before is not None:
         backup = _backup(prefix, operation["backup_label"], before)
         record["config"]["backup"] = str(backup)
-    _atomic_write(path, operation["after"], operation["mode"])
+    _atomic_rewrite_owned(path, operation["after"], operation["mode"])
 
 
 def _apply_prepared(
@@ -1945,12 +1951,12 @@ def _apply_prepared(
         marker = operation["reload_marker"]
         if marker["changed"]:
             _ensure_private_dir(Path(marker["path"]).parent)
-            _atomic_write(Path(marker["path"]), marker["payload"], 0o600)
+            _atomic_rewrite_owned(Path(marker["path"]), marker["payload"], 0o600)
         changed_plists = [item for item in operation["plists"] if item["changed"]]
         for item in changed_plists:
             path: Path = item["path"]
             _ensure_user_dir(home, path.parent)
-            _atomic_write(path, item["payload"], 0o600)
+            _atomic_rewrite_owned(path, item["payload"], 0o600)
     if not operation.get("existing"):
         _apply_link(home, record["skill"])
 
@@ -2129,7 +2135,7 @@ def _remove_claude(home: Path, record: dict[str, Any]) -> None:
         if config["created"] and value == {}:
             path.unlink()
         else:
-            _atomic_write(path, _json_bytes(value), mode)
+            _atomic_rewrite_owned(path, _json_bytes(value), mode)
     skill = record["skill"]
     if skill["added"]:
         Path(skill["path"]).unlink()
@@ -2146,7 +2152,7 @@ def _remove_hermes(home: Path, record: dict[str, Any]) -> None:
         if config["created"] and updated == b"":
             path.unlink()
         else:
-            _atomic_write(path, updated, mode)
+            _atomic_rewrite_owned(path, updated, mode)
     for key in ("plugin", "skill"):
         link = record[key]
         if link["added"]:
@@ -2179,7 +2185,7 @@ def _remove_codex(record: dict[str, Any]) -> None:
             if config["created"] and value == {}:
                 path.unlink()
             else:
-                _atomic_write(path, _json_bytes(value), mode)
+                _atomic_rewrite_owned(path, _json_bytes(value), mode)
     for item in record["plists"]:
         if item["added"]:
             Path(item["path"]).unlink()

@@ -178,7 +178,13 @@ def _json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
 
 
-def _atomic_write(path: Path, payload: bytes, mode: int) -> None:
+def _atomic_publish_bootstrap(path: Path, payload: bytes, mode: int) -> None:
+    """Publish into a fresh installer tree, creating missing parent directories.
+
+    Use ``_atomic_rewrite_owned`` instead when replacing an existing managed
+    user configuration file whose leaf and parent ownership must be validated.
+    """
+
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp.{os.getpid()}.{time.time_ns()}")
     descriptor = None
@@ -186,6 +192,67 @@ def _atomic_write(path: Path, payload: bytes, mode: int) -> None:
         descriptor = os.open(
             temporary,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            mode,
+        )
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, mode)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _inspect_owned_rewrite_path(
+    path: Path,
+    *,
+    kind: str,
+    allow_missing: bool = False,
+) -> None:
+    """Validate one owned-rewrite leaf without following a symlink."""
+
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return
+        raise
+    if stat.S_ISLNK(info.st_mode):
+        raise OSError(f"refusing symlink where managed {kind} is expected: {path}")
+    if info.st_uid != os.getuid():
+        raise OSError(
+            f"refusing path owned by uid {info.st_uid}, expected {os.getuid()}: {path}"
+        )
+    expected = stat.S_ISREG(info.st_mode) if kind == "file" else stat.S_ISDIR(info.st_mode)
+    if not expected:
+        raise OSError(f"expected managed {kind}: {path}")
+
+
+def _atomic_rewrite_owned(path: Path, payload: bytes, mode: int) -> None:
+    """Rewrite a managed file only after validating its leaf and parent.
+
+    This is the ownership-safe contract for sensitive existing files.  Use
+    ``_atomic_publish_bootstrap`` for fresh installer trees whose parents do
+    not exist yet.
+    """
+
+    _inspect_owned_rewrite_path(path, kind="file", allow_missing=True)
+    _inspect_owned_rewrite_path(path.parent, kind="directory")
+    temporary = path.with_name(f".{path.name}.roundtable-{os.getpid()}")
+    if _lexists(temporary):
+        raise OSError(f"temporary owned rewrite path already exists: {temporary}")
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_NOFOLLOW", 0),
             mode,
         )
         with os.fdopen(descriptor, "wb") as handle:
@@ -240,7 +307,7 @@ def _rewrite_migrated_json(path: Path, old: Path, new: Path) -> None:
         value = json.loads(path.read_text())
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise InstallError(f"cannot migrate managed JSON state {path}: {error}") from error
-    _atomic_write(path, _json_bytes(_replace_prefix(value, old, new)), 0o600)
+    _atomic_publish_bootstrap(path, _json_bytes(_replace_prefix(value, old, new)), 0o600)
 
 
 def _migrate_identity(value: object, old: Path, new: Path) -> object:
@@ -395,7 +462,7 @@ def _migrate_harness_setup_manifest(prefix: Path, legacy: Path) -> None:
                         config["managed_fragment"] = migrated_fragment
                     if after != before:
                         try:
-                            _atomic_write(
+                            _atomic_rewrite_owned(
                                 config_path,
                                 after,
                                 stat.S_IMODE(config_info.st_mode),
@@ -421,7 +488,7 @@ def _migrate_harness_setup_manifest(prefix: Path, legacy: Path) -> None:
                 after = before.replace(str(legacy).encode(), str(prefix).encode())
                 if after != before:
                     try:
-                        _atomic_write(plist_path, after, 0o600)
+                        _atomic_rewrite_owned(plist_path, after, 0o600)
                     except OSError as error:
                         raise InstallError(
                             f"cannot rewrite managed Codex plist {plist_path}: {error}"
@@ -435,7 +502,7 @@ def _migrate_harness_setup_manifest(prefix: Path, legacy: Path) -> None:
         raise InstallError("managed harness setup migration produced invalid state")
     value["prefix"] = str(prefix)
     value["migrated_from"] = str(legacy)
-    _atomic_write(path, _json_bytes(value), 0o600)
+    _atomic_publish_bootstrap(path, _json_bytes(value), 0o600)
 
     # Keep a migrated owned link usable immediately after the new version is
     # installed.  The targets are deliberately limited to the harness assets.
@@ -443,7 +510,7 @@ def _migrate_harness_setup_manifest(prefix: Path, legacy: Path) -> None:
         {"path": str(link_path), "target": target}
         for link_path, target in migrated_links
     ]
-    _atomic_write(path, _json_bytes(value), 0o600)
+    _atomic_publish_bootstrap(path, _json_bytes(value), 0o600)
 
 
 def _ensure_migrated_harness_links(prefix: Path) -> None:
@@ -471,7 +538,7 @@ def _ensure_migrated_harness_links(prefix: Path) -> None:
         link_path.parent.mkdir(parents=True, exist_ok=True)
         _atomic_symlink(link_path, target)
     if isinstance(value, dict):
-        _atomic_write(path, _json_bytes(value), 0o600)
+        _atomic_publish_bootstrap(path, _json_bytes(value), 0o600)
 
 
 def _migrate_install_manifest(prefix: Path, legacy: Path) -> None:
@@ -539,7 +606,7 @@ def _migrate_install_manifest(prefix: Path, legacy: Path) -> None:
         raise InstallError("managed install manifest migration produced invalid state")
     value["prefix"] = str(prefix)
     value["migrated_from"] = str(legacy)
-    _atomic_write(path, _json_bytes(value), 0o600)
+    _atomic_publish_bootstrap(path, _json_bytes(value), 0o600)
 
 
 def _prefix_migration_manifest(prefix: Path) -> Path:
@@ -612,7 +679,7 @@ def _migrate_legacy_prefix(prefix: Path) -> bool:
     )
     migration = _prefix_migration_manifest(prefix)
     if not migration.exists():
-        _atomic_write(
+        _atomic_publish_bootstrap(
             migration,
             _json_bytes(
                 {
@@ -955,6 +1022,13 @@ def _ensure_roundtable_compatibility_alias(destination: Path) -> None:
     alias.symlink_to("pneu")
 
 
+def _installed_import_argv(installed_python: Path) -> list[str]:
+    """Return the production smoke import for every managed helper."""
+
+    modules = [Path(helper).stem for helper in MANAGED_HELPERS]
+    return [str(installed_python), "-c", "import " + ", ".join([*modules, "yaml"])]
+
+
 def _create_version(
     *,
     prefix: Path,
@@ -1008,14 +1082,7 @@ def _create_version(
                 ]
             )
         _ensure_roundtable_compatibility_alias(destination)
-        _run(
-            [
-                str(installed_python),
-                "-c",
-                "import _rtcodex, _rtlauncher, _rtlib, _rtmigrate, "
-                "_rtruntime, _rtsurface, yaml",
-            ]
-        )
+        _run(_installed_import_argv(installed_python))
 
         expected = [destination / "bin" / tool for tool in TOOLS]
         missing = [str(path) for path in expected if not path.is_file()]
@@ -1068,7 +1135,7 @@ def _create_version(
                 for relative in MANAGED_ASSETS
             },
         }
-        _atomic_write(
+        _atomic_publish_bootstrap(
             destination / MANAGED_MARKER,
             _json_bytes(marker),
             0o600,
@@ -1237,7 +1304,7 @@ def install_main(argv: list[str] | None = None) -> int:
         if not prefix_existed:
             os.chmod(prefix, 0o700)
         for path, payload in wrappers.items():
-            _atomic_write(path, payload, 0o755)
+            _atomic_publish_bootstrap(path, payload, 0o755)
 
         current_target = str(Path("versions") / VERSION)
         _atomic_symlink(prefix / "current", current_target)
@@ -1272,7 +1339,7 @@ def install_main(argv: list[str] | None = None) -> int:
                 "migration archival backups and manifests",
             ],
         }
-        _atomic_write(_manifest_path(prefix), _json_bytes(manifest), 0o600)
+        _atomic_publish_bootstrap(_manifest_path(prefix), _json_bytes(manifest), 0o600)
         print(f"installed pneu {VERSION} at {prefix}")
         print(f"commands linked in {link_dir}")
         print(f"run now: {link_dir / 'pneu'}")
