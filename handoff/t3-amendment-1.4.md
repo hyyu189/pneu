@@ -169,7 +169,7 @@ records and require a structural hit, not a substring soup. Verify the exact
 shapes against the live files before you code — they are readable right now:
 
 ```
-~/.grok/sessions/%2FUsers%2Fhaiyangyu%2FCode%2Froundtable-product-worktree%2Ft4-grok/019fff89-7b0c-7ad2-8a3e-12a668feea20/chat_history.jsonl
+~/.grok/sessions/%2FUsers%2F<user>%2FCode%2Froundtable-product-worktree%2Ft4-grok/019fff89-7b0c-7ad2-8a3e-12a668feea20/chat_history.jsonl
 ```
 
 Confirmed shapes in that file:
