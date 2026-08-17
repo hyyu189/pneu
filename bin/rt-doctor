@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import hashlib
 import io
 import json
@@ -18,6 +19,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote
 
 from _rtcodex import (
     AppServerClient,
@@ -49,6 +51,7 @@ from _rtruntime import (
     harness_lease_records,
     inspect_seat,
     orphaned_runtime_projects,
+    watcher_lifecycle_summary,
 )
 from _rtrchost import RCHostError, iter_states, status_from_state
 
@@ -839,31 +842,75 @@ def harness_family(harness: str | None) -> str | None:
         "codex": "codex",
         "hermes": "hermes",
         "hermes-agent": "hermes",
+        "openclaw": "openclaw",
+        "openclaw-gateway": "openclaw",
         "grok": "grok",
         "grok-build": "grok",
     }.get(harness)
 
 
-def _grok_monitor_text_matches(text: str, expected_maildir: Path) -> bool:
-    """Recognize one persisted Stop/background-task monitor evidence record."""
+def _grok_content_text(record: dict) -> str:
+    content = record.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        item.get("text", "")
+        for item in content
+        if isinstance(item, dict) and isinstance(item.get("text"), str)
+    )
 
-    if str(expected_maildir) not in text:
+
+def _grok_monitor_requested(record: dict, expected_maildir: Path) -> bool:
+    if record.get("type") != "assistant":
         return False
-    lowered = text.lower()
-    if "monitor" not in lowered:
+    calls = record.get("tool_calls")
+    if not isinstance(calls, list):
         return False
-    if "backgroundtasks" not in lowered and "background_tasks" not in lowered:
-        return False
-    return bool(
-        re.search(
-            r"[\"']?persistent[\"']?\s*[:=]\s*(?:true|True)",
-            text,
+    for call in calls:
+        if not isinstance(call, dict) or call.get("name") != "monitor":
+            continue
+        arguments = call.get("arguments")
+        if not isinstance(arguments, str):
+            continue
+        try:
+            payload = json.loads(arguments)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict) or payload.get("persistent") is not True:
+            continue
+        command = payload.get("command")
+        if isinstance(command, str) and str(expected_maildir) in command:
+            return True
+    return False
+
+
+def _grok_monitor_started(record: dict) -> bool:
+    return (
+        record.get("type") == "tool_result"
+        and bool(re.match(r"^Monitor started \(task [^,]+, persistent", _grok_content_text(record)))
+    )
+
+
+def _grok_monitor_ended(record: dict, expected_maildir: Path) -> bool:
+    text = _grok_content_text(record)
+    return (
+        record.get("type") == "user"
+        and "<system-reminder>" in text
+        and str(expected_maildir) in text
+        and bool(
+            re.search(
+                r'Monitor "[^\"]+" ended: \[monitor ended: killed by signal max_runtime\]',
+                text,
+            )
         )
     )
 
 
 def grok_monitor_evidence(
     sessions_root: Path,
+    project_root: Path,
     expected_maildir: Path,
 ) -> tuple[str, str]:
     """Inspect bounded, read-only Grok session evidence for one seat monitor.
@@ -874,6 +921,7 @@ def grok_monitor_evidence(
     """
 
     sessions_root = sessions_root.expanduser().absolute()
+    project_root = project_root.expanduser().absolute()
     expected_maildir = expected_maildir.expanduser().absolute()
     try:
         root_info = sessions_root.lstat()
@@ -885,56 +933,119 @@ def grok_monitor_evidence(
         return "unreadable", f"session evidence root is not a real directory: {sessions_root}"
 
     problems: list[str] = []
+    session_scopes: list[Path] = []
+    try:
+        entries = sorted(sessions_root.iterdir(), key=lambda entry: entry.name)
+    except OSError as error:
+        return "unreadable", f"cannot inspect {sessions_root}: {error}"
+    for entry in entries:
+        if unquote(entry.name) != str(project_root):
+            continue
+        try:
+            info = entry.lstat()
+        except OSError as error:
+            problems.append(f"cannot inspect session scope {entry}: {error}")
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            problems.append(f"session scope is not a real directory: {entry}")
+            continue
+        session_scopes.append(entry)
+    if not session_scopes:
+        if problems:
+            return "unreadable", problems[0]
+        return "absent", f"no Grok session scope for {project_root}"
 
     def record_walk_error(error: OSError) -> None:
         problems.append(str(error))
 
     examined = 0
+    latest: tuple[int, int, str, Path] | None = None
     try:
-        walker = os.walk(
-            sessions_root,
-            topdown=True,
-            onerror=record_walk_error,
-            followlinks=False,
-        )
-        for directory, directories, filenames in walker:
-            current = Path(directory)
-            directories[:] = sorted(
-                name
-                for name in directories
-                if not (current / name).is_symlink()
+        for scope in session_scopes:
+            walker = os.walk(
+                scope,
+                topdown=True,
+                onerror=record_walk_error,
+                followlinks=False,
             )
-            for filename in sorted(filenames):
-                path = current / filename
-                if path.suffix.lower() not in GROK_MONITOR_SUFFIXES:
-                    continue
-                examined += 1
-                if examined > GROK_MONITOR_MAX_FILES:
-                    problems.append(
-                        f"scan exceeded {GROK_MONITOR_MAX_FILES} candidate files"
-                    )
-                    break
-                try:
-                    info = path.lstat()
-                    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-                        problems.append(f"unsafe session evidence file: {path}")
+            for directory, directories, filenames in walker:
+                current = Path(directory)
+                directories[:] = sorted(
+                    name
+                    for name in directories
+                    if not (current / name).is_symlink()
+                )
+                for filename in sorted(filenames):
+                    path = current / filename
+                    if path.suffix.lower() not in GROK_MONITOR_SUFFIXES:
                         continue
-                    if info.st_size > GROK_MONITOR_MAX_BYTES:
+                    examined += 1
+                    if examined > GROK_MONITOR_MAX_FILES:
                         problems.append(
-                            f"session evidence file exceeds {GROK_MONITOR_MAX_BYTES} bytes: {path}"
+                            f"scan exceeded {GROK_MONITOR_MAX_FILES} candidate files"
                         )
                         continue
-                    text = path.read_text(encoding="utf-8")
-                except (OSError, UnicodeError) as error:
-                    problems.append(f"cannot read {path}: {error}")
-                    continue
-                if _grok_monitor_text_matches(text, expected_maildir):
-                    return "present", f"monitor evidence found in {path}"
+                    try:
+                        info = path.lstat()
+                        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+                            problems.append(f"unsafe session evidence file: {path}")
+                            continue
+                        if info.st_size > GROK_MONITOR_MAX_BYTES:
+                            problems.append(
+                                f"session evidence file exceeds {GROK_MONITOR_MAX_BYTES} bytes: {path}"
+                            )
+                            continue
+                        lines = path.read_text(encoding="utf-8").splitlines()
+                    except (OSError, UnicodeError) as error:
+                        problems.append(f"cannot read {path}: {error}")
+                        continue
+                    pending_start = False
+                    for line_number, line in enumerate(lines):
+                        try:
+                            record = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if not isinstance(record, dict):
+                            continue
+                        if _grok_monitor_requested(record, expected_maildir):
+                            pending_start = True
+                        if pending_start and _grok_monitor_started(record):
+                            candidate = (
+                                info.st_mtime_ns,
+                                line_number,
+                                "present",
+                                path,
+                            )
+                            if latest is None or candidate[:2] >= latest[:2]:
+                                latest = candidate
+                            pending_start = False
+                        if _grok_monitor_ended(record, expected_maildir):
+                            candidate = (
+                                info.st_mtime_ns,
+                                line_number,
+                                "ended",
+                                path,
+                            )
+                            if latest is None or candidate[:2] >= latest[:2]:
+                                latest = candidate
+                            pending_start = False
+                if examined > GROK_MONITOR_MAX_FILES:
+                    break
             if examined > GROK_MONITOR_MAX_FILES:
                 break
     except OSError as error:
         problems.append(f"cannot walk {sessions_root}: {error}")
 
+    if latest is not None:
+        _modified, _line_number, state, path = latest
+        suffix = (
+            f"; {len(problems)} file(s) not inspected: {problems[0]}"
+            if problems
+            else ""
+        )
+        if state == "present":
+            return "present", f"active monitor evidence found in {path}{suffix}"
+        return "absent", f"latest monitor evidence ended in {path}{suffix}"
     if problems:
         return "unreadable", problems[0]
     return (
@@ -984,6 +1095,7 @@ def report_grok_monitor_liveness(
 
             state, detail = grok_monitor_evidence(
                 sessions_root,
+                project,
                 expected_maildir,
             )
             if state == "present":
@@ -1137,7 +1249,7 @@ def inspect_project_seats(
                 fix = "none"
             elif status == "active_unhealthy":
                 level = "WARN"
-                fix = f"restart the wake adapter for {agent_id}"
+                fix = watcher_recovery_fix(project, agent_id, harness)
             elif status == "stale":
                 level = "WARN"
                 fix = launch_fix(project, agent_id, harness)
@@ -1148,6 +1260,23 @@ def inspect_project_seats(
                 level = "FAIL"
                 fix = "inspect and repair the host-local seat record before launch"
             report.item(level, "seat", rendered, fix)
+            # Only a seat whose owner is still live can be deaf: a stale seat's
+            # watcher is expected to be gone with its session.
+            if status.startswith("active_"):
+                report_watcher_lifecycle(
+                    report,
+                    project=project,
+                    agent_id=agent_id,
+                    harness=harness,
+                    watcher_live=bool(
+                        inspection_value(
+                            inspection,
+                            "wake_healthy",
+                            "adapter_healthy",
+                            default=False,
+                        )
+                    ),
+                )
 
             record = inspection_record(inspection)
             if record is None:
@@ -1166,8 +1295,8 @@ def inspect_project_seats(
                 )
             if (
                 declared_harness is not None
-                and harness_family(str(declared_harness))
-                != harness_family(harness)
+                and (harness_family(str(declared_harness)) or str(declared_harness))
+                != (harness_family(harness) or harness)
             ):
                 report.item(
                     "FAIL",
@@ -1220,6 +1349,391 @@ def inspect_project_seats(
                     watcher=True,
                 )
     return inspections, codex_instances
+
+
+WATCHER_HARNESS_FAMILIES = frozenset({"claude", "hermes"})
+WATCHER_LIFECYCLE_FIX = {
+    "claude": (
+        "send this Claude session any message — its Stop hook re-arms the "
+        "inbox watcher after the turn — or relaunch the seat"
+    ),
+    "hermes": (
+        "restart this Hermes session so its pneu plugin re-arms the inbox "
+        "watcher"
+    ),
+}
+
+
+def watcher_recovery_fix(project: Path, agent_id: str, harness: str) -> str:
+    family = harness_family(harness)
+    hint = WATCHER_LIFECYCLE_FIX.get(family or "")
+    if hint is None:
+        return f"restart the wake adapter for {agent_id}"
+    return f"{hint}: {launch_fix(project, agent_id, harness)}"
+
+
+def report_watcher_lifecycle(
+    report: Report,
+    *,
+    project: Path,
+    agent_id: str,
+    harness: str,
+    watcher_live: bool,
+) -> None:
+    """Explain a watcher-backed seat's last recorded lifecycle transition.
+
+    The lifecycle log is the only post-hoc account of why an armed watcher
+    stopped renewing.  Doctor correlates it with live watcher state so an
+    operator sees the difference between "never armed", "exited on purpose",
+    "crashed", and "killed without a chance to record anything".
+    """
+
+    if harness_family(harness) not in WATCHER_HARNESS_FAMILIES:
+        return
+    try:
+        summary = watcher_lifecycle_summary(
+            project,
+            agent_id,
+            watcher_live=watcher_live,
+        )
+    except (RuntimeStateError, OSError) as error:
+        report.item(
+            "WARN",
+            "seat-watcher-lifecycle",
+            f"project={project} agent={agent_id} lifecycle log unreadable: {error}",
+            "inspect the host-local runtime directory for this seat",
+        )
+        return
+    verdict = summary.get("verdict")
+    log_path = summary.get("path")
+    if watcher_live and verdict in {"armed", "no-log"}:
+        return
+    last_exit = summary.get("last_exit") or {}
+    uptime = summary.get("uptime_seconds")
+    rendered = (
+        f"project={project} agent={agent_id} verdict={verdict}"
+        + (f" uptime={uptime:.0f}s" if isinstance(uptime, (int, float)) else "")
+        + (f" last={last_exit.get('event')}" if last_exit else "")
+        + (
+            f" reason={last_exit.get('reason')}"
+            if last_exit.get("reason")
+            else ""
+        )
+        + (
+            f" signal={last_exit.get('signal')}"
+            if last_exit.get("signal")
+            else ""
+        )
+    )
+    if verdict == "no-log":
+        report.item(
+            "WARN",
+            "seat-watcher-lifecycle",
+            f"project={project} agent={agent_id} has no watcher lifecycle log",
+            f"this seat has not armed a watcher since lifecycle logging shipped; "
+            f"the log appears at {log_path} on the next arm",
+        )
+        return
+    if verdict == "unlogged-death":
+        report.item(
+            "WARN",
+            "seat-watcher-lifecycle",
+            f"{rendered} — the last arm recorded no exit, so the watcher was "
+            "killed without a chance to log it (uncatchable signal, host-level "
+            "kill, or a process-group cancellation such as a hook timeout)",
+            f"read the tail of {log_path}; compare uptime against the Claude "
+            "hook timeout before suspecting pneu",
+            )
+        return
+    if verdict == "crashed":
+        report.item(
+            "WARN",
+            "seat-watcher-lifecycle",
+            f"{rendered} — the last watcher recorded a crash",
+            f"read the traceback in {log_path} and report it",
+        )
+        return
+    report.item(
+        "OK",
+        "seat-watcher-lifecycle",
+        rendered,
+        f"lifecycle log: {log_path}",
+    )
+
+
+WAKE_BRIDGE_LOG_NAME = "rt-codex-wake.log.jsonl"
+WAKE_BRIDGE_LOG_TAIL_BYTES = 256 * 1024
+AUTO_BIND_RECENT_SECONDS = 3600.0
+
+
+def recent_wake_bridge_events(
+    runtime_dir: Path,
+    wanted: frozenset[str],
+    *,
+    now: datetime | None = None,
+    max_age: float = AUTO_BIND_RECENT_SECONDS,
+    limit: int = 20,
+) -> list[dict]:
+    """Read the tail of the wake bridge log without writing to it.
+
+    The bridge owns this file; doctor only correlates its recent decisions with
+    seat state, so every failure to read it is silent and non-fatal.
+    """
+
+    path = runtime_dir.expanduser().absolute() / WAKE_BRIDGE_LOG_NAME
+    reference = now or datetime.now(timezone.utc)
+    try:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return []
+        with open(path, "rb") as handle:
+            if info.st_size > WAKE_BRIDGE_LOG_TAIL_BYTES:
+                handle.seek(info.st_size - WAKE_BRIDGE_LOG_TAIL_BYTES)
+                handle.readline()
+            raw = handle.read(WAKE_BRIDGE_LOG_TAIL_BYTES + 1)
+    except (OSError, ValueError):
+        return []
+    selected: list[dict] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict) or record.get("event") not in wanted:
+            continue
+        stamp = parse_timestamp(record.get("ts"))
+        if stamp is None:
+            continue
+        age = (reference - stamp.astimezone(timezone.utc)).total_seconds()
+        if age > max_age or age < -5:
+            continue
+        record["age_seconds"] = max(0.0, age)
+        selected.append(record)
+    return selected[-limit:]
+
+
+def report_unbound_codex_seats(
+    report: Report,
+    registered: dict[str, Path],
+    inspections: dict,
+    codex_instances: dict[str, set[str]],
+    bindings: dict,
+    runtime_dir: Path,
+    *,
+    now: datetime | None = None,
+) -> None:
+    """Correlate an active-but-unbound Codex seat with recent bind rejections.
+
+    An active seat with no stored thread binding has no waker, so its mail waits
+    like an offline agent's.  When the bridge recently rejected an auto-bind
+    request, that rejection is the operator's actual next step; bind request
+    filenames are lease-identity digests, so recent rejections are reported as
+    correlated evidence rather than as a proven per-project attribution.
+    """
+
+    bound: set[str] = set()
+    for value in bindings:
+        try:
+            bound.add(str(Path(value).expanduser().resolve()))
+        except OSError:
+            bound.add(str(value))
+    unbound: list[tuple[str, str]] = []
+    for project in registered.values():
+        key = str(project)
+        if key in bound:
+            continue
+        for agent_id in sorted(codex_instances.get(key, set())):
+            if inspection_status(inspections.get((key, agent_id))).startswith(
+                "active_"
+            ):
+                unbound.append((key, agent_id))
+    if not unbound:
+        return
+    rejections = recent_wake_bridge_events(
+        runtime_dir,
+        frozenset({"auto_bind_rejected", "auto_bind_request_unsafe"}),
+        now=now,
+    )
+    evidence = ""
+    if rejections:
+        latest = rejections[-1]
+        evidence = (
+            f"; {len(rejections)} recent auto-bind rejection(s), latest "
+            f"{latest['age_seconds']:.0f}s ago: {latest.get('error') or 'unknown'}"
+        )
+    for project, agent_id in unbound:
+        report.item(
+            "WARN",
+            "codex-unbound",
+            f"project={project} agent={agent_id} holds an active Codex seat "
+            f"with no stored thread binding, so it has no waker{evidence}",
+            (
+                "relaunch the seat with `pneu codex` from this project, or "
+                f"re-bind the live thread: rt-codex-wake bind {project}"
+            )
+            if rejections
+            else (
+                "interact once with that Codex session so its SessionStart "
+                f"request binds, then rerun rt-doctor; fallback: "
+                f"rt-codex-wake bind {project}"
+            ),
+        )
+
+
+LAYOUT_LOCK_DIRNAME = "layout-locks"
+LAYOUT_LOCK_SUFFIXES = ("writer.lock", "lock")
+
+
+def probe_layout_lock(path: Path) -> str:
+    """Report whether a lock file currently has a live holder.
+
+    Layout locks are advisory and their files are never removed, so a present
+    file proves nothing on its own.  The probe takes the same exclusive lock a
+    normal entrant takes and releases it immediately; it never writes, never
+    truncates, and never deletes.
+    """
+
+    flags = os.O_RDWR
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError:
+        return "unreadable"
+    try:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return "held"
+        except OSError:
+            return "unreadable"
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        return "free"
+    finally:
+        os.close(descriptor)
+
+
+def report_layout_lock_residue(
+    report: Report,
+    registry_path: Path,
+    entries: list[dict],
+) -> None:
+    """Report-only inventory of UUID layout locks and their writer turnstiles."""
+
+    lock_dir = registry_path.expanduser().absolute().parent / LAYOUT_LOCK_DIRNAME
+    try:
+        info = lock_dir.lstat()
+    except FileNotFoundError:
+        report.item("OK", "layout-locks", "no layout lock directory yet")
+        return
+    except OSError as error:
+        report.item(
+            "WARN",
+            "layout-locks",
+            f"cannot inspect {lock_dir}: {error}",
+            "repair the pneu state root, then rerun rt-doctor",
+        )
+        return
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        report.item(
+            "FAIL",
+            "layout-locks",
+            f"{lock_dir} is not a real directory",
+            "move the unexpected entry aside and rerun rt-doctor",
+        )
+        return
+    known = {
+        str(entry.get("uuid")): entry
+        for entry in entries
+        if entry.get("uuid")
+    }
+    try:
+        children = sorted(lock_dir.iterdir())
+    except OSError as error:
+        report.item(
+            "WARN",
+            "layout-locks",
+            f"cannot list {lock_dir}: {error}",
+            "repair the pneu state root, then rerun rt-doctor",
+        )
+        return
+    counted = 0
+    tombstoned: list[Path] = []
+    unregistered: list[Path] = []
+    for child in children:
+        name = child.name
+        for suffix in LAYOUT_LOCK_SUFFIXES:
+            if name.endswith("." + suffix):
+                uuid_part = name[: -(len(suffix) + 1)]
+                break
+        else:
+            report.item(
+                "WARN",
+                "layout-locks",
+                f"unexpected entry {child} in the layout lock directory",
+                "move the unexpected entry aside; pneu only owns "
+                "<uuid>.lock and <uuid>.writer.lock",
+            )
+            continue
+        counted += 1
+        entry = known.get(uuid_part)
+        state = probe_layout_lock(child)
+        kind = "writer turnstile" if name.endswith(".writer.lock") else "layout lock"
+        if entry is not None and entry.get("status") != "tombstoned":
+            if state == "unreadable":
+                report.item(
+                    "WARN",
+                    "layout-locks",
+                    f"{kind} {child} cannot be probed",
+                    "check ownership and permissions of the layout lock file",
+                )
+            continue
+        if state == "held":
+            # A live holder on a retired or unknown UUID is the only lock state
+            # that names a specific process worth finding.
+            report.item(
+                "WARN",
+                "layout-locks",
+                f"{kind} {child} is held by a live holder but uuid={uuid_part} "
+                + (
+                    "is tombstoned in the registry"
+                    if entry is not None
+                    else "is not in the project registry"
+                ),
+                "find the process still operating on that mailbox before "
+                "removing or reusing the project registration",
+            )
+            continue
+        (tombstoned if entry is not None else unregistered).append(child)
+    # Retiring a project leaves its lock files behind by design, so the
+    # expected residue is summarized rather than enumerated per file.
+    if tombstoned:
+        report.item(
+            "OK",
+            "layout-locks",
+            f"{len(tombstoned)} lock file(s) belong to tombstoned "
+            "registrations and have no live holder",
+        )
+    if unregistered:
+        examples = ", ".join(str(path) for path in unregistered[:3])
+        report.item(
+            "WARN",
+            "layout-locks",
+            f"{len(unregistered)} lock file(s) reference UUIDs that are not in "
+            f"{registry_path} and have no live holder, for example: {examples}",
+            "report-only: leave the files in place. Advisory locks make "
+            "deletion unsafe while any pneu process may hold a descriptor; "
+            "remove them only during an explicit offline cleanup",
+        )
+    if counted:
+        report.item(
+            "OK",
+            "layout-locks",
+            f"{counted} layout lock file(s) inspected in {lock_dir}",
+        )
 
 
 def report_legacy_markers(
@@ -1415,6 +1929,7 @@ def project_health_checks(
     socket_path: Path,
     rpc_ok: bool,
     grok_sessions_root: Path | None = None,
+    runtime_dir: Path | None = None,
 ) -> None:
     entries, warnings = load_project_registry(registry_path)
     for warning in warnings:
@@ -1479,6 +1994,7 @@ def project_health_checks(
     )
     report_legacy_markers(report, registered, registry_path)
     report_orphaned_runtime_projects(report, entries)
+    report_layout_lock_residue(report, registry_path, entries)
 
     try:
         state = json.loads(state_file.read_text())
@@ -1503,6 +2019,17 @@ def project_health_checks(
             f"inspect or move aside {state_file}, then re-bind active Codex projects",
         )
         return
+
+    report_unbound_codex_seats(
+        report,
+        registered,
+        inspections,
+        codex_instances,
+        bindings,
+        runtime_dir
+        if runtime_dir is not None
+        else state_file.expanduser().absolute().parent,
+    )
 
     for project, project_state in sorted(projects.items()):
         if project_state.get("phase") != "NEEDS_HUMAN":
@@ -1925,6 +2452,7 @@ def main() -> int:
             args.socket,
             rpc_ok,
             home / ".grok" / "sessions",
+            args.runtime_dir,
         )
         report_hook_trust(report, args.registry, args.socket, rpc_ok)
         report_rc_hosts()
