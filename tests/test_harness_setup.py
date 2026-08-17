@@ -125,6 +125,64 @@ def test_default_plan_is_read_only(
     assert not (prefix / "harness-setup.json").exists()
 
 
+def test_unknown_manifest_harness_is_preserved_by_known_harness_operations(
+    installation: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home, prefix = installation
+    code, _result = _run(capsys, home, prefix, "apply", "--harness", "claude")
+    assert code == 0
+
+    manifest_path = prefix / "harness-setup.json"
+    manifest = json.loads(manifest_path.read_text())
+    unknown_record = {
+        "format": 2,
+        "nested": {"enabled": True, "values": ["future", {"count": 3}]},
+    }
+    manifest["harnesses"]["future"] = unknown_record
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    for command in ("plan", "status"):
+        code, result = _run(
+            capsys, home, prefix, command, "--harness", "claude"
+        )
+        assert code == 0, result
+        assert result["unknown_harnesses"] == ["future"]
+
+    code, applied = _run(capsys, home, prefix, "apply", "--harness", "hermes")
+    assert code == 0, applied
+    assert applied["unknown_harnesses"] == ["future"]
+    assert json.loads(manifest_path.read_text())["harnesses"]["future"] == unknown_record
+
+    human_status = harness_setup.main(
+        [
+            "status",
+            "--harness",
+            "claude",
+            "--home",
+            str(home),
+            "--prefix",
+            str(prefix),
+        ]
+    )
+    rendered = capsys.readouterr()
+    assert human_status == 0
+    assert "preserving opaque manifest records for unknown harnesses: future" in rendered.out
+
+    code, removed = _run(capsys, home, prefix, "remove", "--harness", "claude")
+    assert code == 0, removed
+    assert removed["unknown_harnesses"] == ["future"]
+    assert json.loads(manifest_path.read_text())["harnesses"]["future"] == unknown_record
+
+    code, removed_last_known = _run(
+        capsys, home, prefix, "remove", "--harness", "hermes"
+    )
+    assert code == 0, removed_last_known
+    assert manifest_path.is_file()
+    remaining = json.loads(manifest_path.read_text())
+    assert remaining["harnesses"] == {"future": unknown_record}
+
+
 def test_codex_setup_honors_one_static_codex_home_and_runtime_override(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],

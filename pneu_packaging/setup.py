@@ -777,9 +777,25 @@ def _load_manifest(prefix: Path, home: Path) -> dict[str, Any] | None:
     if value.get("prefix") != str(prefix) or value.get("home") != str(home):
         raise SetupError(f"harness setup manifest path scope mismatch at {path}")
     harnesses = value.get("harnesses")
-    if not isinstance(harnesses, dict) or any(name not in HARNESSES for name in harnesses):
+    if not isinstance(harnesses, dict):
         raise SetupError(f"invalid harness ownership entries at {path}")
     return value
+
+
+def _unknown_harnesses(manifest: dict[str, Any] | None) -> list[str]:
+    if manifest is None:
+        return []
+    return sorted(
+        harness for harness in manifest["harnesses"] if harness not in HARNESSES
+    )
+
+
+def _report_unknown_harnesses(
+    result: dict[str, Any], manifest: dict[str, Any] | None
+) -> None:
+    unknown_harnesses = _unknown_harnesses(manifest)
+    if unknown_harnesses:
+        result["unknown_harnesses"] = unknown_harnesses
 
 
 def _new_manifest(prefix: Path, home: Path) -> dict[str, Any]:
@@ -2962,6 +2978,12 @@ def _render(result: dict[str, Any], *, as_json: bool) -> None:
         print(f"  {harness}: {detail['state']}")
         for action in detail.get("actions", []):
             print(f"    - {action}")
+    unknown_harnesses = result.get("unknown_harnesses", [])
+    if unknown_harnesses:
+        print(
+            "  preserving opaque manifest records for unknown harnesses: "
+            + ", ".join(unknown_harnesses)
+        )
     if result["command"] == "remove":
         print(
             "  preserved project registry, UUID layout locks, "
@@ -3055,6 +3077,7 @@ def main(argv: list[str] | None = None) -> int:
                         unload_codex=args.unload_codex,
                     )
                 )
+                _report_unknown_harnesses(result, manifest)
                 _render(result, as_json=args.json)
                 return 0
             with _mutation_lock(prefix):
@@ -3106,6 +3129,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(f"roundtable-setup: {error}", file=sys.stderr)
         return 2
+    _report_unknown_harnesses(result, manifest)
     _render(result, as_json=args.json)
     return 0
 
