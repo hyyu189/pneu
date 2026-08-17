@@ -53,9 +53,18 @@ lease frozen 19:52Z — an undisturbed watcher lifetime of ~4 h 09 m. The
 earlier watcher (armed after the 11:39Z handshake reply) exited legitimately
 via mail wake when the control-designation mail arrived at 15:41Z.
 
-Incidental positive finding: two quiet ack receipts landed in the seat's
-`new/` at 15:43:12Z, seconds after the final arm, and produced no turn —
-empirical confirmation that quiet receipts do not wake a Claude watcher.
+Incidental positive finding, upgraded from empirical to by-construction:
+two quiet ack receipts landed in the seat's `new/` at 15:43:12Z, seconds
+after the final arm, and produced no turn. `rt-wait-inbox`'s `_wake_mail`
+filters the listing with `not name.startswith(("ack-", "."))`, so receipts
+are excluded from the wake generation by design on every build.
+
+Method note (from the timezone slip that briefly produced a phantom
+72-minute timeline): never let a format string assert a timezone the tool
+did not apply — macOS `stat -f %Sm` renders local time regardless of a
+literal `Z` in the format. Force `TZ=UTC` or read the ISO field the record
+already carries (`heartbeatAt` is written by `utc_now()` and is
+unambiguous).
 
 ## Verdict
 
