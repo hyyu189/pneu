@@ -13,6 +13,8 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+
+import _kit as kit
 import yaml
 
 
@@ -99,46 +101,41 @@ def load_cli_module(name):
     return module
 
 
+# These tests drive the cmux-era submit/detect surface, so their seats carry
+# the full per-harness blocks the leaner fixtures omit.
+TOOLING_SEATS = (
+    kit.Seat(
+        "codex",
+        "codex",
+        submit={"idle": "enter", "busy": "tab"},
+        detect_screen=["OpenAI Codex"],
+        instance_session_id_null=True,
+    ),
+    kit.Seat(
+        "claude",
+        "claude-code",
+        submit={"idle": "enter", "busy": "send_only"},
+        detect_screen=["Claude Code"],
+        instance_session_id_null=True,
+    ),
+    kit.Seat(
+        "hermes",
+        "hermes-agent",
+        submit={"idle": "enter", "busy": "steer"},
+        detect_screen=["Welcome to Hermes Agent"],
+        instance_session_id_null=True,
+    ),
+)
+
+
 def write_project(path, *, workspace_title=None, runtime=None, registry=None):
-    state = path / ".roundtable"
-    state.mkdir(parents=True)
-    title_line = f"workspace_title: {workspace_title}\n" if workspace_title else ""
-    (state / "agents.yaml").write_text(
-        f"""schema: roundtable.agents.v1
-project: {path}
-{title_line}agents:
-  codex:
-    harness: codex
-    submit:
-      idle: enter
-      busy: tab
-    instances:
-      - id: codex
-        session_id: null
-    detect:
-      screen: ["OpenAI Codex"]
-  claude:
-    harness: claude-code
-    submit:
-      idle: enter
-      busy: send_only
-    instances:
-      - id: claude
-        session_id: null
-    detect:
-      screen: ["Claude Code"]
-  hermes:
-    harness: hermes-agent
-    submit:
-      idle: enter
-      busy: steer
-    instances:
-      - id: hermes
-        session_id: null
-    detect:
-      screen: ["Welcome to Hermes Agent"]
-"""
+    kit.write_project(
+        path,
+        TOOLING_SEATS,
+        project=str(path),
+        workspace_title=workspace_title or None,
     )
+    state = path / ".roundtable"
     (state / "messages").mkdir()
     (state / "locks").mkdir()
     if runtime is not None:

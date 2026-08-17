@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -262,17 +264,7 @@ def test_stale_or_wrong_identity_is_refused_before_child_start(tmp_path, monkeyp
 
 def _grok_launch_fixture(tmp_path, monkeypatch, user_argv, extra_env=None):
     project = tmp_path / "project"
-    state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        "project: .\n"
-        "agents:\n"
-        "  grok:\n"
-        "    harness: grok-build\n"
-        "    instances:\n"
-        "      - id: grok\n"
-    )
+    kit.write_project(project, [kit.GROK], project=kit.PROJECT_DOT_BARE)
     executable = tmp_path / "grok"
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o755)
@@ -443,9 +435,14 @@ def test_rt_grok_no_primer_is_an_explicit_bare_opt_out(
 
 
 def test_grok_seat_path_is_pinned_away_from_internal_acp_supervisor():
-    launcher_source = (BIN / "_rtlauncher.py").read_text()
-    launch_source = launcher_source.split("def launch(", 1)[1]
+    # The body of launch(), and nothing below it. A text slice from
+    # "def launch(" ran to end of file, so it silently absorbed every
+    # definition placed after launch() and evaluated these assertions over
+    # the wrong region.
+    launch_source = kit.definition_source(BIN / "_rtlauncher.py", "launch")
 
+    assert launch_source.startswith("def launch(")
+    assert "def main(" not in launch_source
     assert "grok_adapter_bin" not in launch_source
     assert '"--grok-bin"' not in launch_source
     assert "rt-grok-wake" not in launch_source

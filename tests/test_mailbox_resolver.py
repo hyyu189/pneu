@@ -14,6 +14,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+import _kit as kit
+from _kit import consumers
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -28,24 +31,8 @@ FAIL_CLOSED = (_rtlib.ProjectRegistryError, SystemExit)
 
 
 def write_project(path: Path) -> Path:
-    root = path.resolve()
-    state = root / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        "\n".join(
-            [
-                "schema: roundtable.agents.v1",
-                'project: "."',
-                "agents:",
-                "  codex:",
-                "    harness: codex",
-                "    instances:",
-                "      - id: codex",
-            ]
-        )
-        + "\n"
-    )
-    (state / ".gitignore").write_text(
+    root = kit.write_project(path, [kit.CODEX], project=kit.PROJECT_DOT)
+    (root / ".roundtable" / ".gitignore").write_text(
         "runtime.json\nmessages/\nlocks/\ninbox/\n"
     )
     return root
@@ -1839,76 +1826,118 @@ def test_mailbox_source_invariant_detects_indirect_construction(
     assert _mailbox_path_violations(candidate)
 
 
-def test_production_mailbox_consumers_do_not_construct_layout_paths() -> None:
-    consumers = [
-        BIN / name
-        for name in (
-            "rt-say",
-            "rt-inbox",
-            "rt-ack",
-            "rt-wait-inbox",
-            "rt-stop-gate",
-            "rt-codex-wake",
-            "rt-doctor",
-            "rt-refresh",
-        )
-    ]
-    consumers.extend(
-        [
-            ROOT / "integrations" / "hermes" / "pneu" / "__init__.py",
-            ROOT / "pneu_packaging" / "smoke.py",
-        ]
-    )
-    violations = [
+# The layout is defined in exactly two places, and both must be allowed to
+# spell it out. Every other production source is checked, whether or not
+# anybody remembered to add it here.
+LAYOUT_DEFINING_SOURCES = {
+    "bin/_rtlib.py": "defines the layout the other sources are forbidden to rebuild",
+    "bin/_rtmigrate.py": "moves projects between layouts; frozen by decision.md 2026-07-29",
+}
+
+# Sources that resolve a mailbox without the layout lock and then read maildir
+# paths for advisory output only. Each is a deliberate unlocked reader, not an
+# oversight, and none of them writes mail. Recorded rather than silently
+# omitted so the set cannot grow unnoticed.
+ADVISORY_UNLOCKED_READERS = {
+    "bin/pneu": "counts unread mail for the launcher card",
+    "bin/rt-projects": "prints resolved layout metadata for diagnostics",
+    "bin/_rtlauncher.py": "derives the Grok seat maildir path for an external monitor",
+}
+
+
+def test_layout_path_invariant_covers_every_production_source() -> None:
+    """The derived universe must include the sources a hand list forgot."""
+
+    covered = {facts.relative for facts in consumers.all_facts()}
+
+    assert "integrations/grok/roundtable/__init__.py" in covered
+    assert "integrations/openclaw/roundtable/__init__.py" in covered
+    assert "integrations/hermes/pneu/__init__.py" in covered
+    assert "pneu_packaging/smoke.py" in covered
+    assert {"bin/rt-say", "bin/rt-inbox", "bin/rt-ack", "bin/rt-wait-inbox"} <= covered
+    # bin/roundtable is a symlink to bin/pneu and must be counted once.
+    assert "bin/roundtable" not in covered
+
+
+# The detector deliberately flags a bare ``"inbox"``/``"messages"``/``"locks"``
+# literal anywhere, because that is how it catches a layout path assembled
+# through a variable. Widening its reach to every production source surfaced
+# one literal that is not a path at all. It is allowed by exact value rather
+# than by exempting the file, so any *other* literal in the same source still
+# fails.
+ALLOWED_NON_LAYOUT_LITERALS = {
+    "bin/pneu": {"inbox": 'the "inbox" CLI subcommand alias for rt-inbox'},
+}
+
+
+def _unexplained_violations(facts) -> list[str]:
+    allowed = ALLOWED_NON_LAYOUT_LITERALS.get(facts.relative, {})
+    return [
         violation
-        for source_path in consumers
-        for violation in _mailbox_path_violations(source_path)
+        for violation in _mailbox_path_violations(facts.path)
+        if violation.split(" ", 1)[1] not in allowed
     ]
-    assert violations == []
 
 
-def _called_names(source_path: Path) -> set[str]:
-    tree = ast.parse(source_path.read_text(), filename=str(source_path))
-    names = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        function = node.func
-        if isinstance(function, ast.Name):
-            names.add(function.id)
-        elif isinstance(function, ast.Attribute):
-            names.add(function.attr)
-    return names
-
-
-def test_direct_mailbox_consumers_use_locked_resolver_only() -> None:
-    consumers = [
-        BIN / name
-        for name in (
-            "rt-say",
-            "rt-inbox",
-            "rt-ack",
-            "rt-wait-inbox",
-            "rt-stop-gate",
-            "rt-codex-wake",
-            "rt-doctor",
-            "rt-refresh",
-        )
-    ]
-    raw_resolvers = {
-        "resolve_project_mailbox",
-        "resolve_project_mailbox_checked",
-    }
+def test_production_sources_do_not_construct_layout_paths() -> None:
     violations = {
-        source.name: sorted(_called_names(source) & raw_resolvers)
-        for source in consumers
-        if _called_names(source) & raw_resolvers
+        facts.relative: _unexplained_violations(facts)
+        for facts in consumers.all_facts()
+        if facts.relative not in LAYOUT_DEFINING_SOURCES
+        and _unexplained_violations(facts)
     }
     assert violations == {}
-    assert all(
-        "locked_project_mailbox" in source.read_text()
-        for source in consumers
-    )
+
+
+def test_layout_defining_exemptions_are_still_earned() -> None:
+    """A stale exemption is a hidden gap, so the ledger is checked too."""
+
+    known = {facts.relative for facts in consumers.all_facts()}
+    for relative, reason in LAYOUT_DEFINING_SOURCES.items():
+        assert relative in known, f"exemption names a missing source: {relative}"
+        assert reason
+        assert _mailbox_path_violations(
+            consumers.ROOT / relative
+        ), f"{relative} no longer constructs layout paths; drop its exemption"
+
+
+def test_allowed_non_layout_literals_are_still_present() -> None:
+    facts_by_source = {facts.relative: facts for facts in consumers.all_facts()}
+    for relative, allowed in ALLOWED_NON_LAYOUT_LITERALS.items():
+        assert relative in facts_by_source, f"allowance names a missing source: {relative}"
+        observed = {
+            violation.split(" ", 1)[1]
+            for violation in _mailbox_path_violations(facts_by_source[relative].path)
+        }
+        for literal, reason in allowed.items():
+            assert reason
+            assert literal in observed, (
+                f"{relative} no longer contains the allowed literal {literal!r}; "
+                "drop the allowance"
+            )
+
+
+def test_maildir_consumers_use_the_locked_resolver_only() -> None:
+    violations = {
+        facts.relative
+        for facts in consumers.maildir_consumers()
+        if facts.relative not in LAYOUT_DEFINING_SOURCES
+        and facts.relative not in ADVISORY_UNLOCKED_READERS
+        and (facts.calls_raw_resolver or not facts.calls_locked_resolver)
+    }
+    assert violations == set()
+
+
+def test_advisory_unlocked_readers_are_still_earned() -> None:
+    known = {facts.relative: facts for facts in consumers.all_facts()}
+    for relative, reason in ADVISORY_UNLOCKED_READERS.items():
+        assert relative in known, f"exemption names a missing source: {relative}"
+        assert reason
+        facts = known[relative]
+        assert facts.touches_maildir and facts.calls_raw_resolver, (
+            f"{relative} no longer reads the maildir through a raw resolver; "
+            "drop its exemption"
+        )
 
 
 def test_indirect_consumers_do_not_retain_waiter_mailbox_paths() -> None:

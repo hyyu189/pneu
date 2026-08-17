@@ -113,6 +113,11 @@ def _private_copy(root: Path) -> Path:
     tests.mkdir()
     for name in ("conftest.py", *JOURNEY_MODULES):
         shutil.copy2(ROOT / "tests" / name, tests / name)
+    shutil.copytree(
+        ROOT / "tests" / "_kit",
+        tests / "_kit",
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
     return root
 
 

@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "bin" / "rt-worktree"
@@ -619,15 +621,7 @@ def test_open_no_wait_reports_spawn_without_surface_record(lab, tmp_path):
     _lab_tmp, base, _registry, runtime = lab
     target = create_demo(
         lab,
-        agents=(
-            "schema: roundtable.agents.v1\n"
-            "project: .\n"
-            "agents:\n"
-            "  codex:\n"
-            "    harness: codex\n"
-            "    instances:\n"
-            "      - id: codex\n"
-        ),
+        agents=kit.agents_document([kit.CODEX], project=kit.PROJECT_DOT_BARE),
     )
     _executable, trace, environment = fake_herdr(tmp_path)
     environment.update(
@@ -664,12 +658,9 @@ def test_failed_backend_names_command_and_writes_no_surface_record(lab, tmp_path
     _lab_tmp, base, _registry, runtime = lab
     target = create_demo(
         lab,
-        agents=(
-            "schema: roundtable.agents.v1\n"
-            "project: .\n"
-            "agents:\n"
-            "  codex:\n"
-            "    harness: codex\n"
+        agents=kit.agents_document(
+            [kit.Seat("codex", "codex", instances=())],
+            project=kit.PROJECT_DOT_BARE,
         ),
     )
     _executable, _trace, environment = fake_herdr(

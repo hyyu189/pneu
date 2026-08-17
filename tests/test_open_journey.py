@@ -16,6 +16,8 @@ import time
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -91,13 +93,7 @@ def journey_lab(tmp_path, monkeypatch):
     monkeypatch.setenv("ROUNDTABLE_INSTALL_PREFIX", str(state_root))
     target = tmp_path / "repo-worktree" / "demo"
     (target / ".roundtable" / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        "project: .\n"
-        "agents:\n"
-        "  codex:\n"
-        "    harness: codex\n"
-        "    instances:\n"
-        "      - id: codex\n",
+        kit.agents_document([kit.CODEX], project=kit.PROJECT_DOT_BARE),
         encoding="utf-8",
     )
     return repository, target, runtime, state_root

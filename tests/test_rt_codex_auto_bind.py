@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -54,18 +56,7 @@ hook = load_hook_module()
 
 
 def write_project(path: Path) -> Path:
-    project = path.resolve()
-    state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {project}\n"
-        "agents:\n"
-        "  codex:\n"
-        "    harness: codex\n"
-        "    instances:\n"
-        "      - id: codex\n"
-    )
+    project = kit.write_project(path, [kit.CODEX])
     register_project(project)
     return project
 

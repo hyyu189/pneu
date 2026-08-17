@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -25,22 +27,8 @@ import _rtmigrate  # noqa: E402
 
 def write_registered_project(tmp_path: Path) -> tuple[Path, Path, Path]:
     project = tmp_path / "work" / "project"
+    kit.write_project(project, [kit.CODEX, kit.CLAUDE], project=kit.PROJECT_DOT)
     state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        """schema: roundtable.agents.v1
-project: "."
-agents:
-  codex:
-    harness: codex
-    instances:
-      - id: codex
-  claude:
-    harness: claude-code
-    instances:
-      - id: claude
-"""
-    )
     (state / ".gitignore").write_text(
         "project.json\nruntime.json\nmessages/\nlocks/\ninbox/\n"
     )

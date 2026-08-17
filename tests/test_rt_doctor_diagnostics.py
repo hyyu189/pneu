@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -74,19 +76,8 @@ def test_doctor_reports_each_rc_host_on_one_report_only_line(monkeypatch, capsys
 
 
 def _registered_project(path: Path, registry: Path) -> Path:
-    project = path.resolve()
+    project = kit.write_project(path, [kit.CODEX], project=kit.PROJECT_DOT)
     state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        """schema: roundtable.agents.v1
-project: "."
-agents:
-  codex:
-    harness: codex
-    instances:
-      - id: codex
-"""
-    )
     (state / ".gitignore").write_text(
         "project.json\ninbox/\nmessages/\nlocks/\n"
     )
@@ -100,14 +91,7 @@ agents:
 def _registered_grok_project(path: Path, registry: Path) -> Path:
     project = _registered_project(path, registry)
     (project / ".roundtable" / "agents.yaml").write_text(
-        """schema: roundtable.agents.v1
-project: "."
-agents:
-  grok:
-    harness: grok-build
-    instances:
-      - id: grok
-"""
+        kit.agents_document([kit.GROK], project=kit.PROJECT_DOT)
     )
     return project
 

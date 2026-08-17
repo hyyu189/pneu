@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -65,19 +67,11 @@ def run_tool(name: str, *args: str, cwd: Path | None = None, env=None):
 
 
 def write_project(path: Path, *, codex: bool = True) -> Path:
-    root = path.resolve()
-    state = root / ".roundtable"
-    state.mkdir(parents=True)
     harness = "codex" if codex else "claude-code"
     agent = "codex" if codex else "claude"
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {root}\n"
-        "agents:\n"
-        f"  {agent}:\n"
-        f"    harness: {harness}\n"
-    )
-    return root
+    # These tests pin the seat-resolution path for a document with no
+    # ``instances:`` key, so the seat is built with an explicit empty tuple.
+    return kit.write_project(path, [kit.Seat(agent, harness, instances=())])
 
 
 def write_registry(
