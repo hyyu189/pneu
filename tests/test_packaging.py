@@ -742,6 +742,133 @@ def test_prefix_migration_rewrites_owned_hermes_setup_artifacts(tmp_path):
     assert json.loads(status.stdout)["harnesses"]["hermes"]["state"] == "configured"
 
 
+def test_prefix_migration_refuses_foreign_owned_config_parent(tmp_path, monkeypatch):
+    legacy = tmp_path / ".roundtable"
+    prefix = tmp_path / ".pneu"
+    prefix.mkdir()
+    config_parent = tmp_path / "config"
+    config_parent.mkdir()
+    config_path = config_parent / "config.yaml"
+    config_before = f"command: {legacy}/bin/rt-wait-inbox\n".encode()
+    config_path.write_bytes(config_before)
+    (prefix / "harness-setup.json").write_text(
+        json.dumps(
+            {
+                "schema": "roundtable.harness-setup.v1",
+                "prefix": str(legacy),
+                "home": str(tmp_path),
+                "harnesses": {
+                    "hermes": {
+                        "config": {"path": str(config_path)},
+                        "plists": [],
+                    }
+                },
+            }
+        )
+    )
+    real_lstat = Path.lstat
+
+    def lstat_with_foreign_parent(path: Path):
+        info = real_lstat(path)
+        if path == config_parent:
+            fields = list(info)
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(Path, "lstat", lstat_with_foreign_parent)
+
+    with pytest.raises(
+        packaging_cli.InstallError,
+        match="cannot rewrite managed harness configuration",
+    ):
+        packaging_cli._migrate_harness_setup_manifest(prefix, legacy)
+
+    assert config_path.read_bytes() == config_before
+
+
+def test_prefix_migration_refuses_preexisting_plist_temp_path(tmp_path, monkeypatch):
+    legacy = tmp_path / ".roundtable"
+    prefix = tmp_path / ".pneu"
+    prefix.mkdir()
+    plist_path = tmp_path / "Library" / "LaunchAgents" / "managed.plist"
+    plist_path.parent.mkdir(parents=True)
+    plist_before = f"program: {legacy}/bin/rt-codex-wake\n".encode()
+    plist_path.write_bytes(plist_before)
+    (prefix / "harness-setup.json").write_text(
+        json.dumps(
+            {
+                "schema": "roundtable.harness-setup.v1",
+                "prefix": str(legacy),
+                "home": str(tmp_path),
+                "harnesses": {
+                    "codex": {
+                        "plists": [
+                            {
+                                "added": True,
+                                "path": str(plist_path),
+                                "digest": digest(plist_path),
+                            }
+                        ]
+                    }
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(packaging_cli.os, "getpid", lambda: 4242)
+    temporary = plist_path.with_name(f".{plist_path.name}.roundtable-4242")
+    temporary.symlink_to(tmp_path / "do-not-follow")
+
+    with pytest.raises(
+        packaging_cli.InstallError,
+        match="cannot rewrite managed Codex plist",
+    ):
+        packaging_cli._migrate_harness_setup_manifest(prefix, legacy)
+
+    assert plist_path.read_bytes() == plist_before
+    assert temporary.is_symlink()
+
+
+def test_create_version_runs_exact_managed_helper_import_command(tmp_path, monkeypatch):
+    prefix = tmp_path / "prefix"
+    project_wheel = tmp_path / "pneu.whl"
+    project_wheel.write_bytes(b"wheel")
+    commands: list[list[str]] = []
+
+    class ImportCommandObserved(Exception):
+        pass
+
+    def observe_run(command: list[str], *, env=None) -> None:
+        commands.append(command)
+        if len(command) >= 2 and command[1] == "-c":
+            raise ImportCommandObserved
+
+    monkeypatch.setattr(packaging_cli, "_run", observe_run)
+    monkeypatch.setattr(
+        packaging_cli,
+        "_ensure_roundtable_compatibility_alias",
+        lambda _destination: None,
+    )
+
+    with pytest.raises(ImportCommandObserved):
+        packaging_cli._create_version(
+            prefix=prefix,
+            bootstrap_python=tmp_path / "bootstrap-python",
+            project_wheel=project_wheel,
+            wheel_dir=None,
+            source_mode=True,
+        )
+
+    installed_python = packaging_cli._version_dir(prefix) / "bin" / "python"
+    expected_modules = [Path(helper).stem for helper in MANAGED_HELPERS]
+    assert commands[-1] == [
+        str(installed_python),
+        "-c",
+        "import " + ", ".join([*expected_modules, "yaml"]),
+    ]
+    assert "_rtrchost" in commands[-1][2]
+
+
 def test_install_conflict_fails_before_creating_version(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
