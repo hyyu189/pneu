@@ -141,7 +141,7 @@ sequenced work owned elsewhere.
 Operator-approved fix. Live proof, from the 2026-08-14 T4 escalation:
 
 ```
-OK grok-monitor: project=/Users/haiyangyu/Code/rt-grok-e2e ...
+OK grok-monitor: project=~/Code/rt-grok-e2e ...
    evidence found in .../sessions/%2F...%2Ft4-grok/019fff89-.../chat_history.jsonl
 ```
 
