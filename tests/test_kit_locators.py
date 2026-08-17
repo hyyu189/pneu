@@ -12,6 +12,7 @@ shows what the replaced spelling would have done with the same input.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -107,6 +108,52 @@ def test_call_source_is_indentation_independent(tmp_path):
     assert module.read_text(encoding="utf-8").count(located) == 1
 
 
+def test_call_source_does_not_conflate_an_attribute_call_with_a_bare_call(tmp_path):
+    """Reducing both forms to the trailing attribute name matched the wrong call."""
+
+    module = tmp_path / "sample.py"
+    module.write_text(
+        "def outer():\n"
+        "    client.guard(1)\n"
+        "    guard(2)\n",
+        encoding="utf-8",
+    )
+
+    assert kit.call_source(module, "guard") == "guard(2)"
+    assert kit.call_source(module, "client.guard") == "client.guard(1)"
+    with pytest.raises(kit.LocatorError, match="no call to 'other.guard'"):
+        kit.call_source(module, "other.guard")
+
+
+def test_definition_source_keeps_the_decorators(tmp_path):
+    """A decorator is part of the definition and is often the policy."""
+
+    module = tmp_path / "sample.py"
+    module.write_text(
+        "import pytest\n\n\n"
+        "@pytest.mark.integration\n"
+        "@pytest.mark.slow\n"
+        "def target():\n"
+        "    return 1\n\n\n"
+        "class Holder:\n"
+        "    @property\n"
+        "    def value(self):\n"
+        "        return 2\n",
+        encoding="utf-8",
+    )
+
+    located = kit.definition_source(module, "target")
+    assert located.startswith("@pytest.mark.integration\n@pytest.mark.slow\ndef target(")
+    assert "import pytest" not in located
+
+    method = kit.definition_source(module, "Holder.value")
+    assert method.startswith("@property\ndef value(")
+
+    assert kit.definition_source(
+        module, "target", include_decorators=False
+    ).startswith("def target(")
+
+
 def test_call_source_refuses_zero_and_multiple_matches(tmp_path):
     module = tmp_path / "sample.py"
     module.write_text(
@@ -122,6 +169,27 @@ def test_call_source_refuses_zero_and_multiple_matches(tmp_path):
 
 
 # --- mutation checks against the real files the locators are aimed at -------
+
+
+def _inject_first_statement(path: Path, function: str, statement: str) -> str:
+    """Return ``path``'s source with ``statement`` as ``function``'s first line.
+
+    Inserting after the first newline of the definition breaks a multi-line
+    signature, so the insertion point comes from the AST.
+    """
+
+    text = Path(path).read_text(encoding="utf-8")
+    tree = ast.parse(text)
+    node = next(
+        item
+        for item in ast.walk(tree)
+        if isinstance(item, ast.FunctionDef) and item.name == function
+    )
+    first = node.body[0]
+    lines = text.splitlines(keepends=True)
+    indent = " " * first.col_offset
+    lines.insert(first.lineno - 1, f"{indent}{statement}\n")
+    return "".join(lines)
 
 
 def _mutated_launcher(tmp_path: Path, *, inside: bool) -> Path:
@@ -178,6 +246,43 @@ def test_locator_ignores_a_table_added_below_the_launch_body(tmp_path):
     assert "grok_adapter_bin" in _legacy_slice(
         mutated.read_text(encoding="utf-8")
     )
+
+
+def test_seat_path_locator_catches_the_marker_one_call_deeper(tmp_path):
+    """The claim is about launch() *and what it calls*, not launch()'s body.
+
+    This is the mutation that the body-only check could not see: move the
+    reference into a module-level helper and call the helper from launch().
+    """
+
+    target = tmp_path / "_rtlauncher.py"
+    target.write_text(
+        _inject_first_statement(LAUNCHER, "choose_launch_cwd", "grok_adapter_bin()"),
+        encoding="utf-8",
+    )
+
+    assert "choose_launch_cwd" in kit.reachable_definitions(target, "launch")
+    assert "grok_adapter_bin" in kit.reachable_source(target, "launch")
+    # The body-only spelling stays green on exactly this input.
+    assert "grok_adapter_bin" not in kit.definition_source(target, "launch")
+
+
+def test_seat_path_locator_stops_at_the_module_boundary(tmp_path):
+    module = tmp_path / "sample.py"
+    module.write_text(
+        "def entry():\n    helper()\n    unrelated_import.run()\n\n\n"
+        "def helper():\n    deeper()\n\n\n"
+        "def deeper():\n    return 1\n\n\n"
+        "def never_called():\n    return 2\n",
+        encoding="utf-8",
+    )
+
+    reached = kit.reachable_definitions(module, "entry")
+
+    assert reached == ["entry", "helper", "deeper"]
+    assert "never_called" not in kit.reachable_source(module, "entry")
+    with pytest.raises(kit.LocatorError, match="no module-level function named"):
+        kit.reachable_definitions(module, "missing")
 
 
 def test_call_locator_survives_reindenting_the_grok_lease_check(tmp_path):

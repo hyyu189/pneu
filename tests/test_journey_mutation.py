@@ -146,6 +146,25 @@ def _run_journeys(root: Path, selector: str) -> subprocess.CompletedProcess[str]
     )
 
 
+def _summary_line(stdout: str) -> str:
+    """Return pytest's final counts line, or an empty string."""
+
+    for line in reversed(stdout.splitlines()):
+        if " in " in line and ("passed" in line or "failed" in line or "error" in line):
+            return line
+    return ""
+
+
+def _failed_tests(stdout: str) -> list[str]:
+    """Return the node ids pytest reported as FAILED."""
+
+    return [
+        line.split(" ", 1)[1].split(" - ", 1)[0].strip()
+        for line in stdout.splitlines()
+        if line.startswith("FAILED ")
+    ]
+
+
 def test_private_journey_copy_is_green_before_any_mutation(tmp_path):
     """The harness itself must be trustworthy before a red run means anything."""
 
@@ -168,5 +187,18 @@ def test_journey_guard_mutations_turn_the_private_copy_red(tmp_path, mutation):
 
     result = _run_journeys(root, mutation.selector)
 
+    # A nonzero exit is not evidence that the *journey* caught the mutation: a
+    # mutant that broke the syntax of the file, or one that only made
+    # collection fail, would exit nonzero while pinning nothing. Require a
+    # real test failure and no collection error.
     assert "no tests ran" not in result.stdout, mutation.slug
     assert result.returncode != 0, f"mutation {mutation.slug} survived:\n{result.stdout}"
+    assert "errors" not in _summary_line(result.stdout), (
+        f"mutation {mutation.slug} produced a collection/import error rather "
+        f"than a journey failure:\n{result.stdout}"
+    )
+    failed = _failed_tests(result.stdout)
+    assert failed, (
+        f"mutation {mutation.slug} exited nonzero without failing a journey "
+        f"test:\n{result.stdout}"
+    )

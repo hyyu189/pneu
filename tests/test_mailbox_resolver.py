@@ -1829,9 +1829,20 @@ def test_mailbox_source_invariant_detects_indirect_construction(
 # The layout is defined in exactly two places, and both must be allowed to
 # spell it out. Every other production source is checked, whether or not
 # anybody remembered to add it here.
+#
+# The exemption is by *count*, not by path: removing these files from the check
+# entirely would let a genuinely new construction hide behind the old allowed
+# ones. Pinning the number means an added construction fails and has to be
+# justified by bumping it deliberately.
 LAYOUT_DEFINING_SOURCES = {
-    "bin/_rtlib.py": "defines the layout the other sources are forbidden to rebuild",
-    "bin/_rtmigrate.py": "moves projects between layouts; frozen by decision.md 2026-07-29",
+    "bin/_rtlib.py": (
+        6,
+        "defines the layout the other sources are forbidden to rebuild",
+    ),
+    "bin/_rtmigrate.py": (
+        12,
+        "moves projects between layouts; frozen by decision.md 2026-07-29",
+    ),
 }
 
 # Sources that resolve a mailbox without the layout lock and then read maildir
@@ -1890,15 +1901,17 @@ def test_production_sources_do_not_construct_layout_paths() -> None:
 
 
 def test_layout_defining_exemptions_are_still_earned() -> None:
-    """A stale exemption is a hidden gap, so the ledger is checked too."""
+    """A stale or over-broad exemption is a hidden gap, so it is pinned."""
 
     known = {facts.relative for facts in consumers.all_facts()}
-    for relative, reason in LAYOUT_DEFINING_SOURCES.items():
+    for relative, (expected, reason) in LAYOUT_DEFINING_SOURCES.items():
         assert relative in known, f"exemption names a missing source: {relative}"
         assert reason
-        assert _mailbox_path_violations(
-            consumers.ROOT / relative
-        ), f"{relative} no longer constructs layout paths; drop its exemption"
+        observed = _mailbox_path_violations(consumers.ROOT / relative)
+        assert len(observed) == expected, (
+            f"{relative} now constructs {len(observed)} layout paths, not "
+            f"{expected}. A new one is not covered by this exemption: {observed}"
+        )
 
 
 def test_allowed_non_layout_literals_are_still_present() -> None:

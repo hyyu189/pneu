@@ -6,16 +6,22 @@ which could not execute a single parallel test because collection aborted.
 
 ## Verdict
 
-**`pytest -n auto` and `pytest -n 4` are safe on this suite after one
-one-line change**, which is applied here.
+**`pytest -n auto`, `-n 4`, and `-n 16` are safe on this suite after one
+one-line change**, which is applied here — on a host that is not already
+saturated. The load qualifier is load-bearing and is stated in full under
+*The concurrency envelope* below; an earlier revision of this document
+claimed safety without it, and an adversarial review was right to reject that
+wording.
 
 - The only blocker was collection-identity nondeterminism, now fixed.
 - No test needed an `xdist_group`, `--dist loadgroup`, or a serial marker.
   Every parallel-safety lead inherited from the earlier reconnaissance was
   checked and killed with evidence (see *Serial classification* below); none
-  survived as a real shared-resource collision or a contention flake.
+  survived as a real shared-resource collision.
 - `pytest-xdist>=3.8,<4` is now declared in `requirements-dev.txt`. It was
   previously used but undeclared.
+- What the suite *is* sensitive to is wall-clock starvation, not shared state.
+  That distinction is measured, not asserted.
 
 ## The blocker and the fix
 
@@ -91,6 +97,52 @@ reproducible here and is not used as this track's baseline: it was measured
 under different host conditions, and a same-checkout serial run here completes
 in a quarter to a third of that time.
 
+## The concurrency envelope
+
+An adversarial Codex review (`handoff/t2-adversarial-findings-codex.md`, §1)
+ran `pytest -q -n 16 -p no:randomly` and got **20 failed, 1079 passed** —
+lock-inode assertions, cutover/ack subprocess timeouts, reply-watcher timing,
+`rt-say` lock acquisition, and even the unmutated journey-mutation baseline.
+That is a real refutation of an unqualified "safe" claim, and the claim above
+is now qualified because of it.
+
+What it is not is a shared-resource collision. Two things separate the cases:
+
+1. **The failures do not reproduce on an idle host.** Two consecutive clean
+   `-n 16` runs, taken after the reviewer's own detached runs were stopped:
+
+   | Run | Result | Wall clock | 1-min load at start |
+   | --- | --- | ---: | ---: |
+   | `pytest -q -n 16` | 1114 passed, 1 skipped | 69.22 s | 12.9 |
+   | `pytest -q -n 16` | 1114 passed, 1 skipped | 86.08 s | 26.4 |
+
+   The reviewer's red run was taken with several other full worktree suites
+   and three of its own detached `-n 16` runs live on the same 10-core host;
+   the 1-minute load average reached **67**. A collision is load-independent.
+   Starvation is not.
+
+2. **The failure shapes are deadlines, not conflicts.** Every failure named in
+   the review is a timeout, a poll deadline, or a lock-acquisition wait — the
+   surfaces this document already listed as the contention risk. None of them
+   is two workers observing each other's state, which is what a serial marker
+   would fix. A marker would not have helped: serializing one test does not
+   give the others CPU back.
+
+**The honest boundary.** The suite is parallel-safe at least to 16 workers on
+an otherwise-idle host. It is *timeout-sensitive* under heavy external load at
+any worker count, because roughly twenty modules assert against wall-clock
+deadlines (subprocess `communicate(timeout=…)`, `DEFAULT_HEARTBEAT_TTL`,
+seat-activation waits). Oversubscribing the machine — several agent worktrees
+running suites at once, which is exactly this project's own workflow — will
+produce red runs that are not defects in the code under test.
+
+Two consequences worth acting on rather than restating:
+
+- Do not read a red parallel run as a regression without checking load first.
+  `sysctl -n vm.loadavg` before blaming the diff.
+- If the suite ever needs to be robust under saturation, the fix is to make
+  the deadlines generous or injectable, not to add serial markers.
+
 ## Serial classification
 
 The brief asked for genuinely-serial tests to be marked with reasons. After
@@ -132,9 +184,11 @@ Roughly twenty modules use `time.sleep`, TTL arithmetic, monotonic deadlines,
 lease heartbeats (`DEFAULT_HEARTBEAT_TTL` is 30 s), seat-activation waits, and
 `tests/test_grok_soak.py`. These were the plausible contention surface and the
 reason repeated trials were run rather than a single green run. They passed in
-every parallel trial, including runs taken while the host was carrying other
-concurrent work. The 30-second health TTL is generous relative to the
-scheduling jitter observed at 10 workers.
+every parallel trial at 4, 10, and 16 workers on a host that was busy but not
+saturated. They are also exactly the tests that fail once the host *is*
+saturated — see *The concurrency envelope* above. That is a contention
+property of the deadlines, not a shared-resource defect, and no serial marker
+addresses it.
 
 ### No test writes into the checkout
 

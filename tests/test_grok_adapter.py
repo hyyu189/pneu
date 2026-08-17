@@ -435,17 +435,20 @@ def test_rt_grok_no_primer_is_an_explicit_bare_opt_out(
 
 
 def test_grok_seat_path_is_pinned_away_from_internal_acp_supervisor():
-    # The body of launch(), and nothing below it. A text slice from
-    # "def launch(" ran to end of file, so it silently absorbed every
-    # definition placed after launch() and evaluated these assertions over
-    # the wrong region.
-    launch_source = kit.definition_source(BIN / "_rtlauncher.py", "launch")
+    # "Seat path" means launch() *and everything it calls*, not launch()'s own
+    # body. Checking only the body lets the supervisor reference move one call
+    # deeper and keep this test green, which is weaker than the name claims.
+    # (The original text slice from "def launch(" had the opposite problem: it
+    # ran to end of file and absorbed unrelated definitions below.)
+    launcher = BIN / "_rtlauncher.py"
+    seat_path = kit.reachable_definitions(launcher, "launch")
+    seat_source = kit.reachable_source(launcher, "launch")
 
-    assert launch_source.startswith("def launch(")
-    assert "def main(" not in launch_source
-    assert "grok_adapter_bin" not in launch_source
-    assert '"--grok-bin"' not in launch_source
-    assert "rt-grok-wake" not in launch_source
+    assert "launch" in seat_path
+    assert "grok_seat_primer_args" in seat_path, seat_path
+    assert "def main(" not in seat_source
+    for marker in ("grok_adapter_bin", '"--grok-bin"', "rt-grok-wake"):
+        assert marker not in seat_source
 
 
 def test_internal_grok_lab_help_is_explicit():

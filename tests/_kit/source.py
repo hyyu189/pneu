@@ -89,26 +89,66 @@ def _resolve_one(path: Path, tree: ast.Module, name: str) -> ast.AST:
     )
 
 
-def definition_source(path: Path | str, name: str) -> str:
+def definition_source(
+    path: Path | str,
+    name: str,
+    *,
+    include_decorators: bool = True,
+) -> str:
     """Return the exact source of one function or class, and nothing else.
 
     ``name`` is a bare name or a dotted qualname (``Class.method``). Unlike a
     text slice this stops at the end of the definition, so code added below it
     cannot leak into the assertion.
+
+    Decorators are part of the definition and are frequently the
+    policy-bearing part of it, so they are included by default;
+    ``ast.get_source_segment`` alone starts at ``def`` and drops them.
     """
 
     path = Path(path)
     text, tree = _parse(path)
-    return _segment(text, _resolve_one(path, tree, name), path)
+    node = _resolve_one(path, tree, name)
+    segment = _segment(text, node, path)
+    decorators = getattr(node, "decorator_list", []) if include_decorators else []
+    if not decorators:
+        return segment
+    lines = text.splitlines(keepends=True)
+    first = min(decorator.lineno for decorator in decorators)
+    indent = " " * node.col_offset
+    prefix = "".join(
+        line[len(indent) :] if line.startswith(indent) else line
+        for line in lines[first - 1 : node.lineno - 1]
+    )
+    return prefix + segment
 
 
-def _callee_name(node: ast.Call) -> str | None:
-    func = node.func
-    if isinstance(func, ast.Name):
-        return func.id
-    if isinstance(func, ast.Attribute):
-        return func.attr
+def _dotted(node: ast.expr) -> str | None:
+    """Render ``a.b.c`` / ``name`` as a dotted string, or None if it is neither."""
+
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        prefix = _dotted(node.value)
+        return None if prefix is None else f"{prefix}.{node.attr}"
     return None
+
+
+def _callee_matches(node: ast.Call, callee: str) -> bool:
+    """Match a call by exact identity, not by its trailing attribute name.
+
+    A bare ``load_validated_lease(...)`` and an unrelated
+    ``client.load_validated_lease(...)`` are different callees. Reducing both
+    to the trailing ``attr`` conflated them, so ``call_source`` could report
+    an ambiguity — or silently pick the wrong call in the single-match case —
+    for a name it was never asked about. A dotted ``callee`` matches the
+    attribute form explicitly.
+    """
+
+    func = node.func
+    if "." in callee:
+        return _dotted(func) == callee
+    return isinstance(func, ast.Name) and func.id == callee
 
 
 def call_sources(
@@ -118,6 +158,9 @@ def call_sources(
     within: str | None = None,
 ) -> list[str]:
     """Return the exact source of every call to ``callee``, in source order.
+
+    A bare ``callee`` matches only a bare-name call. Pass a dotted name
+    (``client.send``) to match an attribute call; the two are never conflated.
 
     ``within`` restricts the search to one function or class by name, so a
     caller can say "the lease check inside this method" without pinning the
@@ -130,7 +173,7 @@ def call_sources(
     found = [
         node
         for node in ast.walk(scope)
-        if isinstance(node, ast.Call) and _callee_name(node) == callee
+        if isinstance(node, ast.Call) and _callee_matches(node, callee)
     ]
     found.sort(key=lambda node: (node.lineno, node.col_offset))
     return [_segment(text, node, path) for node in found]
@@ -160,6 +203,53 @@ def call_source(
             "narrow the search with within=..."
         )
     return found[0]
+
+
+def reachable_definitions(path: Path | str, entry: str) -> list[str]:
+    """Return ``entry`` plus every module-level function it can reach, in order.
+
+    A test that says "this code path never touches X" means the entry point
+    *and what it calls*. Checking only the entry's own body lets the reference
+    move one call deeper and stay green, which is a weaker claim than the test
+    name makes. Resolution is by module-level name, so it does not follow
+    calls into imported modules or through indirection.
+    """
+
+    path = Path(path)
+    text, tree = _parse(path)
+    definitions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, _FUNCTION_NODES)
+    }
+    if entry not in definitions:
+        raise LocatorError(f"{path}: no module-level function named {entry!r}")
+    seen: set[str] = set()
+    order: list[str] = []
+    stack = [entry]
+    while stack:
+        name = stack.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        order.append(name)
+        for node in ast.walk(definitions[name]):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            callee = func.id if isinstance(func, ast.Name) else None
+            if callee in definitions:
+                stack.append(callee)
+    return order
+
+
+def reachable_source(path: Path | str, entry: str) -> str:
+    """Return the concatenated source of :func:`reachable_definitions`."""
+
+    path = Path(path)
+    return "\n".join(
+        definition_source(path, name) for name in reachable_definitions(path, entry)
+    )
 
 
 def defined_names(path: Path | str) -> set[str]:

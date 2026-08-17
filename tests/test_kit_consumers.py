@@ -45,6 +45,16 @@ def test_discovery_finds_new_sources_nobody_registered(tmp_path):
     }
 
 
+def test_discovery_finds_a_pyw_tool(tmp_path):
+    """``.pyw`` is Python; an extension-only rule made a shipped tool invisible."""
+
+    root = _tree(tmp_path, {"bin/tool.pyw": "value = 1\n"})
+
+    found = {str(path.relative_to(root)) for path in consumers.production_sources(root)}
+
+    assert found == {"bin/tool.pyw"}
+
+
 def test_discovery_skips_non_python_and_developer_trees(tmp_path):
     root = _tree(
         tmp_path,

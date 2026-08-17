@@ -34,6 +34,8 @@ from .source import (
     called_names,
     defined_names,
     definition_source,
+    reachable_definitions,
+    reachable_source,
 )
 
 __all__ = [
@@ -54,5 +56,7 @@ __all__ = [
     "called_names",
     "defined_names",
     "definition_source",
+    "reachable_definitions",
+    "reachable_source",
     "write_project",
 ]

@@ -24,6 +24,12 @@ ROOT = Path(__file__).resolve().parents[2]
 
 #: Where shipped Python lives. ``scripts/`` is developer tooling and
 #: ``tests/`` is this suite, so neither is a production mailbox consumer.
+#:
+#: Discovery covers Python by extension (:data:`PYTHON_SUFFIXES`) and
+#: extensionless files whose first line is a ``#!`` naming python. Anything
+#: that is neither — a shell wrapper that execs python, or a file generated at
+#: build time and absent from the checkout — is beyond the reach of a source
+#: scan and is not covered by this inventory.
 PRODUCTION_TREES = ("bin", "integrations", "pneu_packaging")
 
 RAW_RESOLVERS = frozenset(
@@ -37,12 +43,18 @@ LOCKED_RESOLVERS = frozenset(
 MAILDIR_ATTRIBUTES = frozenset({"inbox_dir", "messages_dir", "locks_dir"})
 
 
+#: Extensions the interpreter itself treats as Python source. ``.pyw`` is
+#: included because a shipped ``.pyw`` tool is Python that this inventory would
+#: otherwise not see at all.
+PYTHON_SUFFIXES = frozenset({".py", ".pyw"})
+
+
 def _is_python_source(path: Path) -> bool:
     if not path.is_file() or path.is_symlink():
         return False
     if "__pycache__" in path.parts:
         return False
-    if path.suffix == ".py":
+    if path.suffix in PYTHON_SUFFIXES:
         return True
     if path.suffix:
         return False
