@@ -73,8 +73,8 @@ MUTATIONS = (
     Mutation(
         slug="watcher-claims-the-wake-slot",
         filename="rt-wait-inbox",
-        needle="                watcher_pid=watcher_pid,\n            )\n        except FenceRejected:",
-        replacement="                watcher_pid=None,\n            )\n        except FenceRejected:",
+        needle="                watcher_pid=watcher_pid,\n            )\n        except FenceRejected as error:",
+        replacement="                watcher_pid=None,\n            )\n        except FenceRejected as error:",
         selector="seat_open_journey",
     ),
     Mutation(
