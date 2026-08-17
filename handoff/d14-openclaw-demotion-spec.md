@@ -125,6 +125,45 @@ is required even though the seat is gone.
   Keep it to the length of the existing entries; the file's other decisions
   manage this in a paragraph.
 
+### 3b. Two silent-vacuity traps inherited from T3 (added 2026-08-17)
+
+Found by T3's collision analysis and verified here against `main`. Both are
+invisible to a green suite, and both bind on this branch because it merges after
+T3's doctor work. **Credit T3 in the commit message.**
+
+**(a) `launch_fix` will hand the operator a command that refuses.**
+`bin/rt-doctor:828-833` string-builds `cd {project} && RT_FROM={agent} rt-{family}`
+from `harness_family`. Ocean ruled the openclaw family mapping stays (doctor
+describes reality, not the sales catalogue), so post-demotion that remedy
+resolves to `rt-openclaw` — the refusal stub. `tests/test_rt_doctor_diagnostics.py:249`
+asserts the literal string `"cd /project && RT_FROM=openclaw rt-openclaw"`, so
+this stays green while being wrong.
+
+Requirement: `launch_fix` must consult **the same fact the launcher uses** rather
+than string-building unconditionally, and emit a truthful remedy for a seat that
+is declared in `agents.yaml` but not launchable — say that it is demoted from the
+launchable set and point at the `docs/compatibility.md` section. The launchable
+fact is `_rtlauncher.COMMANDS`; `rt-doctor` does not import `_rtlauncher` today,
+but `_rtlauncher` imports only `_rtlib` and `_rtruntime`, which `rt-doctor`
+already imports, so the added import brings no new transitive weight. If you
+disagree with that placement, say so with evidence rather than introducing a
+fifth harness table in `rt-doctor` — a local `DEMOTED = {...}` set is exactly the
+duplication the architecture review is trying to stop, and the eventual home is
+the `_rtharness.py` registry that is Tier 1 and out of scope here.
+
+Update T3's literal-string assertion on this branch to match the new remedy.
+
+**(b) T3's family regression test goes vacuous the moment you edit the launcher.**
+`tests/test_rt_doctor_diagnostics.py:245` iterates
+`_rtlauncher.CONFIG_HARNESSES.items()`. §1 removes the openclaw entry from that
+dict, so the loop silently stops covering openclaw — and the mapping Ocean
+explicitly ruled must stay becomes the one thing with no test.
+
+Requirement: add an explicit assertion that `harness_family` maps **both**
+spellings, `"openclaw"` and `"openclaw-gateway"`, and write it so it does **not**
+depend on `CONFIG_HARNESSES` listing them. Leave T3's iterating test in place for
+the harnesses it still covers.
+
 ### 4. Tests
 
 - The isolation-root regression above.
