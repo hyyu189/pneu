@@ -103,6 +103,28 @@ is required even though the seat is gone.
   machinery; isolation-root guard required; rework path and its preconditions
   left open. Attribute it to Ocean.
 
+  **The entry must also record the reasoning as a generalized calibration, not
+  as an OpenClaw footnote.** This is the durable lesson and it is why the
+  decision came out the way it did. Both halves:
+
+  1. *Parking a shipped surface is not zero-cost, because parking it means
+     continuing to ship it.* The retain / park / drop framing that was put to
+     Ocean costed "park" as zero investment. That was wrong: `rt-openclaw` was
+     in `TOOLS`, offered by the launcher card, and advertised in `README.md` and
+     `docs/compatibility.md`, so the cost of doing nothing was one more release
+     of a seat that violated the project's own architecture ruling. For anything
+     already in the shipped surface the honest framing is **retain /
+     keep shipping / stop shipping**, and "do nothing" is never the null option.
+  2. *"We do not use it" is not a reason to deprioritize a shipped surface.* It
+     removes the validation path, and under this project's own support-claim
+     discipline that raises the bar rather than lowering it — a harness nobody on
+     the team can exercise cannot carry a support claim, yet it was shipping.
+     Ocean's correction ("I may not use it, but it is for other users") is what
+     turned the isolation-root defect from recorded into must-fix.
+
+  Keep it to the length of the existing entries; the file's other decisions
+  manage this in a paragraph.
+
 ### 4. Tests
 
 - The isolation-root regression above.
