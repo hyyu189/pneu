@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 
 import pytest
@@ -74,6 +75,21 @@ def test_isolation_contains_home_xdg_tmp_and_config(tmp_path, monkeypatch):
     monkeypatch.setitem(environment, "HOME", str(tmp_path / "personal"))
     with pytest.raises(adapter.OpenClawError, match="HOME"):
         isolation.assert_isolated(environment)
+
+
+def test_isolation_rejects_project_child_before_creating_state(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    runtime = project / "operator-runtime"
+    monkeypatch.setenv("RT_OPENCLAW_RUNTIME_DIR", str(runtime))
+
+    with pytest.raises(
+        adapter.OpenClawError,
+        match="isolation root must not be inside the project",
+    ):
+        adapter.create_isolation(project, port=19405, token="must-not-be-written")
+
+    assert not runtime.exists()
 
 
 def test_adapter_waits_for_final_run_and_exact_mail_drain(tmp_path):
@@ -367,36 +383,38 @@ def test_adapter_rejects_gateway_log_path_escape(tmp_path):
         adapter_instance._prepare_isolated_config()
 
 
-def test_openclaw_launcher_claims_then_execs_managed_adapter(tmp_path, monkeypatch):
-    project = tmp_path / "project"
-    project.mkdir()
-    executable = tmp_path / "openclaw"
-    executable.write_text("#!/bin/sh\n")
-    executable.chmod(0o755)
-    wake = tmp_path / "rt-openclaw-wake"
-    wake.write_text("#!/bin/sh\n")
-    wake.chmod(0o755)
-    observed = {}
+def test_openclaw_seat_stub_refuses_without_claiming_a_lease(tmp_path):
+    runtime = tmp_path / "runtime"
+    environment = os.environ.copy()
+    environment["RT_RUNTIME_DIR"] = str(runtime)
+    environment["RT_CODEX_RUNTIME_DIR"] = str(runtime)
 
-    monkeypatch.setattr(_rtlauncher, "choose_launch_cwd", lambda _harness: project)
-    monkeypatch.setattr(_rtlauncher, "set_launch_identity", lambda *_args: "openclaw")
-    monkeypatch.setattr(_rtlauncher, "normalize_runtime_environment", lambda: tmp_path)
-    monkeypatch.setattr(_rtlauncher, "harness_bin", lambda _harness: executable)
-    monkeypatch.setattr(_rtlauncher, "openclaw_adapter_bin", lambda: wake)
-    monkeypatch.setattr(_rtlauncher, "claim_launch_seat", lambda *_args: object())
+    result = subprocess.run(
+        [sys.executable, str(BIN / "rt-openclaw")],
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+    )
 
-    def fake_exec(path, argv):
-        observed["path"] = path
-        observed["argv"] = argv
-        observed["gateway_bin"] = _rtlauncher.os.environ["RT_OPENCLAW_BIN"]
-        raise RuntimeError("exec captured")
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "2026-08-17 owner decision" in result.stderr
+    assert "shipped seat surface" in result.stderr
+    assert "rt-openclaw-wake" in result.stderr
+    assert "internal lab machinery" in result.stderr
+    assert not runtime.exists()
+    assert "_rtlauncher" not in (BIN / "rt-openclaw").read_text(encoding="utf-8")
+    for table in (
+        _rtlauncher.COMMANDS,
+        _rtlauncher.HARNESS_LABELS,
+        _rtlauncher.HARNESS_INSTALL_HINTS,
+        _rtlauncher.EXECUTABLE_OVERRIDES,
+        _rtlauncher.CONFIG_HARNESSES,
+    ):
+        assert "openclaw" not in table
 
-    monkeypatch.setattr(_rtlauncher.os, "execv", fake_exec)
-    with pytest.raises(RuntimeError, match="exec captured"):
-        _rtlauncher.launch("openclaw", ["--once"])
-
-    assert observed == {
-        "path": str(wake),
-        "argv": [str(wake), "--gateway-bin", str(executable), "--once"],
-        "gateway_bin": str(executable),
-    }
+    with pytest.raises(_rtlauncher.SelectionError, match="unknown Roundtable harness"):
+        _rtlauncher.launch("openclaw", [])

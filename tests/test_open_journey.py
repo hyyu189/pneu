@@ -42,6 +42,14 @@ WORKTREE = _load_worktree_module()
 ORIGINAL_SEAT_LAUNCHER = WORKTREE._seat_launcher
 
 
+def test_openclaw_is_not_a_worktree_seat_launcher():
+    with pytest.raises(
+        WORKTREE.WorktreeError,
+        match="no user-facing pneu seat launcher",
+    ):
+        WORKTREE._seat_launcher("openclaw")
+
+
 def _git(path: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "-C", str(path), *args],

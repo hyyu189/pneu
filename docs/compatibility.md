@@ -15,7 +15,7 @@ real vendor session can wake.
 | Claude Code | Global skill link; owned asynchronous SessionStart/Stop watchers; absolute lease-fenced mail permissions; plan/apply/status/remove tests; two sequential installed-RC8 development-host wake generations | Clean-account real send-to-wake-to-drain/ack repeat |
 | Hermes | Global skill link; packaged lifecycle plugin; marked plugin enablement; plan/apply/status/remove tests; two sequential RC7 development-host wake generations | RC8 artifact and clean-account plugin/wake repeat |
 | Codex | Shared executable resolver; global skill link; owned SessionStart auto-bind hook; owned app-server and wake plist generation; fail-closed service preflight tests; development-host cutover and thread/lease identity spike | Clean-account repeat and real send-to-wake-to-drain/ack |
-| OpenClaw | Isolated Gateway adapter; fenced lease and identity checks; project-scoped state and loopback Gateway protocol tests | Clean-account/terminal-matrix repeat before public support promotion |
+| OpenClaw | No user-facing seat; isolated Gateway adapter retained only as internal lab machinery, with fenced identity, project-keyed state outside the project, and loopback protocol tests | A healthy current-version install, a trust-boundary design for attaching to the user's own Gateway, and a live-render probe before TUI-first rework |
 | Grok Build `1.0.3` (inspected) | Native TUI launcher with a fenced seat environment, read-only credential-presence preflight, pinned monitor-arming first turn, explicit-argument/`RT_GROK_NO_PRIMER` opt-outs, neutral `GROK.md`, and fixture-driven doctor advisory; isolated ACP supervisor retained only for labs; 2026-08-14 development-host credentialed live native-TUI send-to-monitor-wake-to-drain/ack on Grok Build `1.0.3` / Grok 4.6 | Resume re-arm and clean-account/terminal-matrix repeats before any public support claim |
 
 The Codex plist files are written but not loaded by setup. This is an
@@ -76,6 +76,25 @@ not evidence for the native TUI seat. The 2026-08-14 native TUI wake is
 development-host evidence, not a public support claim. Grok remains
 unpromoted until resume re-arm and the clean-account/terminal matrix also
 pass, and promotion stays Ocean's call.
+
+## OpenClaw internal Gateway lab
+
+Ocean's 2026-08-12 TUI-first ruling requires every user-facing pneu seat to be
+an interactive harness TUI. The existing OpenClaw integration instead starts a
+private isolated Gateway, deliberately never attaches to the user's own
+OpenClaw instance, and has no human surface where the user can see or control
+the wake turn. Ocean therefore removed OpenClaw from the shipped seat surface
+on 2026-08-17. `rt-openclaw` is a refusal stub and `pneu` does not offer it.
+
+`rt-openclaw-wake` and `integrations/openclaw/roundtable` remain packaged and
+directly invocable only as internal Gateway mail-drain lab machinery. Their
+isolation, fenced identity, protocol, fault, mutation, and soak coverage remain
+useful lab evidence, but do not establish a supported OpenClaw seat.
+
+A future TUI-first seat requires a healthy current-version OpenClaw install to
+validate against, an explicit trust-boundary design for attaching to the
+user's own Gateway, and a live-render probe proving the wake turn appears in a
+human-controlled surface. Until all three exist, OpenClaw remains a lab path.
 
 ## Codex executable selection
 
@@ -145,7 +164,7 @@ is not claimed until its end-to-end gate passes.
 ### Ctrl-C and terminal prompts
 
 The launcher replaces itself with the selected harness executable. When you
-run `pneu`, `rt-claude`, `rt-codex`, `rt-hermes`, `rt-openclaw`, or `rt-grok`
+run `pneu`, `rt-claude`, `rt-codex`, `rt-hermes`, or `rt-grok`
 from an existing interactive shell, that shell remains the parent and returns
 to its prompt when the harness exits, including after Ctrl-C. The launcher does
 not create or manage tmux windows or panes on this direct path.

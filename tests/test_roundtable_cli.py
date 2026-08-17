@@ -181,8 +181,28 @@ def test_guide_command_renders_ascii_mailroom_and_wake_model(tmp_path):
     assert "Claude  SessionStart/Stop hooks" in rendered
     assert "Hermes  the session-start plugin" in rendered
     assert "Codex   the app-server and Unix-socket notification bridge" in rendered
-    assert "OpenClaw  the isolated Gateway seat" in rendered
-    assert "Grok Build the isolated ACP seat" in rendered
+    assert "Grok Build runs its native TUI" in rendered
+    assert "openclaw" not in rendered.lower()
+    assert "openclaw" not in roundtable.HELP.lower()
+    assert "openclaw" not in roundtable.ALIASES
+    assert "openclaw" not in roundtable.HARNESS_ORDER
+    assert "openclaw" not in roundtable.HARNESS_CONFIG
+
+
+def test_configured_openclaw_is_neither_selectable_nor_addable(
+    tmp_path, fake_commands
+):
+    project = write_project(
+        tmp_path / "project",
+        {"openclaw": ("openclaw", ["openclaw"])},
+    )
+    stderr = io.StringIO()
+
+    with pytest.raises(roundtable.OnboardingError, match="no launchable"):
+        roundtable.choose_seat(project, stdin=TTYInput(""), stderr=stderr)
+
+    assert "openclaw" not in stderr.getvalue().lower()
+    assert "openclaw" not in roundtable._addable_harnesses(project)
 
 
 def test_version_command_reports_manifest_prefix_and_current_target(
@@ -865,7 +885,6 @@ def test_selector_marks_grok_native_monitor_activation_turn(
         ("claude", "RT_CLAUDE_BIN"),
         ("codex", "RT_CODEX_BIN"),
         ("hermes", "RT_HERMES_BIN"),
-        ("openclaw", "RT_OPENCLAW_BIN"),
         ("grok", "RT_GROK_BIN"),
     ],
 )
@@ -888,7 +907,7 @@ def test_harness_detection_accepts_present_executable_and_rejects_broken_symlink
         roundtable.harness_bin(harness)
 
 
-def test_selector_shows_all_five_harnesses_and_plain_install_remedies(
+def test_selector_shows_all_four_harnesses_and_plain_install_remedies(
     tmp_path, monkeypatch
 ):
     project = write_project(tmp_path / "project", {"claude": ("claude-code", ["claude"])})
@@ -905,10 +924,9 @@ def test_selector_shows_all_five_harnesses_and_plain_install_remedies(
         roundtable.choose_seat(project, stdin=TTYInput(""), stderr=stderr)
 
     rendered = stderr.getvalue()
-    for harness in ("claude", "codex", "hermes", "openclaw", "grok"):
+    for harness in ("claude", "codex", "hermes", "grok"):
         assert f"unavailable: {harness}" in rendered
-    assert "missing executable `openclaw`" in rendered
-    assert "set RT_OPENCLAW_BIN" in rendered
+    assert "openclaw" not in rendered.lower()
 
 
 def test_pty_single_card_enters_through_last_used_seat(

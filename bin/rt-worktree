@@ -677,6 +677,12 @@ def _seat_launcher(
     tool_path: Path | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> SeatLauncher:
+    # Preserve old configuration and lease visibility for diagnostics, but
+    # never turn the retained refusal stub into a worktree launch surface.
+    if harness == "openclaw":
+        raise WorktreeError(
+            "configured harness 'openclaw' has no user-facing pneu seat launcher"
+        )
     if harness not in KNOWN_HARNESSES:
         raise WorktreeError(
             f"configured harness {harness!r} has no pneu seat launcher"

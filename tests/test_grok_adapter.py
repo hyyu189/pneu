@@ -451,6 +451,22 @@ def test_grok_seat_path_is_pinned_away_from_internal_acp_supervisor():
         assert marker not in seat_source
 
 
+def test_grok_native_binary_still_uses_shared_adapter_resolution(tmp_path, monkeypatch):
+    executable = tmp_path / "grok"
+    executable.write_text("#!/bin/sh\n", encoding="utf-8")
+    executable.chmod(0o755)
+    calls = []
+
+    def fake_adapter_module(harness):
+        calls.append(harness)
+        return SimpleNamespace(resolve_grok_bin=lambda: executable)
+
+    monkeypatch.setattr(_rtlauncher, "_adapter_module", fake_adapter_module)
+
+    assert _rtlauncher.harness_bin("grok") == executable.resolve()
+    assert calls == ["grok"]
+
+
 def test_internal_grok_lab_help_is_explicit():
     result = subprocess.run(
         [sys.executable, str(BIN / "rt-grok-wake"), "--help"],
