@@ -116,6 +116,28 @@ Project-anchored `rt-claude` launches enable Remote Control as
 `<agent>@<project-name>` by default; pass `--remote-control` to choose the name
 or set `RT_CLAUDE_NO_RC=1` to opt out.
 
+### Capability binding
+
+A Codex tool process is spawned by the shared app-server, not by the launcher,
+so ambient `RT_*` variables never reach it. Identity is bound out of band
+instead: the launcher records a private seat capability, the wake bridge
+associates the native thread with it, and every fenced tool resolves
+`CODEX_THREAD_ID` -> exact thread binding -> live lease -> capability record,
+revalidating the whole chain on each call. The bound thread is the seat's
+control entry, so any client driving that exact thread operates the same seat
+under the same fences; a `/btw` side child, a fork, or an unrelated thread
+resolves to nothing. Surface capability stores only explicit addresses — a
+pane, a target, an endpoint — never an environment or token, and `rt-surface`
+drives that exact pane. pneu never fabricates `HERDR_ENV=1` in the daemon.
+
+`pneu setup apply` also joins Codex Desktop to the pneu daemon through the
+supported upstream switch, so one host owns every thread and the writer lock is
+never contested. `rt-doctor` reports the host census, whether Desktop actually
+joined, and the daemon's file-descriptor headroom. The daemon's connection
+domain is machine-wide: seat isolation is pneu's own layer of leases, fences,
+and bindings, not something the app-server enforces. See
+[`docs/compatibility.md`](docs/compatibility.md) for the open promotion gate.
+
 cmux is optional. The core send, receive, acknowledge, recovery, and doctor
 paths work in ordinary terminals and do not inject keyboard input.
 

@@ -397,18 +397,19 @@ def test_bind_command_keeps_binding_when_thread_name_rpc_fails(
 
     assert result == 0
     assert wake.StateStore(state_file).bindings[str(project)]["threadId"] == "thread-1"
-    assert events == [
-        (
-            "thread_name_failed",
-            {
-                "project": str(project),
-                "agent": "codex",
-                "thread_id": "thread-1",
-                "name": f"codex@{project.name}",
-                "error": "cosmetic name failure",
-            },
-        )
-    ]
+    assert events[0] == (
+        "thread_name_failed",
+        {
+            "project": str(project),
+            "agent": "codex",
+            "thread_id": "thread-1",
+            "name": f"codex@{project.name}",
+            "error": "cosmetic name failure",
+        },
+    )
+    # A manual bind is a routing-visible ownership change and is recorded even
+    # when the cosmetic thread name could not be set.
+    assert [event for event, _fields in events[1:]] == ["manual_bind"]
 
 
 def test_auto_discovery_persists_binding_inside_seat_guard(

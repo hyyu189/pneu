@@ -254,6 +254,28 @@ def _atomic_request_locked(path: Path, payload: dict) -> bool:
             pass
 
 
+CHILD_THREAD_ID_FIELDS = (
+    "parent_thread_id",
+    "parentThreadId",
+    "forked_from_id",
+    "forkedFromId",
+    "source_thread_id",
+    "sourceThreadId",
+)
+
+
+def _child_thread_evidence(payload: dict) -> str | None:
+    """Name the field proving this SessionStart belongs to a child thread."""
+
+    for name in CHILD_THREAD_ID_FIELDS:
+        value = payload.get(name)
+        if isinstance(value, str) and value.strip():
+            return name
+    if payload.get("ephemeral") is True:
+        return "ephemeral"
+    return None
+
+
 def _request_context(
     payload: dict,
     environment: dict[str, str],
@@ -279,6 +301,16 @@ def _request_context(
             "not_session_start",
             event=event if isinstance(event, str) else None,
         )
+    child = _child_thread_evidence(payload)
+    if child is not None:
+        # A /btw side child, an ordinary fork, and a sub-agent thread all run
+        # their own SessionStart in the parent's cwd.  None of them is the
+        # seat, and one of them claiming the launch intent first would strand
+        # the real root thread.  Only explicit evidence counts here: the wake
+        # bridge remains the authority, because thread/read reports `ephemeral`
+        # and `parentThreadId` for certain while a hook payload may not carry
+        # them at all.
+        return _decline("child_thread", reason=child)
     source = _safe_text(payload.get("source"), label="source")
     if source not in SUPPORTED_SOURCES:
         raw = payload.get("source")

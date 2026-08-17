@@ -125,6 +125,64 @@ def test_default_plan_is_read_only(
     assert not (prefix / "harness-setup.json").exists()
 
 
+def test_unknown_manifest_harness_is_preserved_by_known_harness_operations(
+    installation: tuple[Path, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home, prefix = installation
+    code, _result = _run(capsys, home, prefix, "apply", "--harness", "claude")
+    assert code == 0
+
+    manifest_path = prefix / "harness-setup.json"
+    manifest = json.loads(manifest_path.read_text())
+    unknown_record = {
+        "format": 2,
+        "nested": {"enabled": True, "values": ["future", {"count": 3}]},
+    }
+    manifest["harnesses"]["future"] = unknown_record
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+
+    for command in ("plan", "status"):
+        code, result = _run(
+            capsys, home, prefix, command, "--harness", "claude"
+        )
+        assert code == 0, result
+        assert result["unknown_harnesses"] == ["future"]
+
+    code, applied = _run(capsys, home, prefix, "apply", "--harness", "hermes")
+    assert code == 0, applied
+    assert applied["unknown_harnesses"] == ["future"]
+    assert json.loads(manifest_path.read_text())["harnesses"]["future"] == unknown_record
+
+    human_status = harness_setup.main(
+        [
+            "status",
+            "--harness",
+            "claude",
+            "--home",
+            str(home),
+            "--prefix",
+            str(prefix),
+        ]
+    )
+    rendered = capsys.readouterr()
+    assert human_status == 0
+    assert "preserving opaque manifest records for unknown harnesses: future" in rendered.out
+
+    code, removed = _run(capsys, home, prefix, "remove", "--harness", "claude")
+    assert code == 0, removed
+    assert removed["unknown_harnesses"] == ["future"]
+    assert json.loads(manifest_path.read_text())["harnesses"]["future"] == unknown_record
+
+    code, removed_last_known = _run(
+        capsys, home, prefix, "remove", "--harness", "hermes"
+    )
+    assert code == 0, removed_last_known
+    assert manifest_path.is_file()
+    remaining = json.loads(manifest_path.read_text())
+    assert remaining["harnesses"] == {"future": unknown_record}
+
+
 def test_codex_setup_honors_one_static_codex_home_and_runtime_override(
     installation: tuple[Path, Path],
     capsys: pytest.CaptureFixture[str],
@@ -152,13 +210,30 @@ def test_codex_setup_honors_one_static_codex_home_and_runtime_override(
     assert (codex_home / "skills" / "pneu").is_symlink()
     assert not (home / ".codex").exists()
     assert runtime.is_dir()
-    for label in harness_setup.CODEX_LABELS:
+    for label in harness_setup.CODEX_SERVICE_LABELS:
         plist_path = home / "Library" / "LaunchAgents" / f"{label}.plist"
         payload = plistlib.loads(plist_path.read_bytes())
         environment = payload["EnvironmentVariables"]
         assert environment["CODEX_HOME"] == str(codex_home)
         assert environment["RT_RUNTIME_DIR"] == str(runtime)
         assert environment["RT_CODEX_RUNTIME_DIR"] == str(runtime)
+    # The login-time join agent carries no environment on purpose: it sets one
+    # launchd variable and must not ship a snapshot of anything else.
+    join_payload = plistlib.loads(
+        (
+            home
+            / "Library"
+            / "LaunchAgents"
+            / f"{harness_setup.CODEX_DAEMON_JOIN_LABEL}.plist"
+        ).read_bytes()
+    )
+    assert "EnvironmentVariables" not in join_payload
+    assert join_payload["ProgramArguments"][1:] == [
+        "setenv",
+        harness_setup.CODEX_DAEMON_JOIN_VARIABLE,
+        harness_setup.CODEX_DAEMON_JOIN_VALUE,
+    ]
+    assert join_payload["RunAtLoad"] is True
     app_payload = plistlib.loads(
         (
             home
@@ -1195,7 +1270,9 @@ def test_codex_remove_unloads_exact_jobs_and_refuses_inside_codex(
     )
     assert code == 0
     assert removed["launchctl_invoked"] is True
-    expected = []
+    # The Desktop join switch is unset before any managed job is booted out,
+    # so Desktop is never pointed at a daemon that has already been removed.
+    expected = [f"unsetenv {harness_setup.CODEX_DAEMON_JOIN_VARIABLE}"]
     domain = f"gui/{os.getuid()}"
     for label in harness_setup.CODEX_LABELS:
         expected.extend(
@@ -1220,7 +1297,7 @@ def test_partial_codex_unload_never_claims_a_full_rollback(
     )
     assert code == 0
     domain = f"gui/{os.getuid()}"
-    app_server, wake = harness_setup.CODEX_LABELS
+    app_server, wake, _join = harness_setup.CODEX_LABELS
     log = home / "launchctl-partial.log"
     launchctl = home / "partial-launchctl"
     _write_executable(
@@ -1266,6 +1343,7 @@ def test_partial_codex_unload_never_claims_a_full_rollback(
             home / "Library" / "LaunchAgents" / f"{label}.plist"
         ).read_bytes() == payload
     assert log.read_text().splitlines() == [
+        f"unsetenv {harness_setup.CODEX_DAEMON_JOIN_VARIABLE}",
         f"print {domain}/{app_server}",
         f"bootout {domain}/{app_server}",
         f"print {domain}/{wake}",

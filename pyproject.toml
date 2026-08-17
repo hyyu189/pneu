@@ -40,8 +40,9 @@ roundtable-uninstall = "pneu_packaging.cli:uninstall_main"
 [tool.setuptools]
 include-package-data = false
 packages = ["pneu_packaging"]
-py-modules = ["_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtrchost", "_rtruntime", "_rtsurface"]
+py-modules = ["_rtcapability", "_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtrchost", "_rtruntime", "_rtsurface"]
 script-files = [
+  "bin/_rtcapability.py",
   "bin/_rtcodex.py",
   "bin/_rtlauncher.py",
   "bin/_rtlib.py",
@@ -72,6 +73,7 @@ script-files = [
   "bin/rt-say",
   "bin/rt-startup-advisory",
   "bin/rt-stop-gate",
+  "bin/rt-surface",
   "bin/rt-wait-inbox",
   "bin/rt-worktree",
 ]

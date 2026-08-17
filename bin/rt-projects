@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -123,6 +124,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def reclaim_codex_binding(root: Path) -> str | None:
+    """Release a tombstoned project's Codex thread binding.
+
+    ``pneu worktree remove`` already unbinds before retiring a tree.  A bare
+    registry removal must do the same, or the bridge keeps a binding for a
+    project the registry no longer routes to, and a later re-registration of
+    the same path inherits a thread it never launched.  A failure here is
+    advisory: the registry row is already tombstoned and the binding stays
+    inert until the bridge is repaired.
+    """
+
+    command = Path(__file__).resolve().with_name("rt-codex-wake")
+    if not command.is_file():
+        return None
+    try:
+        result = subprocess.run(
+            [str(command), "unbind", str(root)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as error:
+        return f"rt-projects: could not unbind Codex for {root}: {error}"
+    if result.returncode == 0:
+        return f"rt-projects: released the Codex thread binding for {root}"
+    detail = (result.stderr or result.stdout).strip()
+    if result.returncode == 1 and "not bound" in detail.lower():
+        return None
+    return (
+        f"rt-projects: warning: could not unbind Codex for {root} "
+        f"(exit {result.returncode})" + (f": {detail}" if detail else "")
+    )
+
+
 def print_transition_summary(result: dict) -> None:
     operation = result.get("operation")
     if operation not in {"migrate", "rollback"}:
@@ -219,6 +255,10 @@ def main() -> int:
     changed = unregister_project(args.root, args.registry)
     root = args.root.expanduser().resolve()
     print(f"{'tombstoned' if changed else 'not registered'} {root}")
+    if changed:
+        reclaimed = reclaim_codex_binding(root)
+        if reclaimed is not None:
+            print(reclaimed, file=sys.stderr)
     return 0 if changed else 1
 
 

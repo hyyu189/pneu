@@ -181,6 +181,7 @@ FORBIDDEN_COMPONENTS = {
 
 REQUIRED_PROJECT_ROOT_FILES = frozenset(
     {
+        "_rtcapability.py",
         "_rtcodex.py",
         "_rtlauncher.py",
         "_rtlib.py",
@@ -209,6 +210,7 @@ REQUIRED_PROJECT_DATA_FILES = frozenset(
 )
 REQUIRED_PROJECT_SCRIPTS = frozenset(
     {
+        "_rtcapability.py",
         "_rtcodex.py",
         "_rtlauncher.py",
         "_rtlib.py",
@@ -239,6 +241,7 @@ REQUIRED_PROJECT_SCRIPTS = frozenset(
         "rt-say",
         "rt-startup-advisory",
         "rt-stop-gate",
+        "rt-surface",
         "rt-wait-inbox",
         "rt-worktree",
     }

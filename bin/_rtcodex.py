@@ -151,6 +151,17 @@ CODEX_HOME = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")).expandus
 DEFAULT_SOCKET = (CODEX_HOME / "app-server-control" / "app-server-control.sock").expanduser()
 APP_SERVER_LABEL = "com.roundtable.codex-app-server"
 WAKE_LABEL = "com.roundtable.codex-wake"
+DAEMON_JOIN_LABEL = "com.roundtable.codex-daemon-join"
+# Codex's own switch for joining an already-running local app-server daemon
+# instead of starting a private stdio one.  It is a semi-documented upstream
+# internal, so doctor probes whether Desktop actually joined rather than
+# assuming the variable still works after a Desktop update.
+DAEMON_JOIN_VARIABLE = "CODEX_APP_SERVER_USE_LOCAL_DAEMON"
+DAEMON_JOIN_VALUE = "1"
+APP_SERVER_FILE_LIMIT = 4096
+# Warn while headroom can still be acted on, not once the daemon is already
+# refusing connections.
+APP_SERVER_FILE_WARN_RATIO = 0.7
 # Version numbers alone neither claim nor deny support.  The floor is the
 # oldest protocol surface a live gate ever exercised, not a per-version
 # allowlist: Roundtable ships far more slowly than the harness, so acceptance
@@ -352,6 +363,12 @@ def app_server_plist(
         "ProcessType": "Background",
         "WorkingDirectory": str(Path.home()),
         "EnvironmentVariables": environment,
+        # The default 256-descriptor soft limit is what produced "Too many
+        # open files" during a batch workload.  Becoming the canonical host
+        # for Desktop as well as every seat widens that exposure, so the
+        # managed job asks for real headroom instead of inheriting the
+        # session default.
+        "SoftResourceLimits": {"NumberOfFiles": APP_SERVER_FILE_LIMIT},
         "StandardOutPath": str(runtime_dir / "codex-app-server.stdout.log"),
         "StandardErrorPath": str(runtime_dir / "codex-app-server.stderr.log"),
     }
@@ -400,6 +417,36 @@ def wake_plist(
         "EnvironmentVariables": environment,
         "StandardOutPath": str(runtime_dir / "rt-codex-wake.stdout.log"),
         "StandardErrorPath": str(runtime_dir / "rt-codex-wake.stderr.log"),
+    }
+
+
+def daemon_join_plist(
+    socket_path: Path = DEFAULT_SOCKET,
+    *,
+    ensure_runtime: bool = True,
+) -> dict:
+    """Re-apply the Desktop join switch at every login.
+
+    ``launchctl setenv`` writes into the running launchd user domain and does
+    not survive logout or reboot, so the switch needs an owned agent that sets
+    it again at login.  This job only sets a variable: it starts no service and
+    never touches the Desktop app bundle, which stays permanently off-limits.
+    ``socket_path`` is accepted for a uniform builder signature.
+    """
+
+    _plist_runtime_dir(ensure_runtime=ensure_runtime)
+    return {
+        "Label": DAEMON_JOIN_LABEL,
+        "ProgramArguments": [
+            launchctl_bin(),
+            "setenv",
+            DAEMON_JOIN_VARIABLE,
+            DAEMON_JOIN_VALUE,
+        ],
+        "RunAtLoad": True,
+        "KeepAlive": False,
+        "ProcessType": "Background",
+        "WorkingDirectory": str(Path.home()),
     }
 
 
@@ -1305,6 +1352,208 @@ def inspect_codex_services(
         wake_state,
         bridge_detail,
     )
+
+
+@dataclass(frozen=True)
+class AppServerHostInventory:
+    """Report-only census of app-server hosts on this machine.
+
+    The 0.147 writer lock makes a live thread belong to exactly one host, so
+    two hosts is not a cosmetic detail: it decides which threads the wake
+    bridge can ever reach.  Lock ownership itself is not inspected here, and
+    this census never claims otherwise.
+    """
+
+    managed: tuple[dict, ...] = ()
+    private: tuple[dict, ...] = ()
+    detail: str = ""
+    inspected: bool = True
+
+
+def _is_app_server_command(command: str) -> bool:
+    """Recognize a real ``codex app-server`` process, not a client of one."""
+
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = command.split()
+    if not parts:
+        return False
+    name = Path(parts[0]).name
+    if name.endswith("app-server"):
+        return True
+    if name != "codex" and not name.startswith("codex-"):
+        return False
+    return len(parts) > 1 and parts[1] == "app-server"
+
+
+def app_server_process_inventory(
+    socket_path: Path = DEFAULT_SOCKET,
+) -> AppServerHostInventory:
+    """List app-server processes and classify them by host kind."""
+
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-axo", "pid=,command="],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return AppServerHostInventory(
+            detail=f"cannot list processes: {error}",
+            inspected=False,
+        )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or f"exit {result.returncode}"
+        return AppServerHostInventory(
+            detail=f"cannot list processes: {detail}",
+            inspected=False,
+        )
+    managed: list[dict] = []
+    private: list[dict] = []
+    rendered_socket = str(socket_path)
+    for line in result.stdout.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        pid_text, _, command = stripped.partition(" ")
+        command = command.strip()
+        if "app-server" not in command:
+            continue
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if not _is_app_server_command(command):
+            # The wake bridge and other pneu tools name the socket on their
+            # own command lines.  Only a real `codex app-server` process is a
+            # host; a substring match would count our own client as one.
+            continue
+        entry = {"pid": pid, "command": command}
+        if "--listen" in command and rendered_socket in command:
+            managed.append(entry)
+        elif "--listen" in command:
+            # A second listening host is neither ours nor a private stdio one.
+            private.append({**entry, "kind": "other-listening"})
+        else:
+            private.append({**entry, "kind": "private-stdio"})
+    return AppServerHostInventory(
+        managed=tuple(managed),
+        private=tuple(private),
+        detail="",
+    )
+
+
+def daemon_join_switch() -> tuple[str | None, str]:
+    """Read the launchd user-domain value of the Desktop join switch."""
+
+    try:
+        result = subprocess.run(
+            [launchctl_bin(), "getenv", DAEMON_JOIN_VARIABLE],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return None, f"cannot read {DAEMON_JOIN_VARIABLE}: {error}"
+    if result.returncode != 0:
+        return None, f"{DAEMON_JOIN_VARIABLE} is not set in the launchd user domain"
+    value = result.stdout.strip()
+    if not value:
+        return None, f"{DAEMON_JOIN_VARIABLE} is not set in the launchd user domain"
+    return value, f"{DAEMON_JOIN_VARIABLE}={value}"
+
+
+def _launchctl_env_mutation(arguments: list[str]) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(
+            [launchctl_bin(), *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return False, str(error)
+    if result.returncode != 0:
+        return False, result.stderr.strip() or f"exit {result.returncode}"
+    return True, ""
+
+
+def set_daemon_join_switch() -> tuple[bool, str]:
+    """Join Desktop to the canonical daemon through the upstream switch only."""
+
+    return _launchctl_env_mutation(
+        ["setenv", DAEMON_JOIN_VARIABLE, DAEMON_JOIN_VALUE]
+    )
+
+
+def unset_daemon_join_switch() -> tuple[bool, str]:
+    """Point Desktop back at its private host before the daemon can vanish."""
+
+    return _launchctl_env_mutation(["unsetenv", DAEMON_JOIN_VARIABLE])
+
+
+def daemon_resource_headroom(pid: int, declared_limit: int | None = None) -> dict:
+    """Measure the canonical host's file-descriptor headroom.
+
+    The shared daemon hit ``Too many open files`` under an OCR batch during
+    the demo shoot.  Making Desktop a client of that same process raises the
+    stakes, so headroom is measured before canonical-host status is promoted,
+    not after the next failure.
+    """
+
+    measurement: dict = {
+        "pid": pid,
+        "open_files": None,
+        "limit": declared_limit,
+        "limit_source": "managed plist" if declared_limit else None,
+    }
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/lsof", "-p", str(pid)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        measurement["error"] = f"cannot count open files: {error}"
+    else:
+        if result.returncode == 0:
+            lines = [line for line in result.stdout.splitlines() if line.strip()]
+            measurement["open_files"] = max(len(lines) - 1, 0)
+        else:
+            measurement["error"] = "cannot count open files"
+    if measurement["limit"] is not None:
+        return measurement
+    try:
+        limits = subprocess.run(
+            [launchctl_bin(), "limit", "maxfiles"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return measurement
+    if limits.returncode == 0:
+        parts = limits.stdout.split()
+        if len(parts) >= 2:
+            try:
+                measurement["limit"] = int(parts[1])
+                measurement["limit_source"] = "launchd session default"
+            except ValueError:
+                measurement["limit"] = None
+    return measurement
 
 
 @contextmanager

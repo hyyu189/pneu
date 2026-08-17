@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Operate this seat's recorded terminal surface through an explicit address.
+
+The launcher captures a minimal, addressable surface (a Herdr pane, a tmux
+target) while it still runs inside the user's real shell.  A later tool
+process -- including one the shared Codex app-server spawned, which inherited
+nothing -- resolves that capability from its own identity and drives the exact
+recorded surface.
+
+Ambient addressing is refused on purpose.  ``--current`` resolves against
+whatever pane the calling process sits in, which for a daemon-executed tool is
+not the seat, and pneu never fabricates ``HERDR_ENV=1`` to pretend otherwise.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+from _rtcapability import (
+    CapabilityError,
+    CapabilityUnavailable,
+    resolve_seat_capability,
+)
+from _rtlib import find_project_root
+from _rtsurface import (
+    SurfaceError,
+    capability_surface_arguments,
+    capability_surface_command,
+    probe_capability_surface,
+)
+
+
+PLACEHOLDER = "{surface}"
+AMBIENT_ARGUMENTS = frozenset({"--current", "--self"})
+
+
+def usage() -> None:
+    print(
+        "usage: rt-surface show [--json]\n"
+        "       rt-surface probe\n"
+        f"       rt-surface run -- ARGS...   (one argument must be {PLACEHOLDER})",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def resolved_surface(project: Path) -> dict:
+    try:
+        capability = resolve_seat_capability(project)
+    except CapabilityUnavailable as error:
+        raise SystemExit(
+            f"rt-surface: no seat identity in this process: {error}\n"
+            "  fix: run this from a pneu-launched seat"
+        ) from None
+    except CapabilityError as error:
+        raise SystemExit(f"rt-surface: {error}") from None
+    if capability.surface is None:
+        raise SystemExit(
+            "rt-surface: this seat has no recorded surface capability; it was "
+            "launched outside a Herdr pane or tmux target"
+        )
+    return capability.surface
+
+
+def show(project: Path, arguments: list[str]) -> int:
+    if arguments not in ([], ["--json"]):
+        usage()
+    surface = resolved_surface(project)
+    address = capability_surface_arguments(surface)
+    if arguments == ["--json"]:
+        print(json.dumps({"surface": surface, "address": address}, sort_keys=True))
+        return 0
+    rendered = " ".join(address)
+    print(f"kind={surface['kind']} address={rendered}")
+    return 0
+
+
+def probe(project: Path, arguments: list[str]) -> int:
+    if arguments:
+        usage()
+    surface = resolved_surface(project)
+    try:
+        probe_capability_surface(surface)
+    except SurfaceError as error:
+        raise SystemExit(f"rt-surface: {error}") from None
+    print(f"reachable kind={surface['kind']}")
+    return 0
+
+
+def run(project: Path, arguments: list[str]) -> int:
+    if not arguments or arguments[0] != "--" or len(arguments) < 2:
+        usage()
+    requested = arguments[1:]
+    if any(item in AMBIENT_ARGUMENTS for item in requested):
+        raise SystemExit(
+            "rt-surface: ambient surface addressing is refused; address the "
+            f"recorded surface with {PLACEHOLDER}"
+        )
+    if PLACEHOLDER not in requested:
+        raise SystemExit(
+            f"rt-surface: one argument must be {PLACEHOLDER}; it is replaced "
+            "with this seat's recorded surface address"
+        )
+    surface = resolved_surface(project)
+    address = capability_surface_arguments(surface)
+    expanded: list[str] = []
+    for item in requested:
+        if item == PLACEHOLDER:
+            expanded.extend(address)
+        else:
+            expanded.append(item)
+    try:
+        command = capability_surface_command(surface, expanded)
+    except SurfaceError as error:
+        raise SystemExit(f"rt-surface: {error}") from None
+    try:
+        result = subprocess.run(command, check=False)
+    except OSError as error:
+        raise SystemExit(
+            f"rt-surface: cannot run the surface command: {error}"
+        ) from None
+    return result.returncode
+
+
+def main() -> int:
+    arguments = sys.argv[1:]
+    if not arguments or arguments[0] in {"-h", "--help"}:
+        usage()
+    command = arguments[0]
+    project = find_project_root("rt-surface")
+    if command == "show":
+        return show(project, arguments[1:])
+    if command == "probe":
+        return probe(project, arguments[1:])
+    if command == "run":
+        return run(project, arguments[1:])
+    usage()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

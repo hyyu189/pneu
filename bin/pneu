@@ -680,6 +680,42 @@ def _codex_wake_state_path() -> Path:
     return runtime_root() / "rt-codex-wake-state.json"
 
 
+def _binding_registration_matches(root: Path, binding: dict) -> bool:
+    """Discard a binding whose project registration generation has changed.
+
+    Offering "(bound thread)" for a path that was tombstoned and registered
+    again would resume a thread belonging to the previous project identity.
+    A binding written before this field existed carries no claim either way,
+    so it stays usable; only a real disagreement is a discard.
+    """
+
+    recorded_uuid = binding.get("projectUuid")
+    recorded_registered_at = binding.get("projectRegisteredAt")
+    if not isinstance(recorded_uuid, str) and not isinstance(
+        recorded_registered_at, str
+    ):
+        return True
+    try:
+        entries, _warnings = load_project_registry()
+    except (ProjectRegistryError, OSError):
+        return False
+    for entry in active_project_entries(entries, available_only=False):
+        try:
+            if Path(entry["root"]) != root:
+                continue
+        except (KeyError, TypeError, ValueError):
+            continue
+        if isinstance(recorded_uuid, str) and entry.get("uuid") != recorded_uuid:
+            return False
+        if (
+            isinstance(recorded_registered_at, str)
+            and entry.get("registered_at") != recorded_registered_at
+        ):
+            return False
+        return True
+    return False
+
+
 def _bound_codex_thread(root: Path, agent: str) -> str | None:
     """Read one resumable binding; corrupt or unsafe state is a quiet miss."""
 
@@ -710,6 +746,8 @@ def _bound_codex_thread(root: Path, agent: str) -> str | None:
         if not isinstance(binding, dict):
             return None
         if binding.get("project") != str(root) or binding.get("agent") != agent:
+            return None
+        if not _binding_registration_matches(root, binding):
             return None
         thread_id = binding.get("threadId")
         if not isinstance(thread_id, str) or not thread_id:
