@@ -844,8 +844,33 @@ def _claude_groups(prefix: Path) -> dict[str, dict[str, Any]]:
 def _legacy_claude_groups(prefix: Path) -> dict[str, tuple[dict[str, Any], ...]]:
     """Known setup-owned hook generations that may be upgraded in place."""
 
+    # 1.3.x shipped the same waiter shape with a 15000 hook timeout (intended
+    # as milliseconds, read by Claude Code as seconds); manifests recorded
+    # under those releases must stay recognizable or upgraded installs
+    # fail closed before plan/apply can run.
+    legacy_waiter = {
+        "type": "command",
+        "command": str(prefix / "bin" / "rt-wait-inbox"),
+        "args": ["--claude-hook"],
+        "asyncRewake": True,
+        "timeout": 15_000,
+    }
     return {
+        "SessionStart": (
+            {
+                "matcher": "startup|resume|clear|compact",
+                "hooks": [legacy_waiter],
+            },
+        ),
         "Stop": (
+            {
+                "hooks": [
+                    {
+                        **legacy_waiter,
+                        "args": ["--claude-stop-hook"],
+                    }
+                ],
+            },
             {
                 "hooks": [
                     {

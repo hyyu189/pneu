@@ -1575,3 +1575,31 @@ def test_install_wheel_mode_accepts_python_without_setuptools(tmp_path):
     assert trace.read_text().strip() == "wheel-python"
     assert "cannot build from source" not in process.stderr
     assert "skipping" not in process.stderr
+
+
+def test_legacy_claude_groups_carry_the_exact_133_hook_generation(tmp_path):
+    """Manifests recorded by 1.3.x must stay recognizable after the 14-day
+    hook-timeout change, or every upgraded install fails closed before
+    plan/apply can run (observed live on the 1.3.3 -> 1.3.4 hot swap)."""
+
+    from pneu_packaging import setup as setup_mod
+
+    prefix = tmp_path / "prefix"
+    legacy = setup_mod._legacy_claude_groups(prefix)
+    old_waiter = {
+        "type": "command",
+        "command": str(prefix / "bin" / "rt-wait-inbox"),
+        "args": ["--claude-hook"],
+        "asyncRewake": True,
+        "timeout": 15_000,
+    }
+    assert legacy["SessionStart"][0] == {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [old_waiter],
+    }
+    assert legacy["Stop"][0] == {
+        "hooks": [{**old_waiter, "args": ["--claude-stop-hook"]}]
+    }
+    current = setup_mod._claude_groups(prefix)
+    assert current["SessionStart"]["hooks"][0]["timeout"] == 1_209_600
+    assert set(legacy) <= set(current), "legacy events must stay upgradable"
