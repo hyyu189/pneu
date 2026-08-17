@@ -13,6 +13,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -79,24 +81,13 @@ def run_with_pty(callback, input_bytes: bytes):
 
 def write_project(path: Path, seats=None) -> Path:
     seats = seats or {"codex": ("codex", ["codex"])}
-    state = path / ".roundtable"
-    state.mkdir(parents=True)
-    lines = [
-        "schema: roundtable.agents.v1",
-        f"project: {path.resolve()}",
-        "agents:",
-    ]
-    for name, (harness, instance_ids) in seats.items():
-        lines.extend(
-            [
-                f"  {name}:",
-                f"    harness: {harness}",
-                "    instances:",
-            ]
-        )
-        lines.extend(f"      - id: {instance_id}" for instance_id in instance_ids)
-    (state / "agents.yaml").write_text("\n".join(lines) + "\n")
-    return path.resolve()
+    return kit.write_project(
+        path,
+        [
+            kit.Seat(name, harness, instances=instance_ids)
+            for name, (harness, instance_ids) in seats.items()
+        ],
+    )
 
 
 @pytest.fixture

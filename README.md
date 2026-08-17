@@ -208,6 +208,11 @@ python scripts/check_public_safety.py
 (With a conda/mamba-managed environment, prefix each command with your
 runner, for example `mamba run -n <env> pytest -q`.)
 
+The suite is parallel-safe. `pytest -q -n auto` distributes it across cores
+and is the faster local loop; the serial form stays the default because a
+single failure is easier to read. Parallel-safety evidence is recorded in
+[`handoff/d15a-xdist-verdict.md`](handoff/d15a-xdist-verdict.md).
+
 For the source-install path, run from the same environment:
 
 ```bash

@@ -11,6 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -58,17 +60,9 @@ def process_table(monkeypatch):
 
 
 def write_project(path: Path, *, agent_id: str = "codex") -> Path:
-    project = path.resolve()
-    state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {project}\n"
-        "agents:\n"
-        "  codex:\n"
-        "    harness: codex\n"
-        "    instances:\n"
-        f"      - id: {agent_id}\n"
+    project = kit.write_project(
+        path,
+        [kit.Seat("codex", "codex", instances=[agent_id])],
     )
     register_project(project)
     return project

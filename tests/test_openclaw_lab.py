@@ -21,6 +21,8 @@ import threading
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -155,23 +157,14 @@ def _snapshot_tree(root: Path) -> dict[str, tuple[int, int, int]]:
 
 
 def _write_lab_project(project: Path, registry: Path) -> None:
-    state = project / ".roundtable"
-    (state / "messages").mkdir(parents=True)
-    (state / "locks").mkdir()
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {project}\n"
-        "agents:\n"
-        "  claude:\n"
-        "    harness: claude-code\n"
-        "    instances:\n"
-        "      - id: claude\n"
-        "  openclaw:\n"
-        "    harness: openclaw\n"
-        "    instances:\n"
-        "      - id: openclaw\n",
-        encoding="utf-8",
+    kit.write_project(
+        project,
+        [kit.CLAUDE, kit.OPENCLAW],
+        project=str(project),
     )
+    state = project / ".roundtable"
+    (state / "messages").mkdir()
+    (state / "locks").mkdir()
     register_project(project, path=registry)
 
 

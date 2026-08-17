@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -262,17 +264,7 @@ def test_stale_or_wrong_identity_is_refused_before_child_start(tmp_path, monkeyp
 
 def _grok_launch_fixture(tmp_path, monkeypatch, user_argv, extra_env=None):
     project = tmp_path / "project"
-    state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        "project: .\n"
-        "agents:\n"
-        "  grok:\n"
-        "    harness: grok-build\n"
-        "    instances:\n"
-        "      - id: grok\n"
-    )
+    kit.write_project(project, [kit.GROK], project=kit.PROJECT_DOT_BARE)
     executable = tmp_path / "grok"
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o755)
@@ -443,12 +435,20 @@ def test_rt_grok_no_primer_is_an_explicit_bare_opt_out(
 
 
 def test_grok_seat_path_is_pinned_away_from_internal_acp_supervisor():
-    launcher_source = (BIN / "_rtlauncher.py").read_text()
-    launch_source = launcher_source.split("def launch(", 1)[1]
+    # "Seat path" means launch() *and everything it calls*, not launch()'s own
+    # body. Checking only the body lets the supervisor reference move one call
+    # deeper and keep this test green, which is weaker than the name claims.
+    # (The original text slice from "def launch(" had the opposite problem: it
+    # ran to end of file and absorbed unrelated definitions below.)
+    launcher = BIN / "_rtlauncher.py"
+    seat_path = kit.reachable_definitions(launcher, "launch")
+    seat_source = kit.reachable_source(launcher, "launch")
 
-    assert "grok_adapter_bin" not in launch_source
-    assert '"--grok-bin"' not in launch_source
-    assert "rt-grok-wake" not in launch_source
+    assert "launch" in seat_path
+    assert "grok_seat_primer_args" in seat_path, seat_path
+    assert "def main(" not in seat_source
+    for marker in ("grok_adapter_bin", '"--grok-bin"', "rt-grok-wake"):
+        assert marker not in seat_source
 
 
 def test_internal_grok_lab_help_is_explicit():
