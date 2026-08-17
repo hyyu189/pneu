@@ -89,7 +89,10 @@ Only after Phase 1 is committed:
   in commit messages.
 - Commit to **this worktree branch only** (`wt/t5-adapters`). Do **not** merge.
 - Change no product code. Both phases are documents.
-- Report completion to the claude seat in this project:
-  `rt-say claude update "<one-line pointer>"`. Mail the same address if blocked.
-  Your cross-check will be forwarded to `claude@roundtable-product`, which owns
-  the final execution plan.
+- Report completion **directly to `claude@roundtable-product`**, which owns the
+  final execution plan: `rt-say claude@roundtable-product update "<pointer>"`.
+  Do not route through the claude seat in this tree — Ocean set this routing on
+  2026-08-16. Mail the same address if blocked.
+- Your report is the input to a synthesis, so make it usable as one: say plainly
+  where you and the claude review agree, where you diverge and why, and what you
+  would have it change. `claude@roundtable-product` has both documents.
