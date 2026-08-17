@@ -42,6 +42,17 @@ DEFAULT_CODEX_LAUNCH_THREAD_WINDOW = 300.0
 BIND_REQUEST_LOCK_NAME = ".codex-bind-requests.lock"
 UNCHANGED = object()
 
+# One append-only lifecycle log per seat, beside that seat's lease.  It exists
+# so an inbox watcher that dies while idle identifies itself afterwards: every
+# arm, ownership change, fence rejection, signal, and exit path is recorded.
+# Writing here is deliberately quiet — it never wakes a harness, never starts a
+# model turn, and never propagates a failure into the watcher's control flow.
+WATCHER_LOG_NAME = "watcher-lifecycle.jsonl"
+WATCHER_LOG_SCHEMA = "roundtable.watcher-lifecycle.v1"
+WATCHER_LOG_MAX_BYTES = 256 * 1024
+WATCHER_LOG_MAX_FIELD_CHARS = 4096
+WATCHER_LOG_READ_MAX_BYTES = 2 * WATCHER_LOG_MAX_BYTES
+
 
 class RuntimeStateError(RuntimeError):
     """Runtime metadata is unsafe, malformed, or cannot be verified."""
@@ -74,6 +85,7 @@ class SeatPaths:
     state_lock: Path
     lease: Path
     surface: Path
+    watcher_log: Path
 
 
 @dataclass(frozen=True)
@@ -294,6 +306,7 @@ def seat_paths(
         state_lock=agent_dir / "state.lock",
         lease=agent_dir / "lease.json",
         surface=agent_dir / "surface.json",
+        watcher_log=agent_dir / WATCHER_LOG_NAME,
     )
 
 
@@ -2095,6 +2108,199 @@ def update_activity(
         record["activityAt"] = utc_now()
         _atomic_json(paths.lease, record)
         return _token(record)
+
+
+def watcher_log_path(project: Path | str, agent_id: str) -> Path:
+    """Return the seat-local watcher lifecycle log path without creating it."""
+
+    return seat_paths(canonical_project(project), agent_id).watcher_log
+
+
+def _watcher_log_line(event: str, fields: dict[str, Any]) -> bytes:
+    payload: dict[str, Any] = {
+        "schema": WATCHER_LOG_SCHEMA,
+        "at": utc_now(),
+        "event": str(event),
+        "pid": os.getpid(),
+    }
+    for name, value in fields.items():
+        if value is None:
+            continue
+        if isinstance(value, str) and len(value) > WATCHER_LOG_MAX_FIELD_CHARS:
+            value = value[:WATCHER_LOG_MAX_FIELD_CHARS] + "…[truncated]"
+        payload[str(name)] = value
+    return (
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+        + "\n"
+    ).encode("utf-8")
+
+
+def _rotate_watcher_log(path: Path) -> None:
+    try:
+        info = path.lstat()
+    except (FileNotFoundError, OSError):
+        return
+    if not stat.S_ISREG(info.st_mode) or info.st_size <= WATCHER_LOG_MAX_BYTES:
+        return
+    try:
+        os.replace(path, path.with_name(path.name + ".1"))
+    except OSError:
+        # A log that cannot be rotated keeps growing slowly; that is strictly
+        # better than losing the record of the next death.
+        pass
+
+
+def log_watcher_event(
+    project: Path | str,
+    agent_id: str,
+    event: str,
+    **fields: Any,
+) -> bool:
+    """Append one lifecycle record for a seat's inbox watcher.
+
+    This never raises and never writes to stdout/stderr: the log is diagnostic
+    state, so a logging failure must not be able to kill the watcher it exists
+    to explain.  Returns whether the record was durably appended.
+    """
+
+    try:
+        paths = seat_paths(canonical_project(project), agent_id)
+        _ensure_private_dir(paths.agent_dir)
+        _rotate_watcher_log(paths.watcher_log)
+        line = _watcher_log_line(event, fields)
+        flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(paths.watcher_log, flags, 0o600)
+        try:
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            if info.st_mode & 0o077:
+                os.fchmod(descriptor, 0o600)
+            # One O_APPEND write keeps concurrent watchers from interleaving
+            # partial records; the reader still tolerates a torn tail.
+            os.write(descriptor, line)
+        finally:
+            os.close(descriptor)
+        return True
+    except Exception:  # noqa: BLE001 - diagnostics must never break the watcher
+        return False
+
+
+def read_watcher_events(
+    project: Path | str,
+    agent_id: str,
+    *,
+    limit: int | None = 20,
+) -> list[dict[str, Any]]:
+    """Read the tail of a seat's lifecycle log, tolerating a torn last line.
+
+    ``limit=None`` returns every record still present in the current file.
+    """
+
+    try:
+        path = watcher_log_path(project, agent_id)
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return []
+        with open(path, "rb") as handle:
+            if info.st_size > WATCHER_LOG_READ_MAX_BYTES:
+                handle.seek(info.st_size - WATCHER_LOG_READ_MAX_BYTES)
+                handle.readline()
+            raw = handle.read(WATCHER_LOG_READ_MAX_BYTES + 1)
+    except (OSError, ValueError, RuntimeStateError):
+        return []
+    events: list[dict[str, Any]] = []
+    for line in raw.decode("utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(record, dict) and record.get("schema") == WATCHER_LOG_SCHEMA:
+            events.append(record)
+    if limit is not None and limit > 0:
+        return events[-limit:]
+    return events
+
+
+def watcher_lifecycle_summary(
+    project: Path | str,
+    agent_id: str,
+    *,
+    watcher_live: bool | None = None,
+) -> dict[str, Any]:
+    """Correlate the lifecycle tail into one operator-facing verdict.
+
+    ``verdict`` is one of:
+
+    ``no-log``            nothing was ever recorded for this seat;
+    ``armed``             the last arm has no exit record and is still running;
+    ``unlogged-death``    the last arm has no exit record and no live watcher —
+                          the watcher was killed without a chance to log, so an
+                          uncatchable signal or a host-level kill is indicated;
+    ``clean-exit``        the last arm ended with a recorded exit;
+    ``crashed``           the last arm ended with a recorded crash.
+    """
+
+    events = read_watcher_events(project, agent_id, limit=None)
+    try:
+        rendered_path = str(watcher_log_path(project, agent_id))
+    except RuntimeStateError:
+        rendered_path = "unavailable"
+    summary: dict[str, Any] = {
+        "path": rendered_path,
+        "events": len(events),
+        "verdict": "no-log",
+        "last_arm": None,
+        "last_exit": None,
+        "uptime_seconds": None,
+    }
+    if not events:
+        return summary
+    last_arm = None
+    for index in range(len(events) - 1, -1, -1):
+        if events[index].get("event") == "armed":
+            last_arm = index
+            break
+    if last_arm is None:
+        summary["verdict"] = "no-arm-record"
+        summary["last_event"] = events[-1]
+        return summary
+    summary["last_arm"] = events[last_arm]
+    terminal = [
+        record
+        for record in events[last_arm + 1:]
+        if record.get("event") in {"exit", "crash"}
+    ]
+    if terminal:
+        summary["last_exit"] = terminal[-1]
+        summary["verdict"] = (
+            "crashed" if terminal[-1].get("event") == "crash" else "clean-exit"
+        )
+    elif watcher_live is False:
+        summary["verdict"] = "unlogged-death"
+    else:
+        summary["verdict"] = "armed"
+    armed_at = _parse_time(summary["last_arm"].get("at"))
+    end_at = (
+        _parse_time(summary["last_exit"].get("at"))
+        if summary["last_exit"]
+        else _parse_time(events[-1].get("at"))
+    )
+    if armed_at is not None and end_at is not None:
+        summary["uptime_seconds"] = max(
+            0.0, (end_at - armed_at).total_seconds()
+        )
+    summary["signals"] = [
+        record
+        for record in events[last_arm + 1:]
+        if record.get("event") == "signal"
+    ]
+    return summary
 
 
 def release(token: LeaseToken) -> bool:

@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -36,19 +38,7 @@ class ExecCalled(Exception):
 
 
 def write_project(path: Path, *, agent: str, harness: str) -> Path:
-    project = path.resolve()
-    state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {project}\n"
-        "agents:\n"
-        f"  {agent}:\n"
-        f"    harness: {harness}\n"
-        "    instances:\n"
-        f"      - id: {agent}\n"
-    )
-    return project
+    return kit.write_project(path, [kit.Seat(agent, harness)])
 
 
 def codex_thread(cwd: Path, thread_id: str = "thread-1") -> dict:

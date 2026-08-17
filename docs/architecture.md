@@ -141,6 +141,7 @@ host:
 | Stable worktree identity and registry metadata | ignored `<project>/.roundtable/project.json` plus `~/.pneu/projects.yaml` | Durable worktree and host state |
 | Inbox `new/`, `cur/`, and `tmp/`; message ledger and acknowledgements | Registry-selected local or central mail root (new/upgraded entries initially use `<project>/.roundtable/`) | Durable delivery state |
 | Current session lease, owner PID and process fingerprint, wake-adapter PID, activity and heartbeat; advisory Herdr/tmux seat surface | `~/.pneu/.runtime/` | Host-local ephemeral state |
+| Append-only inbox watcher lifecycle log (`watcher-lifecycle.jsonl`, rotated at 256 KiB) | seat directory under `~/.pneu/.runtime/` | Host-local diagnostic state |
 | Enabled Claude project rc-host ownership, plist digest, and last phone registration | registry-adjacent `rc-hosts/<project-uuid>.json`; plist under `~/Library/LaunchAgents/` | Durable host/project trait until explicit disable |
 | Optional terminal topology, navigation handles, and adapter diagnostics | `~/.pneu/.runtime/adapters/` | Host-local ephemeral state |
 
@@ -159,7 +160,13 @@ exclusively before the resource lock, readers release it after acquiring
 That turnstile prevents later readers from overtaking a queued migration.
 Both acquisitions share one monotonic timeout. Long-running watchers take
 short shared sections per scan and sleep unlocked; adapter prompts never
-retain a physical mailbox path as a capability.
+retain a physical mailbox path as a capability. Because these locks are
+advisory and their files are never removed, presence proves nothing on its
+own: `rt-doctor` probes each file, and reports only the combination of a
+present lock whose UUID is no longer an active registration with no live
+holder. That report is advisory. Doctor never deletes a lock file, because
+another process may hold a descriptor for it and removal would silently break
+mutual exclusion for that UUID.
 
 Fenced host-runtime validation completes before a mailbox layout section.
 Within a layout section the order is layout admission, layout resource,
@@ -309,6 +316,55 @@ seat. On the same host, owner PID plus a process-start fingerprint protects
 against PID reuse and is the primary liveness proof. An unexpired-looking
 heartbeat cannot keep a dead owner active, and an idle but live harness is not
 declared dead merely because it has not emitted a recent heartbeat.
+
+### Watcher lifecycle, self-heal, and their limits
+
+The armed Claude inbox watcher is the seat's only wake channel while the
+session is idle, and it left no record of its own death. It now writes an
+append-only JSONL lifecycle log beside its lease. Every transition is
+recorded: `armed` (with watcher PID, parent PID, session id,
+lease revision, pending generation, hook mode, and planned lifetime),
+`takeover`, `stand_down`, `fence_rejected`, `wake`, `reply_overdue`,
+`signal`-bearing exits, `crash` with the full traceback, and one `exit` record
+naming the code and reason. Writing is deliberately quiet: it opens the file
+with `O_APPEND`, writes one record, swallows every failure, and never emits
+output, so it cannot wake a harness or start a model turn. The reader
+tolerates a torn last line.
+
+The log's diagnostic value comes from what its absence means. An `armed`
+record with no following `exit` or `crash`, and no live watcher, proves the
+watcher was killed without a chance to record anything — an uncatchable
+signal, a host-level kill, or a process-group cancellation. `rt-doctor`
+renders exactly that verdict (`unlogged-death`) with the arm-to-death uptime,
+so an operator can compare it against the Claude hook timeout before
+suspecting pneu.
+
+Recovery has two layers:
+
+1. **Crash class — in-process restart.** A watch attempt that dies from an
+   exception logs the traceback, revalidates its lease, and re-arms in place
+   with backoff, bounded to five restarts in five minutes. A seat whose lease
+   is gone is never re-armed. `RT_WATCHER_SELF_HEAL=0` disables this.
+2. **Timeout class — a planned retirement.** Claude Code cancels a hook that
+   outlives its configured timeout, so an idle watcher has a bounded lifetime
+   it does not control. The watcher retires itself five minutes before that
+   bound and exits 2 with a notice that states no mail arrived and no drain is
+   needed. The ordinary Stop hook then arms a fresh watcher with a fresh
+   window. This costs at most one short turn per lifetime window, and only in
+   a session that has been idle for that entire window; any real turn re-arms
+   the watcher and resets the clock. `RT_WATCHER_MAX_LIFETIME_SECONDS=0`
+   disables it.
+
+The honest limits:
+
+- A kill aimed at the watcher is not recovered. It leaves the seat deaf until
+  its next turn; the lifecycle log and `rt-doctor` report the resulting
+  `unlogged-death` verdict. Planned retirement keeps an idle watcher from the
+  configured hook timeout, but cannot recover an earlier kill.
+- Nothing can wake an idle Claude session whose hook process is gone. There
+  is no external channel: only a process Claude Code itself spawned can
+  deliver a wake. When every layer is exhausted, the seat is deaf until its
+  next turn, and mail stays durable in `new/` exactly as for an offline seat.
 
 ### Selector state machine
 

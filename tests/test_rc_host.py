@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -52,18 +54,7 @@ def write_project(path: Path, *, register: bool = True) -> Path:
     git(path, "init", "-q", "-b", "main")
     git(path, "config", "user.name", "pneu tests")
     git(path, "config", "user.email", "pneu@example.invalid")
-    state = path / ".roundtable"
-    state.mkdir()
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {path.resolve()}\n"
-        "agents:\n"
-        "  claude:\n"
-        "    harness: claude-code\n"
-        "    instances:\n"
-        "      - id: claude\n",
-        encoding="utf-8",
-    )
+    kit.write_project(path, [kit.CLAUDE])
     (path / "README.md").write_text("fixture\n", encoding="utf-8")
     git(path, "add", "README.md", ".roundtable/agents.yaml")
     git(path, "commit", "-qm", "fixture")

@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -76,23 +78,7 @@ def isolate_wake_runtime(tmp_path, monkeypatch):
 
 
 def write_project(path: Path) -> Path:
-    state = path / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        f"""schema: roundtable.agents.v1
-project: {path.resolve()}
-agents:
-  codex:
-    harness: codex
-    instances:
-      - id: codex
-  claude:
-    harness: claude-code
-    instances:
-      - id: claude
-"""
-    )
-    project = path.resolve()
+    project = kit.write_project(path, [kit.CODEX, kit.CLAUDE])
     register_project(project)
     return project
 

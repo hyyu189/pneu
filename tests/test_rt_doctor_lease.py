@@ -12,6 +12,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -40,25 +42,10 @@ def isolated_project_registry(tmp_path, monkeypatch) -> Path:
 
 
 def write_project(path: Path, agents: list[tuple[str, str]]) -> Path:
-    project = path.resolve()
-    state = project / ".roundtable"
-    state.mkdir(parents=True)
-    lines = [
-        "schema: roundtable.agents.v1",
-        f"project: {project}",
-        "agents:",
-    ]
-    for agent_id, harness in agents:
-        lines.extend(
-            [
-                f"  {agent_id}:",
-                f"    harness: {harness}",
-                "    instances:",
-                f"      - id: {agent_id}",
-            ]
-        )
-    (state / "agents.yaml").write_text("\n".join(lines) + "\n")
-    return project
+    return kit.write_project(
+        path,
+        [kit.Seat(agent_id, harness) for agent_id, harness in agents],
+    )
 
 
 def write_registry(path: Path, projects: list[Path]) -> Path:

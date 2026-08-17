@@ -1,4 +1,5 @@
 -r requirements.txt
 pytest>=8,<10
+pytest-xdist>=3.8,<4
 setuptools>=77
 wheel>=0.45,<1

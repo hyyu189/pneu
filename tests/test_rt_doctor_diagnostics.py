@@ -10,8 +10,11 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import quote
 
 import pytest
+
+import _kit as kit
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -33,12 +36,6 @@ def load_doctor():
 
 
 doctor = load_doctor()
-
-
-def test_doctor_harness_families_cover_every_launcher_alias():
-    for family, aliases in _rtlauncher.CONFIG_HARNESSES.items():
-        for alias in aliases:
-            assert doctor.harness_family(alias) == family
 
 
 def test_openclaw_family_and_demoted_launch_fix_stay_explicit():
@@ -92,19 +89,8 @@ def test_doctor_reports_each_rc_host_on_one_report_only_line(monkeypatch, capsys
 
 
 def _registered_project(path: Path, registry: Path) -> Path:
-    project = path.resolve()
+    project = kit.write_project(path, [kit.CODEX], project=kit.PROJECT_DOT)
     state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        """schema: roundtable.agents.v1
-project: "."
-agents:
-  codex:
-    harness: codex
-    instances:
-      - id: codex
-"""
-    )
     (state / ".gitignore").write_text(
         "project.json\ninbox/\nmessages/\nlocks/\n"
     )
@@ -118,16 +104,50 @@ agents:
 def _registered_grok_project(path: Path, registry: Path) -> Path:
     project = _registered_project(path, registry)
     (project / ".roundtable" / "agents.yaml").write_text(
-        """schema: roundtable.agents.v1
-project: "."
-agents:
-  grok:
-    harness: grok-build
-    instances:
-      - id: grok
-"""
+        kit.agents_document([kit.GROK], project=kit.PROJECT_DOT)
     )
     return project
+
+
+def _monitor_records(expected_maildir: Path, *, ended: bool = False) -> str:
+    records = [
+        {
+            "type": "assistant",
+            "tool_calls": [
+                {
+                    "name": "monitor",
+                    "arguments": json.dumps(
+                        {
+                            "persistent": True,
+                            "command": f"watch {expected_maildir}",
+                        }
+                    ),
+                }
+            ],
+        },
+        {
+            "type": "tool_result",
+            "content": "Monitor started (task test-task, persistent)",
+        },
+    ]
+    if ended:
+        records.append(
+            {
+                "type": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            "<system-reminder>\n"
+                            'Monitor "test-task" ended: [monitor ended: killed by signal max_runtime].\n'
+                            f"Command: watch {expected_maildir}\n"
+                            "</system-reminder>"
+                        ),
+                    }
+                ],
+            }
+        )
+    return "".join(json.dumps(record) + "\n" for record in records)
 
 
 @pytest.mark.parametrize(
@@ -139,36 +159,18 @@ agents:
     ],
 )
 def test_grok_monitor_advisory_uses_bounded_session_fixtures(
-    tmp_path,
-    capsys,
-    fixture,
-    expected_level,
-    expected_state,
+    tmp_path, capsys, fixture, expected_level, expected_state
 ):
     registry = tmp_path / "registry" / "projects.yaml"
     project = _registered_grok_project(tmp_path / "grok-project", registry)
     mailbox = _rtlib.resolve_project_mailbox(project, registry)
     expected_maildir = mailbox.inbox_dir / "grok" / "new"
     sessions = tmp_path / "fixture-home" / ".grok" / "sessions"
-    session = sessions / "session-1"
+    session = sessions / quote(str(project), safe="") / "session-1"
     session.mkdir(parents=True)
     evidence = session / "updates.jsonl"
     if fixture == "present":
-        evidence.write_text(
-            json.dumps(
-                {
-                    "hookEventName": "Stop",
-                    "backgroundTasks": [
-                        {
-                            "tool": "monitor",
-                            "persistent": True,
-                            "watch": str(expected_maildir),
-                        }
-                    ],
-                }
-            )
-            + "\n"
-        )
+        evidence.write_text(_monitor_records(expected_maildir))
     elif fixture == "absent":
         evidence.write_text(
             json.dumps({"hookEventName": "Stop", "backgroundTasks": []}) + "\n"
@@ -201,6 +203,88 @@ def test_grok_monitor_advisory_uses_bounded_session_fixtures(
         assert "re-arm its persistent pneu mailbox monitor" in output
         assert "resume always requires one re-arm turn" in output
     assert not report.failed
+
+
+def test_grok_monitor_evidence_rejects_other_project_and_ended_monitor(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    expected_maildir = project / ".roundtable" / "inbox" / "grok" / "new"
+    sessions = tmp_path / "fixture-home" / ".grok" / "sessions"
+    other = tmp_path / "other-project"
+    other.mkdir()
+    other_session = sessions / quote(str(other), safe="") / "session"
+    other_session.mkdir(parents=True)
+    (other_session / "chat_history.jsonl").write_text(
+        _monitor_records(expected_maildir)
+    )
+
+    state, detail = doctor.grok_monitor_evidence(sessions, project, expected_maildir)
+    assert state == "absent"
+    assert "no Grok session scope" in detail
+
+    own_session = sessions / quote(str(project), safe="") / "session"
+    own_session.mkdir(parents=True)
+    (own_session / "chat_history.jsonl").write_text(
+        _monitor_records(expected_maildir, ended=True)
+    )
+    state, detail = doctor.grok_monitor_evidence(sessions, project, expected_maildir)
+    assert state == "absent"
+    assert "latest monitor evidence ended" in detail
+
+
+def test_grok_monitor_evidence_keeps_present_record_with_oversized_sibling(
+    tmp_path,
+):
+    project = tmp_path / "project"
+    project.mkdir()
+    expected_maildir = project / ".roundtable" / "inbox" / "grok" / "new"
+    sessions = tmp_path / "fixture-home" / ".grok" / "sessions"
+    session = sessions / quote(str(project), safe="") / "session"
+    session.mkdir(parents=True)
+    (session / "chat_history.jsonl").write_text(_monitor_records(expected_maildir))
+    (session / "updates.jsonl").write_bytes(
+        b"x" * (doctor.GROK_MONITOR_MAX_BYTES + 1)
+    )
+
+    state, detail = doctor.grok_monitor_evidence(sessions, project, expected_maildir)
+
+    assert state == "present"
+    assert "1 file(s) not inspected" in detail
+
+
+def test_doctor_harness_families_cover_every_launcher_alias():
+    for family, aliases in _rtlauncher.CONFIG_HARNESSES.items():
+        for alias in aliases:
+            assert doctor.harness_family(alias) == family
+
+
+def test_openclaw_runtime_unknown_harness_fails_seat_identity(
+    tmp_path, monkeypatch, capsys
+):
+    project = tmp_path / "openclaw-project"
+    project.mkdir()
+    monkeypatch.setattr(
+        doctor,
+        "configured_instances",
+        lambda _project: [("openclaw", "openclaw")],
+    )
+    monkeypatch.setattr(
+        doctor,
+        "inspect_seat",
+        lambda *_args: {
+            "status": "vacant",
+            "record": {"agentId": "openclaw", "harness": "unknown-runtime"},
+        },
+    )
+    report = doctor.Report()
+
+    doctor.inspect_project_seats(report, {str(project): project})
+
+    output = capsys.readouterr().out
+    assert "FAIL seat-identity:" in output
+    assert "configured harness=openclaw" in output
+    assert "runtime record declares harness='unknown-runtime'" in output
+    assert report.failed
 
 
 def test_native_grok_owner_health_defers_only_monitor_health_to_advisory(
@@ -826,3 +910,306 @@ def test_doctor_fails_release_on_failed_probe_or_below_floor(
     assert code == 1
     assert "FAIL version:" in output
     assert expected in output
+
+
+# --- D16-5 / D16-9: watcher lifecycle, unbound Codex seats, layout locks -----
+
+
+import fcntl  # noqa: E402
+import time  # noqa: E402
+
+import _rtruntime  # noqa: E402
+
+
+def _seat_project(tmp_path: Path, monkeypatch) -> Path:
+    project = (tmp_path / "seat-project").resolve()
+    project.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(tmp_path / "runtime"))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(tmp_path / "runtime"))
+    return project
+
+
+def test_watcher_lifecycle_reports_an_unlogged_death_with_a_fix(
+    tmp_path, monkeypatch, capsys
+):
+    project = _seat_project(tmp_path, monkeypatch)
+    _rtruntime.log_watcher_event(project, "claude", "armed", watcher_pid=4242)
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="claude",
+        harness="claude-code",
+        watcher_live=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "WARN seat-watcher-lifecycle" in output
+    assert "verdict=unlogged-death" in output
+    assert "killed without a chance to log it" in output
+    assert str(_rtruntime.watcher_log_path(project, "claude")) in output
+    assert not report.failed
+
+
+def test_watcher_lifecycle_reports_a_recorded_crash(tmp_path, monkeypatch, capsys):
+    project = _seat_project(tmp_path, monkeypatch)
+    _rtruntime.log_watcher_event(project, "claude", "armed", watcher_pid=11)
+    _rtruntime.log_watcher_event(
+        project, "claude", "crash", error_type="OSError", traceback="boom"
+    )
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="claude",
+        harness="claude-code",
+        watcher_live=False,
+    )
+
+    output = capsys.readouterr().out
+    assert "verdict=crashed" in output
+    assert "read the traceback in" in output
+
+
+def test_watcher_lifecycle_is_quiet_for_a_live_watcher(
+    tmp_path, monkeypatch, capsys
+):
+    project = _seat_project(tmp_path, monkeypatch)
+    _rtruntime.log_watcher_event(project, "claude", "armed", watcher_pid=os.getpid())
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="claude",
+        harness="claude-code",
+        watcher_live=True,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_watcher_lifecycle_skips_harnesses_without_a_host_watcher(
+    tmp_path, monkeypatch, capsys
+):
+    project = _seat_project(tmp_path, monkeypatch)
+    report = doctor.Report()
+
+    doctor.report_watcher_lifecycle(
+        report,
+        project=project,
+        agent_id="codex",
+        harness="codex",
+        watcher_live=False,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_unhealthy_seat_fix_names_the_recovery_action(tmp_path):
+    project = tmp_path / "project"
+    claude = doctor.watcher_recovery_fix(project, "claude", "claude-code")
+    hermes = doctor.watcher_recovery_fix(project, "hermes", "hermes-agent")
+    codex = doctor.watcher_recovery_fix(project, "codex", "codex")
+
+    assert "Stop hook re-arms" in claude
+    assert f"cd {project}" in claude
+    assert "pneu plugin" in hermes
+    assert codex == "restart the wake adapter for codex"
+
+
+def _write_wake_log(runtime: Path, records: list[dict]) -> None:
+    runtime.mkdir(parents=True, exist_ok=True)
+    path = runtime / doctor.WAKE_BRIDGE_LOG_NAME
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
+
+
+def test_unbound_active_codex_seat_reports_recent_auto_bind_rejection(
+    tmp_path, capsys
+):
+    project = tmp_path / "codex-project"
+    runtime = tmp_path / "runtime"
+    now = datetime.now(timezone.utc)
+    _write_wake_log(
+        runtime,
+        [
+            {
+                "ts": (now - timedelta(seconds=30)).isoformat().replace(
+                    "+00:00", "Z"
+                ),
+                "event": "auto_bind_rejected",
+                "path": str(runtime / "codex-bind-requests" / "abc.json"),
+                "error": "lease revision no longer current",
+            },
+            {
+                "ts": (now - timedelta(days=3)).isoformat().replace("+00:00", "Z"),
+                "event": "auto_bind_rejected",
+                "error": "ancient and irrelevant",
+            },
+        ],
+    )
+    report = doctor.Report()
+
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="active_healthy")},
+        {str(project): {"codex"}},
+        {},
+        runtime,
+        now=now,
+    )
+
+    output = capsys.readouterr().out
+    assert "WARN codex-unbound" in output
+    assert "no stored thread binding" in output
+    assert "1 recent auto-bind rejection(s)" in output
+    assert "lease revision no longer current" in output
+    assert "ancient and irrelevant" not in output
+    assert "pneu codex" in output
+    assert not report.failed
+
+
+def test_unbound_report_is_silent_for_a_bound_or_inactive_seat(tmp_path, capsys):
+    project = tmp_path / "codex-project"
+    runtime = tmp_path / "runtime"
+    report = doctor.Report()
+
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="active_healthy")},
+        {str(project): {"codex"}},
+        {str(project): {"threadId": "thread-1"}},
+        runtime,
+    )
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="vacant")},
+        {str(project): {"codex"}},
+        {},
+        runtime,
+    )
+
+    assert capsys.readouterr().out == ""
+
+
+def test_unbound_seat_without_rejections_points_at_the_first_turn(
+    tmp_path, capsys
+):
+    project = tmp_path / "codex-project"
+    report = doctor.Report()
+
+    doctor.report_unbound_codex_seats(
+        report,
+        {str(project): project},
+        {(str(project), "codex"): SimpleNamespace(status="active_unhealthy")},
+        {str(project): {"codex"}},
+        {},
+        tmp_path / "runtime",
+    )
+
+    output = capsys.readouterr().out
+    assert "WARN codex-unbound" in output
+    assert "interact once with that Codex session" in output
+
+
+def _layout_lock(tmp_path: Path, name: str) -> Path:
+    lock_dir = tmp_path / "layout-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    path = lock_dir / name
+    path.touch(mode=0o600)
+    return path
+
+
+def test_layout_lock_residue_is_reported_without_removal(tmp_path, capsys):
+    registry = tmp_path / "projects.json"
+    stray = _layout_lock(
+        tmp_path, "11111111-1111-4111-8111-111111111111.writer.lock"
+    )
+    active = _layout_lock(
+        tmp_path, "22222222-2222-4222-8222-222222222222.writer.lock"
+    )
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(
+        report,
+        registry,
+        [{"uuid": "22222222-2222-4222-8222-222222222222", "status": "active"}],
+    )
+
+    output = capsys.readouterr().out
+    assert "reference UUIDs that are not in" in output
+    assert str(stray) in output
+    assert str(active) not in output
+    assert "report-only: leave the files in place" in output
+    assert stray.exists() and active.exists()
+    assert not report.failed
+
+
+def test_layout_lock_tombstoned_residue_is_summarized_not_enumerated(
+    tmp_path, capsys
+):
+    registry = tmp_path / "projects.json"
+    retired = _layout_lock(
+        tmp_path, "44444444-4444-4444-8444-444444444444.writer.lock"
+    )
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(
+        report,
+        registry,
+        [{"uuid": "44444444-4444-4444-8444-444444444444", "status": "tombstoned"}],
+    )
+
+    output = capsys.readouterr().out
+    assert "1 lock file(s) belong to tombstoned registrations" in output
+    assert str(retired) not in output
+    assert "WARN" not in output
+    assert retired.exists()
+
+
+def test_layout_lock_probe_distinguishes_a_live_holder(tmp_path, capsys):
+    registry = tmp_path / "projects.json"
+    held = _layout_lock(
+        tmp_path, "33333333-3333-4333-8333-333333333333.writer.lock"
+    )
+    descriptor = os.open(held, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert doctor.probe_layout_lock(held) == "held"
+        report = doctor.Report()
+        doctor.report_layout_lock_residue(report, registry, [])
+        output = capsys.readouterr().out
+        assert "held by a live holder" in output
+        assert "not in the project registry" in output
+    finally:
+        os.close(descriptor)
+    assert doctor.probe_layout_lock(held) == "free"
+
+
+def test_layout_lock_directory_absence_is_ok(tmp_path, capsys):
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(report, tmp_path / "projects.json", [])
+
+    assert "OK layout-locks: no layout lock directory yet" in capsys.readouterr().out
+    assert not report.failed
+
+
+def test_layout_lock_flags_an_unexpected_entry(tmp_path, capsys):
+    registry = tmp_path / "projects.json"
+    stray = _layout_lock(tmp_path, "not-a-lock.txt")
+    report = doctor.Report()
+
+    doctor.report_layout_lock_residue(report, registry, [])
+
+    output = capsys.readouterr().out
+    assert "unexpected entry" in output
+    assert str(stray) in output

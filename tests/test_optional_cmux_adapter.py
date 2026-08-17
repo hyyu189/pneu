@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -70,28 +72,13 @@ def run_tool(name, *args, cwd, env=None):
 
 
 def write_project(path):
-    state = path / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        f"""schema: roundtable.agents.v1
-project: {path}
-agents:
-  codex:
-    harness: codex
-    instances:
-      - id: codex
-  claude:
-    harness: claude-code
-    instances:
-      - id: claude
-  hermes:
-    harness: hermes-agent
-    instances:
-      - id: hermes
-"""
+    kit.write_project(
+        path,
+        [kit.CODEX, kit.CLAUDE, kit.HERMES],
+        project=str(path),
     )
     register_project(path, path=registry_for(path))
-    return state
+    return path / ".roundtable"
 
 
 def write_mail(state, msg_id, sender, target, body="test"):

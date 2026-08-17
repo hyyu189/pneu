@@ -10,6 +10,8 @@ import sys
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "integrations" / "grok" / "roundtable" / "__init__.py"
@@ -106,12 +108,11 @@ def test_lease_and_identity_mutations_turn_the_private_contract_red(tmp_path):
 
     source_path = baseline / "integrations" / "grok" / "roundtable" / "__init__.py"
     source = source_path.read_text(encoding="utf-8")
-    needle = """load_validated_lease(
-                self.project_root,
-                self.agent_id,
-                self.session_id,
-                self.revision,
-            )"""
+    # Derived from the file under mutation rather than copied into this test:
+    # a hand-written multi-line needle pins the adapter's indentation, so
+    # reindenting it would fail this safety test with a confusing count error
+    # instead of a real finding.
+    needle = kit.call_source(source_path, "load_validated_lease")
     assert source.count(needle) == 1
 
     lease_bypass = _private_copy(tmp_path / "lease-bypass")

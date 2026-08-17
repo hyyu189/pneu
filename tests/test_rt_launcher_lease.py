@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -31,18 +33,7 @@ def lease(project: Path, agent_id: str, *, revision: int = 1):
 
 
 def write_project(project: Path, *, agent_id: str, harness: str) -> Path:
-    state = project / ".roundtable"
-    state.mkdir(parents=True)
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {project.resolve()}\n"
-        "agents:\n"
-        f"  {agent_id}:\n"
-        f"    harness: {harness}\n"
-        "    instances:\n"
-        f"      - id: {agent_id}\n"
-    )
-    return project.resolve()
+    return kit.write_project(project, [kit.Seat(agent_id, harness)])
 
 
 def clear_lease_environment(monkeypatch) -> None:

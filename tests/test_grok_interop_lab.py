@@ -8,6 +8,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import _kit as kit
+
 
 ROOT = Path(__file__).resolve().parents[1]
 BIN = ROOT / "bin"
@@ -20,27 +22,14 @@ SEATS = ("grok", "claude", "codex")
 
 
 def _write_project(project: Path, registry: Path) -> None:
-    state = project / ".roundtable"
-    (state / "messages").mkdir(parents=True)
-    (state / "locks").mkdir()
-    (state / "agents.yaml").write_text(
-        "schema: roundtable.agents.v1\n"
-        f"project: {project}\n"
-        "agents:\n"
-        "  grok:\n"
-        "    harness: grok-build\n"
-        "    instances:\n"
-        "      - id: grok\n"
-        "  claude:\n"
-        "    harness: claude-code\n"
-        "    instances:\n"
-        "      - id: claude\n"
-        "  codex:\n"
-        "    harness: codex\n"
-        "    instances:\n"
-        "      - id: codex\n",
-        encoding="utf-8",
+    kit.write_project(
+        project,
+        [kit.GROK, kit.CLAUDE, kit.CODEX],
+        project=str(project),
     )
+    state = project / ".roundtable"
+    (state / "messages").mkdir()
+    (state / "locks").mkdir()
     register_project(project, path=registry)
 
 
