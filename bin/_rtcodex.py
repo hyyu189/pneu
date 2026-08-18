@@ -189,7 +189,11 @@ SERVICE_RELOAD_DEFERRED_BUSY = "reload_deferred_busy"
 SERVICE_UNSUPPORTED = "unsupported"
 SERVICE_UNSAFE = "unsafe"
 SERVICE_SETUP_REQUIRED = "setup_required"
-WAKE_BRIDGE_TAKEOVER_TIMEOUT_SECONDS = 15.0
+# A full daemon+bridge pair restart delivers the repaired bridge's first
+# fresh heartbeat at ~15s on a loaded host (measured 15.1s twice on
+# 2026-08-17); 15.0 lost that race and aborted launches after an already
+# successful reload.
+WAKE_BRIDGE_TAKEOVER_TIMEOUT_SECONDS = 60.0
 WAKE_BRIDGE_TAKEOVER_POLL_SECONDS = 0.2
 
 
@@ -1695,7 +1699,12 @@ def _restart_wake_bridge(socket_path: Path) -> None:
     _wait_for_wake_bridge_takeover(socket_path)
 
 
-def _reload_service_pair(socket_path: Path, timeout: float) -> None:
+def _reload_service_pair(
+    socket_path: Path,
+    timeout: float,
+    *,
+    on_daemon_ready=None,
+) -> None:
     install_launch_agent(
         APP_SERVER_LABEL,
         app_server_plist(socket_path),
@@ -1703,6 +1712,12 @@ def _reload_service_pair(socket_path: Path, timeout: float) -> None:
     )
     kickstart(APP_SERVER_LABEL, force=False)
     _wait_for_daemon(socket_path, timeout)
+    if on_daemon_ready is not None:
+        # The reload marker tracks plist activation, which is now complete;
+        # clearing must not wait on bridge convergence, or a slow bridge
+        # strands the marker and every later launch re-prompts and bounces
+        # the daemon again.
+        on_daemon_ready()
     _restart_wake_bridge(socket_path)
 
 
@@ -1770,8 +1785,14 @@ def codex_launch_preflight(
                         # A marker means setup wrote a specific new plist. Use
                         # the coordinated loader even for a nominally cold job
                         # so the exact marked definition is what becomes live.
-                        _reload_service_pair(socket_path, timeout)
-                        clear_codex_reload_marker(reload_payload)
+                        payload = reload_payload
+                        _reload_service_pair(
+                            socket_path,
+                            timeout,
+                            on_daemon_ready=lambda: clear_codex_reload_marker(
+                                payload
+                            ),
+                        )
                     continue
                 if current.state == SERVICE_BRIDGE_DOWN:
                     _restart_wake_bridge(socket_path)
@@ -1785,9 +1806,16 @@ def codex_launch_preflight(
                         if INSTALL_PREFIX
                         else None
                     )
-                    _reload_service_pair(socket_path, timeout)
-                    if reload_payload is not None:
-                        clear_codex_reload_marker(reload_payload)
+                    payload = reload_payload
+                    _reload_service_pair(
+                        socket_path,
+                        timeout,
+                        on_daemon_ready=(
+                            (lambda: clear_codex_reload_marker(payload))
+                            if payload is not None
+                            else None
+                        ),
+                    )
                     continue
                 if current.state == SERVICE_RELOAD_REQUIRED_IDLE:
                     continue

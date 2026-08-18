@@ -520,11 +520,12 @@ def test_cold_marked_start_loads_exact_pair_then_clears_marker(
         "ensure_daemon",
         lambda *_a, **_k: calls.append("ensure-daemon"),
     )
-    monkeypatch.setattr(
-        _rtcodex,
-        "_reload_service_pair",
-        lambda *_a, **_k: calls.append("reload-pair"),
-    )
+    def fake_reload_pair(*_a, on_daemon_ready=None, **_k):
+        calls.append("reload-pair")
+        if on_daemon_ready is not None:
+            on_daemon_ready()
+
+    monkeypatch.setattr(_rtcodex, "_reload_service_pair", fake_reload_pair)
 
     observed = _rtcodex.codex_launch_preflight()
 
@@ -561,11 +562,12 @@ def test_approved_marked_reload_clears_marker_after_success(
         "app_server_plist",
         lambda *_a, **_k: app_payload,
     )
-    monkeypatch.setattr(
-        _rtcodex,
-        "_reload_service_pair",
-        lambda *_a, **_k: calls.append("reload-pair"),
-    )
+    def fake_reload_pair(*_a, on_daemon_ready=None, **_k):
+        calls.append("reload-pair")
+        if on_daemon_ready is not None:
+            on_daemon_ready()
+
+    monkeypatch.setattr(_rtcodex, "_reload_service_pair", fake_reload_pair)
 
     observed = _rtcodex.codex_launch_preflight(
         confirm_reload=lambda _status: calls.append("approved") or True
@@ -736,11 +738,12 @@ def test_bridge_repair_never_reloads_app_server(monkeypatch):
         "_restart_wake_bridge",
         lambda *_a, **_k: calls.append("restart-wake"),
     )
-    monkeypatch.setattr(
-        _rtcodex,
-        "_reload_service_pair",
-        lambda *_a, **_k: calls.append("reload-pair"),
-    )
+    def fake_reload_pair(*_a, on_daemon_ready=None, **_k):
+        calls.append("reload-pair")
+        if on_daemon_ready is not None:
+            on_daemon_ready()
+
+    monkeypatch.setattr(_rtcodex, "_reload_service_pair", fake_reload_pair)
 
     _rtcodex.codex_launch_preflight()
 
@@ -874,11 +877,12 @@ def test_daemon_reload_requires_explicit_approval(monkeypatch):
         "inspect_codex_services",
         lambda *_a: status(_rtcodex.SERVICE_RELOAD_REQUIRED_IDLE, "version mismatch"),
     )
-    monkeypatch.setattr(
-        _rtcodex,
-        "_reload_service_pair",
-        lambda *_a, **_k: calls.append("reload-pair"),
-    )
+    def fake_reload_pair(*_a, on_daemon_ready=None, **_k):
+        calls.append("reload-pair")
+        if on_daemon_ready is not None:
+            on_daemon_ready()
+
+    monkeypatch.setattr(_rtcodex, "_reload_service_pair", fake_reload_pair)
 
     with pytest.raises(_rtcodex.CodexRuntimeError, match="was not approved"):
         _rtcodex.codex_launch_preflight()
@@ -898,11 +902,12 @@ def test_approved_reload_rechecks_inside_host_lock(monkeypatch):
     calls: list[str] = []
     monkeypatch.setattr(_rtcodex, "inspect_codex_services", lambda *_a: next(outcomes))
     monkeypatch.setattr(_rtcodex, "codex_service_repair_lock", unlocked)
-    monkeypatch.setattr(
-        _rtcodex,
-        "_reload_service_pair",
-        lambda *_a, **_k: calls.append("reload-pair"),
-    )
+    def fake_reload_pair(*_a, on_daemon_ready=None, **_k):
+        calls.append("reload-pair")
+        if on_daemon_ready is not None:
+            on_daemon_ready()
+
+    monkeypatch.setattr(_rtcodex, "_reload_service_pair", fake_reload_pair)
 
     observed = _rtcodex.codex_launch_preflight(
         confirm_reload=lambda _status: calls.append("approved") or True
@@ -1184,3 +1189,57 @@ def test_below_floor_release_is_unsupported_with_floor_detail(monkeypatch):
 
     assert observed.state == _rtcodex.SERVICE_UNSUPPORTED
     assert "below the minimum supported app-server release 0.144.6" in observed.detail
+
+
+def test_bridge_convergence_failure_still_clears_the_reload_marker(
+    tmp_path,
+    monkeypatch,
+):
+    """The marker tracks plist activation, not bridge convergence. When the
+    repaired bridge misses its takeover window the launch may still fail,
+    but a stranded marker made every later launch re-prompt and bounce the
+    daemon again (observed live on 2026-08-17)."""
+
+    prefix = tmp_path / "installed"
+    prefix.mkdir(mode=0o700)
+    app_path = tmp_path / "app-server.plist"
+    app_payload = {"Label": _rtcodex.APP_SERVER_LABEL}
+    monkeypatch.setattr(_rtcodex, "INSTALL_PREFIX", str(prefix))
+    monkeypatch.setattr(_rtcodex, "launch_agent_path", lambda _label: app_path)
+    marker_path = _write_reload_marker(prefix, app_payload)
+    outcomes = iter(
+        [
+            status(_rtcodex.SERVICE_RELOAD_REQUIRED_IDLE),
+            status(_rtcodex.SERVICE_RELOAD_REQUIRED_IDLE),
+        ]
+    )
+    monkeypatch.setattr(_rtcodex, "inspect_codex_services", lambda *_a: next(outcomes))
+    monkeypatch.setattr(_rtcodex, "codex_service_repair_lock", unlocked)
+    monkeypatch.setattr(_rtcodex, "codex_setup_state_lock", unlocked)
+    monkeypatch.setattr(
+        _rtcodex,
+        "app_server_plist",
+        lambda *_a, **_k: app_payload,
+    )
+
+    def failing_reload_pair(*_a, on_daemon_ready=None, **_k):
+        if on_daemon_ready is not None:
+            on_daemon_ready()
+        raise _rtcodex.CodexRuntimeError(
+            "wake bridge repair failed: bridge heartbeat pid 1 != live pid 2"
+        )
+
+    monkeypatch.setattr(_rtcodex, "_reload_service_pair", failing_reload_pair)
+
+    with pytest.raises(_rtcodex.CodexRuntimeError):
+        _rtcodex.codex_launch_preflight(confirm_reload=lambda _status: True)
+
+    assert not marker_path.exists()
+
+
+def test_bridge_takeover_window_covers_a_full_pair_restart():
+    """A daemon+bridge pair restart delivers the first fresh heartbeat at
+    ~15s on a loaded host (measured 15.1s twice); the window must keep a
+    real margin above that or launches abort after successful reloads."""
+
+    assert _rtcodex.WAKE_BRIDGE_TAKEOVER_TIMEOUT_SECONDS >= 60
