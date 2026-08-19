@@ -1,7 +1,9 @@
 # Harness expansion survey — TUI-first wake paths
 
+> Status: current — the 13-candidate verdict table; no candidate has been implemented
+
 Date: 2026-08-12. Scope: read-only candidate survey requested in
-`handoff/harness-expansion-dispatch.md`; no interactive harness session was
+`handoff/archive/harness-expansion-dispatch.md`; no interactive harness session was
 started and no credential store was read. In this report, **ready** means
 "specific enough to implement and run an isolated adapter probe", not
 release-supported. Every candidate still needs the fenced live tests listed

@@ -443,7 +443,7 @@ is claimed; neither should fork the core transport.
 
 ## Current implementation boundary
 
-The release candidate now implements the host-local fenced lease, unified
+Release 1.3.5 implements the host-local fenced lease, unified
 launcher selector, no-Git project initialization, dry-run-first harness setup,
 owned global skill links, Claude lifecycle hooks, the Hermes lifecycle plugin,
 the native Grok TUI monitor primer and internal ACP lab, Codex SessionStart
@@ -458,21 +458,15 @@ fresh trusted SessionStart hook queues the native thread identity; the bridge
 validates it against the exact project cwd and fenced launcher lease. Manual
 `rt-codex-wake bind` remains a diagnostic fallback.
 
-The remaining P0 promotion work is:
+What remains is validation, not construction. Shipping a mechanism and
+supporting it are separate steps here: a support claim needs a live
+end-to-end smoke on a real environment, and every outstanding gate — the
+credentialed Codex and Claude/Hermes clean-account runs, the Grok resume
+re-arm and terminal matrix, the standalone Codex distribution, the phone-host
+spawn, and the optional cmux adapter behavior — is enumerated with its
+current evidence in [`compatibility.md`](compatibility.md). That file is the
+one home for what has actually been exercised; this document does not repeat
+it.
 
-1. load a clean npm Codex `0.144.6` daemon safely, then pass the real
-   send-to-wake-to-drain/ack acceptance;
-2. install an official standalone Codex and pass the same protocol and
-   end-to-end gates before claiming support;
-3. pass real clean-account Claude and Hermes skill discovery, lifecycle, and
-   wake acceptance;
-4. complete the Grok credentialed native-TUI wake, resume re-arm, and
-   clean-account/terminal-matrix promotion gates;
-5. repeat the same harness acceptance in Terminal.app, iTerm2, Ghostty, and
-   cmux;
-6. test cmux topology, navigation, and notifications separately as optional
-   adapter behavior.
-
-Until the real gates pass, the core and onboarding mechanics are distributable
-as a release candidate, but mainstream-terminal support is not yet promoted as
-complete.
+So the code ships while mainstream-terminal harness support stays unpromoted.
+That is the intended state, not an oversight.

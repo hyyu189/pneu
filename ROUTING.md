@@ -15,12 +15,22 @@ load_if:
     read:
       - .roundtable/agents.yaml
 
+  principles:
+    when:
+      - design_or_architecture_question
+      - harness_adaptation_proposal
+      - support_claim_question
+      - writing_a_dispatch_brief
+    read:
+      - PRINCIPLES.md
+
   brief:
     when:
       - scope_or_requirements_question
       - project_goal_question
     read:
       - BRIEF.md
+      - BACKLOG.md                         # open work index
 
   decisions:
     when:

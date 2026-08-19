@@ -1,5 +1,9 @@
 # Legacy v1 keyboard delivery (retired 2026-07-17)
 
+> Status: historical record of a retired path. The `--legacy-nudge-only`
+> escape hatch still exists in `rt-say`, so this note is kept as its only
+> operating instructions; nothing here describes normal delivery.
+
 v1 delivered messages by typing into the target's terminal. It is retired:
 normal `rt-say` is maildir-only by design, rt-watch and its SessionStart
 hook are gone. This note preserves the emergency manual path.

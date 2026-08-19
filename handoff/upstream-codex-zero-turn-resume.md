@@ -1,5 +1,8 @@
 # Draft upstream issue: make a zero-turn app-server thread resumable
 
+> Status: current — draft upstream issue, not yet filed (BACKLOG.md, "Good
+> citizenship")
+
 ## Title
 
 `thread/start` returns a zero-turn thread that another client cannot resume

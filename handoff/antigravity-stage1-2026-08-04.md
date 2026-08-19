@@ -1,5 +1,7 @@
 # Antigravity CLI Stage 1 validation
 
+> Status: historical record — Antigravity is parked at T0 (decision.md 2026-08-05). Kept at this path because that ledger entry cites it.
+
 Status: verified lab evaluation only. No Roundtable runtime wiring, adapter,
 daemon, or support-table claim was added. This update supersedes the
 documentation-only conclusions in `antigravity-harness-research-2026-08-03.md`.

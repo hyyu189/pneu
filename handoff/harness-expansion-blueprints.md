@@ -1,8 +1,10 @@
 # Harness expansion blueprints — 1.4 Track T5
 
-Date: 2026-08-14. Branch: `wt/t5-adapters`. Dispatch: `handoff/t5-brief-1.4.md`.
+> Status: current — design proposals awaiting operator scheduling; no adapter was built
+
+Date: 2026-08-14. Branch: `wt/t5-adapters`. Dispatch: `handoff/archive/t5-brief-1.4.md`.
 Inputs: `handoff/harness-expansion-survey.md` (2026-08-12 verdict table),
-`handoff/d14-tui-first-survey.md`, `decision.md` 2026-08-12 ("Seats are
+`handoff/archive/d14-tui-first-survey.md`, `decision.md` 2026-08-12 ("Seats are
 interactive TUIs"), and a read of the current tree's launcher, watcher, setup,
 and doctor seams.
 

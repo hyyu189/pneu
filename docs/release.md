@@ -3,7 +3,7 @@
 The release builder produces a deterministic, offline-installable macOS archive
 from one clean Git commit. Repeated builds are byte-identical under the same
 recorded Python, pip, setuptools, and wheel toolchain. It never tags, pushes,
-creates a GitHub Release, or submits to Devpost.
+or creates a GitHub Release.
 
 This repository is the new Messaging v2 release line. The public,
 MIT-licensed cmux-centric predecessor remains unchanged at
@@ -164,7 +164,7 @@ isolated seat, so success requires an active lease and a post-activation
 retired, and deletes its temporary state. It does not use harness credentials
 or connect to the operator's focused Herdr session.
 
-## Judge journey
+## Five-minute new-user journey
 
 The intended five-minute path begins with the archive:
 
@@ -179,9 +179,9 @@ pneu
 `pneu` is the normal entry: select or create a project folder, select a
 harness, review any missing one-time integration, and launch. `roundtable
 setup` is always preview-only; `pneu setup apply` is the explicit expert
-path. On first Codex use, the judge may need to review the user hook once with
-`/hooks`. Subsequent SessionStart binding is intended to be automatic, with
-manual `rt-codex-wake bind` retained only as a fallback.
+path. On first Codex use, the new user may need to review the user hook once
+with `/hooks`. Subsequent SessionStart binding is intended to be automatic,
+with manual `rt-codex-wake bind` retained only as a fallback.
 
 ## Promotion gates
 
@@ -199,24 +199,30 @@ Before tagging or attaching the archive to a public release:
    thread and the private runtime launch intent resolves to the same current
    fenced lease, then completes real send-to-wake-to-drain/ack acceptance;
 5. standalone Codex passes that same acceptance before support is claimed;
-6. Grok Build passes a credentialed native-TUI launch, monitor wake,
-   drain/ack, resume re-arm, and extracted-artifact smoke; the ACP supervisor
-   is exercised only as an internal lab surface;
+6. Grok Build passes resume re-arm and the clean-account/terminal matrix.
+   The credentialed native-TUI launch, monitor wake, drain/ack, and
+   extracted-artifact smoke passed on the development host on 2026-08-14
+   (evidence in `compatibility.md`); the ACP supervisor is exercised only as
+   an internal lab surface;
 7. the 1.3.0 Claude rc-host passes a live phone-side worktree spawn on Ocean's
    device, registers and addresses that session, refuses removal while its
    seat is live, and disables without leaving project hooks or a LaunchAgent;
 8. the same harness acceptance passes in Terminal.app, iTerm2, and Ghostty;
-9. the five-minute judge path creates or adopts a non-Git directory, launches
-   a project-anchored harness, and completes one visible message round trip;
-10. `README.md`, `docs/compatibility.md`, provenance, and Devpost copy describe
-   only the gates that actually passed.
+9. the five-minute new-user path creates or adopts a non-Git directory,
+   launches a project-anchored harness, and completes one visible message
+   round trip;
+10. `README.md`, `docs/compatibility.md`, and provenance describe only the
+   gates that actually passed.
 
-At this release-candidate stage, RC5's npm live host cutover, cold start,
-corrected launchd-to-socket-peer identity, SessionStart thread/lease identity,
-and automatic binding have passed on the development machine. Clean-account
-repetition and full credentialed wake E2E have not yet passed. They must not be
-presented in a video, README support table, or Devpost submission as completed
-evidence.
+`compatibility.md` is the one home for current validation status; the records
+below are the pre-1.0 RC-series evidence behind the Codex, Hermes, and Claude
+rows in it, kept here with their message identifiers.
+
+RC5's npm live host cutover, cold start, corrected launchd-to-socket-peer
+identity, SessionStart thread/lease identity, and automatic binding passed on
+the development machine. Clean-account repetition and full credentialed wake
+E2E have not passed, and must not be presented in a video or a README support
+table as completed evidence.
 
 On 2026-07-21, the installed RC7/0.1.4 Hermes TUI on the development host
 passed two sequential message generations in one freshly started session.

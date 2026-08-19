@@ -1,6 +1,10 @@
 # Quiet acknowledgements and per-agent delivery (WP2.1)
 
-Roundtable mail remains the fact source. WP2.1 removes unnecessary wakeups and
+> Status: current behavior, filed under its original pre-1.0 work-package
+> name. Quiet `ack-*` receipts, maildir-only delivery, and the optional cmux
+> startup advisory all still work as described here.
+
+Mail remains the fact source. WP2.1 removes unnecessary wakeups and
 keyboard nudges without changing message IDs or headers.
 
 ## Quiet sync acknowledgements

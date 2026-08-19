@@ -1,5 +1,7 @@
 # Whole-project architecture review — 1.4
 
+> Status: current — Tier 0 and the RC1/D2/D3/D4 defects landed in 1.4 (T2, T6); Tiers 1-3 are open backlog
+
 Date: 2026-08-15. Branch: `wt/t5-adapters`. Requested by Ocean as a follow-on to
 the T5 harness-expansion track: *if we are going to refactor the launcher, do it
 thoroughly — review the whole project for modularization and decoupling.*

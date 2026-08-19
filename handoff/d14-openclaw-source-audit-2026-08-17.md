@@ -1,5 +1,7 @@
 # D14 OpenClaw — source audit against 2026.7.1-2
 
+> Status: current — the latest OpenClaw source audit (2026.7.1-2); gates any future TUI-first rework
+
 Date: 2026-08-17. Method: Ocean authorized a local install for analysis
 (2026-08-17 evidence ruling: research conclusions must rest on primary sources —
 official docs or source, open or installed for analysis).
@@ -14,7 +16,7 @@ is documentation- and source-level evidence at [D] strength. Per the project's
 support-claim discipline that is not a support claim; it is enough to scope the
 rework and to retire three questions that were previously open.
 
-Prior state: `handoff/d14-tui-first-survey.md` audited **2026.5.4** and left
+Prior state: `handoff/archive/d14-tui-first-survey.md` audited **2026.5.4** and left
 three blockers. All three are now answered, and two of them differently than the
 survey assumed.
 
@@ -120,7 +122,7 @@ directory retains its original mtime.
 
 **Does not change the demotion.** The shipped adapter is still the wrong shape
 under `decision.md` 2026-08-12, still ships in `TOOLS`, and still carries the
-isolation-root defect. `handoff/d14-openclaw-demotion-spec.md` stands as
+isolation-root defect. `handoff/archive/d14-openclaw-demotion-spec.md` stands as
 written. This audit is about the *rework*, which was always a separate,
 later question.
 
@@ -154,7 +156,7 @@ watching.
 
 ## 6. Correction to the record
 
-`handoff/d14-tui-first-survey.md` should be read with this file beside it. Two
+`handoff/archive/d14-tui-first-survey.md` should be read with this file beside it. Two
 of its statements are now superseded by primary evidence at a newer release:
 live-client rendering is documented rather than inferred, and TUI-attach liveness
 has a device-level probe rather than none. Its verdict — "rework path exists,

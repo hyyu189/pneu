@@ -1,5 +1,7 @@
 # Cross-check of the 1.4 architecture review (Codex)
 
+> Status: current — authoritative refinement of the 1.4 defect audit
+
 ## Method and independence boundary
 
 My independent review is commit `a6b7813`. I did not open

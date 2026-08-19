@@ -1,5 +1,7 @@
 # D15(b) — journey tier and its mutation evidence
 
+> Status: current — what each shipped journey test pins, and the mutation that proves it
+
 Track T2, 1.4 cycle. The deliverable is the tests; this file records what each
 journey claims to pin and the mutation that proves the claim.
 

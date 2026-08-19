@@ -8,13 +8,15 @@ manifest and stops before overwriting an unrelated or locally modified path.
 
 The source-install path and extracted offline artifact pass automated
 clean-home installation, repeated-install, conflict, command, harness-setup,
-core-smoke, and uninstall tests. RC5's development-host Codex SessionStart
-thread/lease identity and automatic binding spike also passed; an installed
-RC7 Hermes TUI passed two sequential real wake generations on that host. The
-installed RC8 artifact passed two sequential zero-touch Claude wake generations
-there, including Stop re-arm and quiet-ack cleanup. The artifact remains a
-release candidate until clean-account tests, the remaining credentialed
-harness paths, and the terminal UX matrix pass the promotion gates.
+core-smoke, and uninstall tests. Installation itself is therefore covered by
+automation.
+
+Harness *support* is a separate question with a separate bar, and
+[`compatibility.md`](compatibility.md) is its one home: it records what each
+harness has actually been exercised against and what each still needs before
+promotion. Clean-account tests, the remaining credentialed harness paths, and
+the terminal UX matrix are outstanding there. Do not infer a support claim
+from a green install.
 
 To preview the managed installer without touching a live installation, use
 isolated paths:
@@ -285,9 +287,10 @@ pneu
 
 Outside an anchored project, its menu offers registered pneu projects,
 safe setup of the current or another existing folder, and creation of a new
-folder. It then lists every configured Claude, Codex, and Hermes seat and
-launches the selection with a fenced identity. It never offers the user's home
-directory or the filesystem root as a project.
+folder. It then lists every configured Claude, Codex, Hermes, and Grok Build
+seat and launches the selection with a fenced identity. It never offers the
+user's home directory or the filesystem root as a project. The entry surface
+is specified screen by screen in [`ux/launcher.md`](ux/launcher.md).
 
 The scriptable project commands remain available:
 

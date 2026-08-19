@@ -1,5 +1,7 @@
 # D15(a) — pytest-xdist parallel-safety verdict
 
+> Status: current — the parallel-safety evidence of record, cited by README.md and tests/test_collection_determinism.py
+
 Track T2, 1.4 cycle. This supersedes the pre-fix reconnaissance recorded in the
 demo clone (`~/Code/pneu-worktree/d15a-xdist/handoff/d15a-xdist-findings.md`),
 which could not execute a single parallel test because collection aborted.
@@ -99,7 +101,7 @@ in a quarter to a third of that time.
 
 ## The concurrency envelope
 
-An adversarial Codex review (`handoff/t2-adversarial-findings-codex.md`, §1)
+An adversarial Codex review (`handoff/archive/t2-adversarial-findings-codex.md`, §1)
 ran `pytest -q -n 16 -p no:randomly` and got **20 failed, 1079 passed** —
 lock-inode assertions, cutover/ack subprocess timeouts, reply-watcher timing,
 `rt-say` lock acquisition, and even the unmutated journey-mutation baseline.

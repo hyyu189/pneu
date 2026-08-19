@@ -1,5 +1,7 @@
 # Google Antigravity / Gemini CLI harness research
 
+> Status: historical record — Antigravity is parked at T0 (decision.md 2026-08-05). Kept at this path because that ledger entry cites it.
+
 Status: research and staged execution plan only. No Antigravity or Gemini CLI
 was installed, and no product code or host configuration was changed.
 

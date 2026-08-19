@@ -1,5 +1,7 @@
 # Codex 0.147.0 `/btw` and thread persistence
 
+> Status: current — upstream reference for Codex `/btw` thread semantics, behind the capability chain's fork/ephemeral handling
+
 Date: 2026-08-12  
 Scope: read-only investigation of upstream Codex tag `rust-v0.147.0`, commit
 `be6e8eac029b183056b7e4402879f15d2c85f61b`, plus public-safe host artifacts.

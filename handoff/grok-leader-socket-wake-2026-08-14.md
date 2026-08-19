@@ -1,5 +1,7 @@
 # Grok leader socket as a code-armed wake channel — feasibility, 2026-08-14
 
+> Status: current — standing negative result: the Grok leader socket is not a code-armed wake channel
+
 Track T4, phase 3. Research and documentation only; no adapter was changed.
 
 ## Question

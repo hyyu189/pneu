@@ -4,10 +4,12 @@ These instructions apply to the entire repository.
 
 ## Mission
 
-Evolve Roundtable from the Build Week submission (`v0.1.8`, frozen) into a
-dependable product for collocated coding agents. The current cycle is `0.2`;
-its scope lives in `BRIEF.md`. Prefer small, reliable increments over
-speculative features.
+Evolve pneu from the Build Week submission (`v0.1.8`, frozen) into a
+dependable product for collocated coding agents. The current public release is
+1.3.5. `BRIEF.md` states the north star and the current phase, `BACKLOG.md`
+indexes open work, the ranked principles that govern design decisions live in
+`PRINCIPLES.md`, and individual rulings live in `decision.md`. Prefer small, reliable increments
+over speculative features.
 
 ## Collaboration boundary
 
@@ -21,14 +23,18 @@ speculative features.
 - Do not ask another harness to implement new product code without Ocean's
   explicit approval.
 
-## Review-window freeze (until winners announced, conservatively 2026-08-12)
+## Frozen artifacts
 
-- Do not push to public `main`, move or rebuild the `v0.1.8` tag, or modify
+The review-window freeze expired by its own terms on 2026-08-12
+(`decision.md`, 2026-07-21). These constraints outlive it and are permanent:
+
+- Never move, rebuild, or retarget the `v0.1.8` tag, and never modify its
   Release assets.
-- Development happens on `product/0.2` (this worktree). A remote backup branch,
-  if needed, must be clearly named as post-deadline work.
 - The competition archive worktree (`../2026-OAI-Build-Week`) is not a
   development surface.
+
+Development happens on `main` and on branches in registered worktrees; the
+main checkout is the dispatch, audit, integration, and release seat.
 
 ## Provenance
 

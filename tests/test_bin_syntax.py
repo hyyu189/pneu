@@ -4,7 +4,7 @@ CI's ``compileall`` step matches only ``*.py``, so the 18 extensionless CLI
 entry points have no committed syntax gate, and two of them (``rt-claude``,
 ``rt-hermes``) are never executed by any test either — a syntax error there
 passes every existing check and surfaces only when a user runs the command.
-Recorded as F5.2 in ``handoff/acceptance-m4-2026-07-29.md``.
+Recorded as F5.2 in ``handoff/archive/acceptance-m4-2026-07-29.md``.
 """
 
 from __future__ import annotations

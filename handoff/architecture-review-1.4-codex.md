@@ -1,5 +1,7 @@
 # Independent architecture review for 1.4 (Codex)
 
+> Status: current — the independent 1.4 review; read with its own cross-check, which refines it and wins where the two differ
+
 ## Scope and method
 
 This review was completed before reading either `architecture-review-1.4.md` or

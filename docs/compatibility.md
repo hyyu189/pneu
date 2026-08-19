@@ -573,8 +573,8 @@ floor is admitted when its daemon passes that probe and rejected when it fails.
 | below the `0.144.6` floor | any | any | rejected always, before any probe |
 | at/above the floor (e.g. standalone `0.145.0`) | any | any | policy row, not an exercised pairing: launchable when its identity-proven daemon passes the live read-only protocol probe, rejected on probe failure; a passing probe permits launch but is not yet an end-to-end support claim until a live gate runs |
 
-Before the Build Week release, npm `0.144.6` still needs a clean-account repeat
-plus the real send-to-wake-to-drain/ack gate.
+npm `0.144.6` still needs a clean-account repeat plus the real
+send-to-wake-to-drain/ack gate before it is a support claim.
 Standalone support requires an official standalone installation followed by
 the same gate; an app-bundled internal Codex binary does not qualify as the
 standalone distribution.

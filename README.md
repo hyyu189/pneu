@@ -81,9 +81,10 @@ seat. Installed harnesses that are not configured for the project can be
 added with `a`; missing executables retain their install guidance. A vacant
 or stale Codex seat with a persisted binding is marked `(bound thread)`, and
 Enter performs a guarded handoff before resuming that exact thread.
-Line-oriented and non-TTY streams retain the
-numbered selector for script compatibility; the full guide appears only with
-`?` or `pneu guide`.
+When stdin is a terminal but stderr is not, the card gives way to the
+line-oriented numbered selector. Bare `pneu` does not prompt at all without a
+terminal on stdin: it prints its usage and exits 2, so scripts use the
+explicit subcommands. The full guide appears only with `?` or `pneu guide`.
 
 ## Architecture
 
@@ -209,8 +210,8 @@ collision-checked search across western creative, CJK imagery, deep Chinese,
 and Wade–Giles military/pastoral/commercial directions, Ocean selected
 **pneu**: Paris pneumatique slang where *un pneu* is the message itself. The
 technical backronym is Project-Native Envelope Utility; the public tagline is
-Postal Network, Entirely Unplugged. The 0.3.0 content rolls into this 1.0.0
-release rather than shipping as a public 0.3.0.
+Postal Network, Entirely Unplugged. The 0.3.0 content shipped inside 1.0.0
+rather than as a public 0.3.0 release.
 
 The Build Week phase and its attribution remain documented exactly in
 [`PROVENANCE.md`](PROVENANCE.md) and [`CREDITS.md`](CREDITS.md). The product
@@ -233,9 +234,11 @@ python scripts/check_public_safety.py
 (With a conda/mamba-managed environment, prefix each command with your
 runner, for example `mamba run -n <env> pytest -q`.)
 
-The suite is parallel-safe. `pytest -q -n auto` distributes it across cores
-and is the faster local loop; the serial form stays the default because a
-single failure is easier to read. Parallel-safety evidence is recorded in
+The suite is parallel-safe on a host that is not already saturated —
+the load qualifier is part of the verdict, not a hedge. `pytest -q -n auto`
+distributes it across cores and is the faster local loop; the serial form
+stays the default because a single failure is easier to read. The measured
+concurrency envelope is recorded in
 [`handoff/d15a-xdist-verdict.md`](handoff/d15a-xdist-verdict.md).
 
 For the source-install path, run from the same environment:
@@ -246,4 +249,6 @@ For the source-install path, run from the same environment:
 
 See [`docs/release.md`](docs/release.md) for the deterministic artifact
 workflow and [`docs/install.md`](docs/install.md) for ownership and migration
-details.
+details. [`PRINCIPLES.md`](PRINCIPLES.md) is the ranked constitution that
+governs design decisions here, and [`docs/ux/launcher.md`](docs/ux/launcher.md)
+specifies the `pneu` entry surface screen by screen.
