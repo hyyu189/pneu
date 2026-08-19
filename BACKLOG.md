@@ -62,9 +62,9 @@
 
 ## Needs a ruling
 
-- `ruling` BRIEF.md is frozen at the 1.0.0 launch plan (it still names the
-  Grok ACP supervisor as the productization template): rewrite thin or
-  retire.
+- `now` BRIEF.md thin rewrite (ruled 2026-08-19: part of the docs track;
+  north star + current phase + pointer to this file; in flight on
+  wt/docs-consolidation).
 - `ruling` `rt-say --legacy-nudge-only` (emergency cmux keyboard path, no
   validation path since cmux retired): retire?
 - `ruling` `rt-stop-gate` binary (unused by the current Claude hook
