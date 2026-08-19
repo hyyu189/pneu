@@ -12,11 +12,10 @@
   refusals name the holder (spec: docs/ux/launcher.md §5.4–5.6). Ruled
   2026-08-19: lease recognition and honest reporting are the remedy for the
   adoption/restore incidents — no separate bug-fixes.
-- `now` rc-host defaults off and moves behind an expert setting; no card
-  prominence (ruled 2026-08-19: slow in-app response, low value today).
-
 ## Accepted design — unscheduled
 
+- `accepted` rc-host defaults off and moves behind an expert setting; no card
+  prominence (ruled 2026-08-19: slow in-app response, low value today).
 - `accepted` roundtable-init censuses installed harnesses at project birth,
   replacing the fixed claude/codex/hermes template (docs/ux/launcher.md §5.1).
 - `accepted` `pneu worktree add` inherits the parent checkout's agents.yaml
