@@ -214,7 +214,8 @@ Postal Network, Entirely Unplugged. The 0.3.0 content shipped inside 1.0.0
 rather than as a public 0.3.0 release.
 
 The Build Week phase and its attribution remain documented exactly in
-[`PROVENANCE.md`](PROVENANCE.md) and [`CREDITS.md`](CREDITS.md). The product
+[`docs/PROVENANCE.md`](docs/PROVENANCE.md) and
+[`docs/CREDITS.md`](docs/CREDITS.md). The product
 phase is developed on the product worktree with the human product lead as
 final decision-maker.
 

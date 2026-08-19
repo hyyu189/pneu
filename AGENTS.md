@@ -17,8 +17,10 @@ over speculative features.
 - In the current phase, product work in this branch is led, implemented, and
   reviewed through Claude, with Codex and Hermes as peer reviewers and
   specialists on request. Ocean may change this boundary at any time.
-- Preserve historical attribution exactly as documented in `PROVENANCE.md` and
-  `CREDITS.md`. The Build Week phase was GPT-5.6/Codex-led; do not restate
+- Preserve historical attribution exactly as documented in
+  `docs/PROVENANCE.md` and `docs/CREDITS.md` (shipped at the release-archive
+  root as `PROVENANCE.md` and `CREDITS.md`). The Build Week phase was
+  GPT-5.6/Codex-led; do not restate
   history to match the current phase.
 - Do not ask another harness to implement new product code without Ocean's
   explicit approval.

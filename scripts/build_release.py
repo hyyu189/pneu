@@ -651,10 +651,10 @@ def _collect_dependency_wheels(
 
 def _copy_release_bootstrap(source: Path, staging: Path) -> None:
     copies = {
-        "CREDITS.md": "CREDITS.md",
+        "docs/CREDITS.md": "CREDITS.md",
         "LICENSE": "LICENSE",
         "NOTICE": "NOTICE",
-        "PROVENANCE.md": "PROVENANCE.md",
+        "docs/PROVENANCE.md": "PROVENANCE.md",
         "README.md": "README.md",
         "docs/architecture.md": "docs/architecture.md",
         "docs/compatibility.md": "docs/compatibility.md",
