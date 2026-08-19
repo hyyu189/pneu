@@ -29,7 +29,7 @@ adoption or restore-path bug-fixes.
 | `rt-say --legacy-nudge-only` and the cmux keyboard path | Ships today; the architecture review calls it retired. Retain or stop shipping? | `handoff/architecture-review-1.4.md` §6 Tier 2 |
 | `rt-stop-gate` | A superseded hook generation still shipped as a tool; unused by the current hook generation | `handoff/architecture-review-1.4.md` §6 Tier 2 |
 | The optional cmux adapter (`rt-resolve`, `rt-refresh`, agents.yaml cmux fields) | Documented as supported, with no current validation path | `docs/compatibility.md` terminal matrix |
-| Paseo borrowables B1–B5 adoption | Research audited PASS 2026-08-18; each borrowable maps to a named pneu seam | `handoff/paseo-research.md` §6 |
+| Paseo borrowables B1–B5 adoption | Research audited PASS 2026-08-18; each borrowable maps to a named pneu seam | `research/paseo-research.md` §6 (local, untracked by design) |
 | Clean-machine validation + demo recording | Still an open release gate; scheduling is Ocean's | `docs/release.md` promotion gates |
 | Launch materials | The only artifact describes pneu 1.1.0 and is archived; a resumed workstream needs a fresh brief | `handoff/archive/launch-materials-brief.md` |
 | GROK.md at the repository root | Today a per-project generated file (untracked local state); carrying it in the repo is a deliberate decision, not a cleanup default | `templates/GROK.md.tmpl` |
@@ -49,7 +49,7 @@ is why they are listed: a shipped surface has no zero-cost parking state, and
 | herdr surface: tab-targeting for `pneu worktree open` | `accepted` — today it spawns into the caller's tab | — |
 | Declined bound-thread resume shows a visible message | `accepted` — replaces the silent fallback | — |
 | UX-SPEC rollout beyond the launcher | `accepted` — doctor, worktree, guide, error catalog, agent-facing JSON and exit codes | `docs/ux/` |
-| E1: live check that a Paseo daemon restart drops pending finish obligations | `accepted` — required before that claim is cited externally | `handoff/paseo-research.md` §8 |
+| E1: live check that a Paseo daemon restart drops pending finish obligations | `accepted` — required before that claim is cited externally | `research/paseo-research.md` §8 (local, untracked by design) |
 
 ## Architecture
 
