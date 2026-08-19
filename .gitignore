@@ -39,3 +39,6 @@ PAUSE
 # products, it goes stale fast, and it does not belong in a public product repo.
 research/
 .claude/settings.local.json
+
+# External scanner junk; recreated at random. Never track.
+downloaded_files/
