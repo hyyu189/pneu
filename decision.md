@@ -2,6 +2,32 @@
 
 > Project owner decisions, reverse chronological.
 
+- 2026-08-19: **A seat is the human's interactive session, on any surface**
+  (Ocean). Restates the 2026-08-12 ruling with surface-neutral wording. A pneu
+  seat is the session the human is actually working in: a terminal TUI, Codex
+  Desktop, and a Claude phone session are all seats, and several clients
+  driving one bound Codex thread are one seat, because the human sees one
+  conversation. "Interactive TUI" in the 2026-08-12 entry was period shorthand
+  for the only surface then in use, not a restriction to terminals; the
+  bound-thread model is that entry's canonical reading. The acceptance test
+  for any harness adaptation is unchanged and is what the ruling is for: mail
+  must reach the session the human is actually in, and a headless replacement
+  session does not count. Headless and oneshot agent processes remain
+  legitimate inside a harness (subagents, teammates, internal automation) but
+  are not user-facing seats. Recorded as principle 1 of PRINCIPLES.md, which
+  is now the ranked constitution; decision.md remains the ledger of individual
+  rulings.
+- 2026-08-18: **Lease recognition over adoption fixes** (Ocean). The
+  2026-08-18 seat-capture incident — the rc-host registration session, a
+  headless process, was adopted onto the project's human Claude seat and
+  processed its mail — and the herdr bare-restore gap are answered by the
+  launcher occupancy work: seat rows that show vacant/active/stale with the
+  owner's location, guarded takeover instead of a dead-end refusal, and
+  refusals that name the holder and the next action
+  (docs/ux/launcher.md §5.4–5.6). Neither the SessionStart adoption path nor
+  the herdr restore template gets a direct fix. rc-host itself is demoted:
+  default off, behind an expert setting, with no launcher-card prominence —
+  in-app response is slow and its current value is low.
 - 2026-08-17: **Shipped surfaces have no zero-cost parking state** (Ocean).
   For anything already in a release, the honest framing is retain / keep
   shipping / stop shipping: "do nothing" is not the null option because it
