@@ -1,24 +1,19 @@
 # PRINCIPLES
 
-> Status: current. Ratified by Ocean on 2026-08-17 and written down here so
-> that later agents inherit the reasoning instead of re-deriving it from
-> conversation. This file is the ranked constitution: when two documents
-> disagree, the higher-ranked principle decides. It records principles, not
-> decisions — individual rulings stay in `decision.md`, which remains the
-> append-only owner ledger.
+> Status: current, rebaselined 2026-08-27. This file is the ranked
+> constitution: when two documents disagree, the higher-ranked principle
+> decides. It records principles, not decisions — individual rulings live in
+> [`docs/adr/`](docs/adr/). This revision supersedes the 2026-08-17
+> constitution; the substantive change is principle 2's corrected seat
+> definition (see ADR 0002).
 
 The list is ranked. Principle 1 outranks principle 2, and so on.
 
-## 1. UX first
+## 1. Native experience first
 
 The product is one experience: **open your harness the way you always do, and
 mail finds you there.** Everything else in this repository — the maildir, the
 leases, the fences, the wake bridges — exists to deliver that sentence.
-
-A **seat** is the human's own interactive session, on whatever surface they
-actually use: a terminal TUI, Codex Desktop, a Claude phone session. The
-surface is not the seat; the session is. Several clients driving one bound
-Codex thread are one seat, because the human sees one conversation.
 
 The acceptance test for any harness adaptation:
 
@@ -27,101 +22,97 @@ The acceptance test for any harness adaptation:
 A mechanism that instead spawns a headless replacement session, drains the
 mailbox there, and reports success has failed this test. It did not adapt the
 harness; it replaced the human's seat with a robot and answered a question
-nobody asked.
+nobody asked. Headless and oneshot agent processes remain perfectly
+legitimate *inside* a harness (subagents, teammates, internal automation);
+they are simply not user-facing seats.
 
-This restates the 2026-08-12 ruling in `decision.md` with surface-neutral
-wording. "Seats are interactive TUIs" was period shorthand: at the time every
-seat happened to be a TUI. The canonical reading is the bound-thread model —
-TUI, Desktop, and phone driving one thread are the same seat — and that
-reading is what governs new work. Headless and oneshot agent processes remain
-perfectly legitimate *inside* a harness (subagents, teammates, internal
-automation); they are simply not user-facing seats.
+## 2. A seat is workspace × harness family; a native session occupies it
 
-## 2. The delivery core and the wake adapters obey different rules
+> **seat = one stable, workspace-scoped address for one harness family.**
 
-These are two layers with two different contracts, and neither layer's rule
-generalizes to the other.
+The canonical key is `(workspace_id, harness_family)`, and in pneu 1.x one
+workspace holds at most one top-level seat per harness family. The native
+session — a Codex thread, a Claude Code session — *occupies* the seat; it is
+not the seat itself. Surfaces (terminal, Desktop, phone) display the session;
+several clients driving one bound thread are one occupied seat.
+
+The distinction carries the product:
+
+- mail is addressed to the seat and remains durable while no session runs;
+- wake is sent to the currently bound native session;
+- focus/jump is sent to one of the surfaces showing that session;
+- a resumed or replacement session may reoccupy the same seat.
+
+Review, implementation, research, and planning are **transient task
+purposes, not identities**. A purpose may appear in message metadata or on
+the switchboard, never in the seat key or a persistent roster. The default
+parallel unit is a change/workspace — one independently mergeable change
+normally gets one worktree, where several harness families may collaborate
+with freely changing roles.
+
+## 3. The delivery core and the wake adapters obey different rules
 
 **Delivery** needs no daemon, no multiplexer, no account, and no network. The
 atomic write of a message file into the recipient's `new/` directory *is* the
-delivery. This is why an offline seat loses nothing and why the core works in
-an ordinary terminal.
+delivery. An offline seat loses nothing; the core works in an ordinary
+terminal.
 
 **Wake** is an adapter layered on top, and it uses whatever the harness
 natively provides — including a daemon. Codex's wake path runs through the
 shared app-server daemon precisely because that is the native mechanism Codex
-offers; that is correct, not a compromise.
+offers; that is correct, not a compromise. "pneu opposes daemons" is a false
+belief: *delivery* does not depend on one.
 
-So "pneu opposes daemons" is a false belief. The correct statement is that
-*delivery* does not depend on one. A wake adapter that needs a daemon, a
-socket, a launchd job, or a plugin is fine as long as the delivery layer
-underneath it still works when that machinery is absent.
+Delivery, notification, wake, seen, acknowledged, and replied are distinct
+states and must never be collapsed into one "sent". The UI never claims "the
+agent is working" merely because delivery succeeded.
 
-## 3. State discipline
+## 4. Thin control-plane boundary
 
-Display surfaces detect and render fresh on every run, and never mutate state.
-The launcher card reads the registry, the mailboxes, the leases, and the
-rc-host record every time it draws; it writes nothing merely by being looked
-at.
+pneu owns local identity, seat addressing, durable mail, occupancy and
+leases, native-session binding, wake/resume policy, surface navigation, and
+host-integration ownership with clean reversal. It does not own model calls,
+the agent loop, transcripts, tool execution or approval, editors or
+terminals, harness-internal subagents, task decomposition, an issue tracker,
+or a mandatory cloud service.
 
-Project state changes only by explicit acts. `.roundtable/agents.yaml` is the
-project's collaboration authorization list — the roster of who this project's
-agents may address and plan around — so it changes when a person decides it
-changes, never as a side effect of a scan.
+The boundary test:
 
-**To-be (accepted design, not yet implemented).** Two roster behaviors are
-agreed but unbuilt; do not read them as descriptions of the current code:
+> If a feature requires pneu to reconstruct or render the agent conversation
+> in order to work, it belongs to the harness or to an adjacent product, not
+> to pneu core.
 
-- *Census at project birth.* The roster should be censused once, at
-  `roundtable-init` time, from the harnesses actually installed on the host.
-  Today `roundtable-init` writes a fixed `claude` / `codex` / `hermes`
-  template regardless of what is installed, which is why Grok Build is never
-  in a new project's roster and has to be added afterwards with the
-  launcher's `a` key.
-- *Worktree inheritance at tree birth.* A new worktree should inherit its
-  parent checkout's roster explicitly. Today there is no pneu mechanism for
-  this: a linked worktree receives whatever `agents.yaml` the branch has
-  committed, by ordinary Git checkout, and `pneu worktree add` then runs
-  `roundtable-init`, which only fills in files that are missing.
-- *`pneu seat add` / `pneu seat rm`.* The explicit roster commands do not
-  exist. The launcher card's `a` key is the only roster write that ships
-  today.
+When a harness provides a maintained native control protocol, use it — never
+replace it with a lowest-common-denominator universal agent protocol
+(ADR 0003).
 
-## 4. Support-claim discipline (应然 vs 实然)
+## 5. State and support-claim discipline
+
+Display surfaces detect and render fresh on every run, and never mutate state
+by being looked at. Project state changes only by explicit acts; ephemeral
+coordination facts (owner, lease revision, binding, adapter health) live in
+the local runtime, never inferred from committed documents.
 
 A support claim requires a live, end-to-end smoke on a real environment.
 Fixtures, unit tests, source inspection, and version-number comparisons are
-evidence for *design*; they are never evidence for *support*. `docs/compatibility.md`
-is the one home for what has actually been exercised and what has not.
+evidence for *design*, never for *support* (应然 vs 实然).
+[`docs/compatibility.md`](docs/compatibility.md) is the one home for what has
+actually been exercised. Two corollaries:
 
-Two corollaries that are easy to get backwards:
-
-- **"We do not use it" does not lower the bar.** It removes the validation
-  path, which *raises* the bar (`decision.md`, 2026-08-17). An adapter the
-  team never exercises cannot accumulate live evidence, so it cannot be
-  promoted, and it should not be shipped as if it were.
-- **A shipped surface has no zero-cost parking state.** For anything already
-  in a release, the honest options are retain, keep shipping, or stop
-  shipping. Doing nothing is not the null option, because doing nothing ships
-  it again.
+- **"We do not use it" does not lower the bar** — it removes the validation
+  path, which *raises* it.
+- **A shipped surface has no zero-cost parking state.** Retain, keep
+  shipping, or stop shipping; doing nothing ships it again.
 
 The same discipline applies to documentation: a statement earns the label
 "current" only after someone checked it against code or a release artifact.
+Support is a capability matrix, never one boolean per harness.
 
-## 5. Brief protocol
+## 6. Project integration is minimal and reversible
 
-Every dispatch brief opens with two things:
-
-1. the constitution line — the UX-first sentence from principle 1, so that the
-   receiving agent starts from the product's purpose rather than from the
-   task's mechanics;
-2. the track's north-star sentence — one sentence describing the state of the
-   world after the track succeeds.
-
-A brief for work on a user-facing surface additionally carries its **target
-screens**: what the user sees, in each state, when the work is done. Surface
-work described only as a list of behaviors reliably produces a correct
-mechanism behind an incoherent screen.
-
-See [`docs/ux/launcher.md`](docs/ux/launcher.md) for the worked example of the
-screen-level format.
+Default project adoption creates only the smallest pneu-owned anchor needed
+for identity and roster. Awareness blocks and collaboration conventions are
+explicit, marker-owned, reversible modules — never a default, never a
+dependency of delivery, binding, or wake (ADR 0004). Host setup previews its
+mutations, tracks ownership, and reverses cleanly; pneu never mutates vendor
+configuration or user repository documents beyond its marked fragments.

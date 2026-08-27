@@ -2,30 +2,44 @@ Postal Network, Entirely Unplugged
 
 # pneu
 
-**pneu** (Project-Native Envelope Utility) is a durable, local messaging and
-coordination layer for coding agents that share a machine. It uses per-project
-maildir delivery as the fact source, fenced seat identities, and
-harness-native wake bridges. Delivery works without a terminal multiplexer,
-daemon, account, or network.
+**pneu** (Project-Native Envelope Utility) is a thin, local-first coordination
+control plane for native coding-agent sessions — a local coordination layer
+for the coding tools you already use. It adds stable addressing, durable mail,
+seat occupancy, native wake, resume, and navigation to Claude Code, Codex,
+Hermes, and Grok Build sessions sharing a machine. It does not ask you to move
+the conversation, editor, terminal, approval UI, or agent loop into pneu.
 
-## The short version
+The defining experience:
+
+> Open the harness the way you normally do; mail finds the real session there.
+
+## The mental model
+
+- A **workspace** is one checkout/worktree (or one registered directory).
+- A **seat** is a stable address: one workspace × one harness family
+  (`codex`, `codex@feature-auth`). Mail is addressed to the seat.
+- A **native session** — a Codex thread, a Claude Code session — *occupies*
+  the seat. Wake goes to the session currently bound to the seat; the mailbox
+  remains when no session is running.
+- A **surface** (terminal pane, Codex Desktop, a phone client) is where you
+  see the session. Several clients showing one thread are one seat.
 
 An agent sends a message with `rt-say`. The command atomically writes a file
-into the recipient's `new/` mailbox; that write is delivery. A Claude Code,
-Codex, Hermes, or Grok Build integration may wake the recipient. The
-recipient acts and runs `rt-ack`, which sends the quiet receipt and archives
-the message to `cur/`.
-Offline seats keep their mail until they return.
+into the recipient seat's `new/` mailbox; **that write is delivery** — it
+works with no daemon, multiplexer, account, or network, and offline seats
+lose nothing. A harness-native integration may then wake the occupying
+session. The recipient acts and runs `rt-ack`, which sends a quiet receipt
+and archives the message to `cur/`.
 
 ```text
 rt-say  ->  project mailbox: new/  ->  agent acts  ->  rt-ack  ->  cur/
               optional native wake
 ```
 
-The `rt-*` names and `RT_*` environment variables are pneu's tool prefix and
-remain stable in 1.3.5. Project state remains under `.roundtable/`, and
-`roundtable.*` wire and registry schema identifiers are unchanged. `roundtable`
-is a silent compatibility alias for the primary `pneu` command.
+The `rt-*` names and `RT_*` environment variables are pneu's stable tool
+prefix. Project state lives under `.roundtable/`, and `roundtable.*` wire and
+registry schema identifiers are unchanged; `roundtable` is a silent
+compatibility alias for the primary `pneu` command.
 
 ## Install
 
@@ -44,13 +58,10 @@ pneu
 The default install prefix is `~/.pneu`. If `~/.roundtable` contains an
 existing install, the installer moves its managed and durable state to
 `~/.pneu`, writes a recovery manifest, and leaves `~/.roundtable` as a
-compatibility symlink. The migration is fail-closed when both prefixes hold
-independent state and is safe to repeat.
-
-The installer owns only its recorded wrappers, links, version trees, and
-managed onboarding assets. Project registries, central mail, runtime state,
-layout locks, migration records, and archival backups are preserved during
-uninstall unless an explicit runtime purge is requested.
+compatibility symlink. The installer owns only its recorded wrappers, links,
+version trees, and managed onboarding assets; project registries, mail,
+runtime state, and backups are preserved during uninstall unless an explicit
+runtime purge is requested. See [`docs/install.md`](docs/install.md).
 
 ## Daily commands
 
@@ -63,168 +74,57 @@ pneu doctor                  diagnose the current project and seat
 pneu worktree add NAME       create a registered tree in ../<repo>-worktree/
 pneu worktree open NAME      open one configured seat in a visible surface
 pneu rc-host enable          enable project-only Claude phone worktree spawn
-pneu rc-host status          inspect this project's phone host
-rt-say AGENT KIND "MESSAGE" durable local or sibling delivery
+rt-say AGENT KIND "MESSAGE"  durable local or sibling delivery
 rt-inbox -f json             inspect waiting mail
 rt-ack MESSAGE_ID            acknowledge and archive handled mail
 ```
 
-The explicit tool forms remain available: `roundtable-init`,
-`roundtable-setup`, `roundtable-smoke`, and `roundtable-uninstall` retain
-their names for script compatibility, as do every `rt-*` command. The
-compatibility alias emits no rename warning.
+On a full TTY, `pneu` presents one compact seat card; arrow keys or digits
+move the selection and a single Enter launches or resumes that seat. Bare
+`pneu` never prompts without a terminal on stdin — it prints usage and exits
+2, so scripts use the explicit subcommands. The explicit tool forms
+(`roundtable-init`, `roundtable-setup`, `roundtable-smoke`,
+`roundtable-uninstall`, and every `rt-*` command) retain their names for
+script compatibility.
 
-On a full TTY, `pneu` presents one compact seat card with the last-used seat
-selected, three status lines, and in-place Claude phone connection controls.
-Arrow keys or digits move the selection, and a single Enter launches that
-seat. Installed harnesses that are not configured for the project can be
-added with `a`; missing executables retain their install guidance. A vacant
-or stale Codex seat with a persisted binding is marked `(bound thread)`, and
-Enter performs a guarded handoff before resuming that exact thread.
-When stdin is a terminal but stderr is not, the card gives way to the
-line-oriented numbered selector. Bare `pneu` does not prompt at all without a
-terminal on stdin: it prints its usage and exits 2, so scripts use the
-explicit subcommands. The full guide appears only with `?` or `pneu guide`.
+## Support boundary
 
-## Architecture
+Harness integrations do **not** have equal depth. Codex, Claude Code, Hermes,
+and Grok Build have working adapters of different strengths; OpenClaw has no
+user-facing seat (lab machinery only). A supported platform/runtime claim
+requires a real end-to-end smoke test — version comparisons and fixtures
+alone never establish support. The one home for what has actually been
+exercised, and for open promotion gates, is
+[`docs/compatibility.md`](docs/compatibility.md). Cross-host transport,
+Linux service management, and multi-auth switching are out of scope for
+1.3.5.
 
-### Durable delivery
+## Learn more
 
-Mail is written atomically into the registry-selected UUID-addressed mailbox.
-The maildir, not a pane, title, topology map, or wake process, is authoritative.
-`rt-inbox -f json` lists logical messages; duplicate ledger/maildir entries
-with one message id are one message. Quiet `ack-*` and `sync-ack` receipts are
-archived directly and never acknowledged again.
+- [`PRINCIPLES.md`](PRINCIPLES.md) — the ranked constitution.
+- [`docs/product-model.md`](docs/product-model.md) — objects, invariants,
+  message states, switchboard UX.
+- [`docs/architecture.md`](docs/architecture.md) — what 1.3.5 actually
+  implements.
+- [`docs/target-architecture.md`](docs/target-architecture.md) and
+  [`docs/harness-adapters.md`](docs/harness-adapters.md) — where the
+  implementation is going.
+- [`docs/roadmap.md`](docs/roadmap.md) — dependency-ordered outcomes.
+- [`docs/adr/`](docs/adr/) — accepted decisions.
 
-### Native wake
+## History and provenance
 
-Wake-up is an adapter layered over delivery:
-
-- Claude Code uses asynchronous SessionStart/Stop lifecycle hooks.
-- Codex uses its app-server and Unix-socket bridge.
-- Hermes uses its session-start plugin.
-- Grok Build runs its native interactive TUI. A bare `rt-grok` launch seeds one
-  visible activation turn that creates a session-scoped persistent mailbox
-  monitor; resumes and launches with explicit native arguments require one
-  manual re-arm turn. `rt-doctor` reports monitor evidence as an advisory.
-  The packaged ACP supervisor is an internal lab tool and is never the seat.
-
-OpenClaw has no user-facing pneu seat. Its isolated Gateway adapter remains
-packaged only as directly invocable internal lab machinery; `rt-openclaw`
-refuses instead of selecting it.
-
-Project-anchored `rt-claude` launches enable Remote Control as
-`<agent>@<project-name>` by default; pass `--remote-control` to choose the name
-or set `RT_CLAUDE_NO_RC=1` to opt out.
-
-### Capability binding
-
-A Codex tool process is spawned by the shared app-server, not by the launcher,
-so ambient `RT_*` variables never reach it. Identity is bound out of band
-instead: the launcher records a private seat capability, the wake bridge
-associates the native thread with it, and every fenced tool resolves
-`CODEX_THREAD_ID` -> exact thread binding -> live lease -> capability record,
-revalidating the whole chain on each call. The bound thread is the seat's
-control entry, so any client driving that exact thread operates the same seat
-under the same fences; a `/btw` side child, a fork, or an unrelated thread
-resolves to nothing. Surface capability stores only explicit addresses — a
-pane, a target, an endpoint — never an environment or token, and `rt-surface`
-drives that exact pane. pneu never fabricates `HERDR_ENV=1` in the daemon.
-
-`pneu setup apply` also joins Codex Desktop to the pneu daemon through the
-supported upstream switch, so one host owns every thread and the writer lock is
-never contested. `rt-doctor` reports the host census, whether Desktop actually
-joined, and the daemon's file-descriptor headroom. The daemon's connection
-domain is machine-wide: seat isolation is pneu's own layer of leases, fences,
-and bindings, not something the app-server enforces. See
-[`docs/compatibility.md`](docs/compatibility.md) for the open promotion gate.
-
-cmux is optional. The core send, receive, acknowledge, recovery, and doctor
-paths work in ordinary terminals and do not inject keyboard input.
-
-An armed Claude or Hermes inbox watcher is long-lived: while `new/` is empty it
-renews its fenced lease silently and does not emit a heartbeat wake or create a
-model turn. The watcher wakes only when mail appears; its 30-second health TTL
-is renewed on a tighter cadence so a dead watcher becomes stale promptly.
-For dispatches or questions that need an answer, `rt-say --expect-reply 30m ...`
-adds a durable one-shot sender alarm: a quiet acknowledgement clears it, while
-an unanswered deadline wakes the sender once through the existing watcher.
-
-### Managed worktrees and project phone access
-
-`pneu worktree add NAME` creates
-`<repo-parent>/<repo-name>-worktree/NAME` by default. The container is created
-on demand and holds only pneu-created linked trees; the main checkout never
-migrates into it. `--path` remains the explicit escape hatch.
-
-`pneu worktree open NAME [--seat AGENT] [--surface herdr|tmux|print]` resolves
-only a registered project in the current Git-derived group and starts its pneu
-seat launcher from that worktree. A sole configured seat is automatic; a
-multi-seat project requires `--seat`. Surface selection is explicit flag,
-`RT_SURFACE`, ambient Herdr (`HERDR_ENV=1`), ambient or attached-client tmux,
-then a print-only fallback. Successful Herdr/tmux launches write an advisory
-host-runtime surface reference only after the selected seat lease becomes
-active; it is navigation metadata, never ownership or liveness evidence. The
-default activation wait is bounded. `--no-wait` returns after spawning without
-claiming activation success or writing a surface record.
-
-`pneu rc-host enable` is an expert, project-anchored opt-in for Claude mobile
-or web worktree spawn. It first requires an already accepted Claude workspace
-trust decision, then owns one per-project LaunchAgent and only that project's
-untracked `.claude/settings.local.json` WorktreeCreate/WorktreeRemove hooks.
-It never installs those hooks globally. Once enabled, phone access is a
-project trait, so a native `claude rc` started in that project sees the same
-hooks; projects that were never enabled keep native behavior. Disable it with
-`pneu rc-host disable` before removing Claude onboarding or uninstalling pneu.
-
-The create hook must return exactly one absolute registered worktree path;
-empty output is an error. Claude does not process `.worktreeinclude` while a
-custom WorktreeCreate hook is active, so copy or bootstrap any extra files in
-another explicit workflow. Phone-spawned SessionStart events are adopted only
-inside exact registered projects and never replace another live lease.
-
-### Installation and migration
-
-Pneu installs versioned command trees under `~/.pneu`, with `current` selecting
-the active version and stable links under `~/.local/bin`. On a legacy install,
-the installer moves `versions`, the project registry, central `mail`, runtime,
-`backups`, `migration-records`, and related layout state as one prefix move.
-The old prefix symlink keeps already-deployed hook, plist, and permission
-paths valid. Re-running harness setup rewrites pneu-owned paths to `~/.pneu`.
-
-## Compatibility and limitations
-
-The repository records validation evidence and open promotion gates in
-[`docs/compatibility.md`](docs/compatibility.md). A supported platform/runtime
-claim requires a real end-to-end smoke test; version-number comparisons and
-fixtures alone do not establish support. Cross-host SSH, Linux service
-management, and multi-auth switching remain out of scope for 1.3.5. The
-project phone-host path remains a release candidate until its required live
-phone-side smoke passes; fixtures and CLI inspection alone are not a support
-claim.
-
-## History
-
-The working name was **roundtable** through `0.3.0-dev`. After a four-round,
-collision-checked search across western creative, CJK imagery, deep Chinese,
-and Wade–Giles military/pastoral/commercial directions, Ocean selected
-**pneu**: Paris pneumatique slang where *un pneu* is the message itself. The
-technical backronym is Project-Native Envelope Utility; the public tagline is
-Postal Network, Entirely Unplugged. The 0.3.0 content shipped inside 1.0.0
-rather than as a public 0.3.0 release.
-
-The Build Week phase and its attribution remain documented exactly in
+The working name was **roundtable**; Ocean selected **pneu** — Paris
+pneumatique slang where *un pneu* is the message itself. The Build Week phase
+and its attribution are documented exactly in
 [`docs/PROVENANCE.md`](docs/PROVENANCE.md) and
-[`docs/CREDITS.md`](docs/CREDITS.md). The product
-phase is developed on the product worktree with the human product lead as
-final decision-maker.
+[`docs/CREDITS.md`](docs/CREDITS.md); the `v0.1.8` tag and its release assets
+are immutable.
 
 ## Development
 
-Development needs any CPython 3.11–3.14 environment with the dev
-dependencies installed (`pip install -r requirements-dev.txt`); pneu does
-not require a specific environment manager. Run the checks from that
-environment:
+Any CPython 3.11–3.14 environment with `pip install -r requirements-dev.txt`.
+Checks:
 
 ```bash
 pytest -q
@@ -232,24 +132,6 @@ python -m compileall -q bin pneu_packaging scripts tests
 python scripts/check_public_safety.py
 ```
 
-(With a conda/mamba-managed environment, prefix each command with your
-runner, for example `mamba run -n <env> pytest -q`.)
-
-The suite is parallel-safe on a host that is not already saturated —
-the load qualifier is part of the verdict, not a hedge. `pytest -q -n auto`
-distributes it across cores and is the faster local loop; the serial form
-stays the default because a single failure is easier to read. The measured
-concurrency envelope is recorded in
-[`handoff/d15a-xdist-verdict.md`](handoff/d15a-xdist-verdict.md).
-
-For the source-install path, run from the same environment:
-
-```bash
-./scripts/install.sh
-```
-
-See [`docs/release.md`](docs/release.md) for the deterministic artifact
-workflow and [`docs/install.md`](docs/install.md) for ownership and migration
-details. [`PRINCIPLES.md`](PRINCIPLES.md) is the ranked constitution that
-governs design decisions here, and [`docs/ux/launcher.md`](docs/ux/launcher.md)
-specifies the `pneu` entry surface screen by screen.
+`pytest -q -n auto` is the faster parallel loop on a non-saturated host; the
+serial form stays the default. See [`docs/release.md`](docs/release.md) for
+the deterministic artifact workflow.
