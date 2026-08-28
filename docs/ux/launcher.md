@@ -479,12 +479,12 @@ configuration: the file is in the generated `.roundtable/.gitignore`.
 
 ## 5. To-be — accepted design
 
-§5.1–5.3 are not implemented. §5.4–5.6 were ruled 2026-08-18 and built
-2026-08-28 (roadmap Phase 1); their as-built rendering is in §1.4, §1.7,
-§1.9, §2, and §3, and the text below remains the decision of record.
-
-These are design deltas awaiting scheduling. Nothing in this section
-describes 1.3.5 behavior, and this track shipped no change under `bin/`.
+Two groups. §5.1–5.3 are design deltas awaiting scheduling: nothing in
+them describes shipped behavior, and no change under `bin/` implements them.
+§5.4–5.6 were ruled 2026-08-18 and built 2026-08-28 in roadmap Phase 1 under
+`bin/` (`pneu`, `_rtlauncher.py`, `_rtruntime.py`, `_rtsurface.py`,
+`rt-worktree`); their as-built rendering is in §1.4, §1.7, §1.9, §2, and §3,
+and their text below remains the decision of record.
 
 ### 5.1 Census the roster at project birth
 
