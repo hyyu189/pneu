@@ -1407,3 +1407,317 @@ def test_unavailable_detail_distinguishes_broken_from_absent(tmp_path, monkeypat
     present = roundtable.harness_unavailable_detail("hermes", "executable not found")
     assert "missing or not executable" in present
     assert str(broken) in present
+
+
+# ---------------------------------------------------------------------------
+# Phase 1 occupancy: the card renders holders honestly, Enter on an active
+# seat is a choice, and `w` keeps the listing when warnings are present.
+# ---------------------------------------------------------------------------
+
+import subprocess as _subprocess
+
+import _rtlauncher as _launcher
+import _rtruntime as _runtime
+
+
+@pytest.fixture
+def occupancy_runtime(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(_launcher, "iter_states", lambda: [])
+    monkeypatch.setattr(_launcher, "_probe_owner_process", lambda _pid: {})
+    monkeypatch.setattr(roundtable, "_active_worktree_count", lambda _root: 0)
+    monkeypatch.setattr(
+        roundtable,
+        "_unread_by_seat",
+        lambda _root, seats: [(agent, 0) for _harness, agent in seats],
+    )
+    monkeypatch.setattr(roundtable, "_phone_access_on", lambda _root: False)
+    return runtime
+
+
+@pytest.fixture
+def live_holder():
+    child = _subprocess.Popen(["/bin/sleep", "60"])
+    try:
+        yield child
+    finally:
+        child.kill()
+        child.wait()
+
+
+def _two_seat_project(tmp_path, isolated_registry):
+    project = write_project(
+        tmp_path / "project",
+        {
+            "claude": ("claude-code", ["claude"]),
+            "codex": ("codex", ["codex"]),
+        },
+    )
+    register_project(project, isolated_registry)
+    return project
+
+
+def test_pty_card_rows_render_vacant_active_and_stale_honestly(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    active = _runtime.claim(project, "claude", "claude", owner_pid=live_holder.pid)
+    dead = _subprocess.Popen(["/bin/sleep", "60"])
+    _runtime.claim(project, "codex", "codex", owner_pid=dead.pid)
+    dead.kill()
+    dead.wait()
+    since = _launcher._render_since(active.record["claimedAt"])
+
+    try:
+        selected, rendered = run_with_pty(
+            lambda stdin, stderr: roundtable.choose_seat_card(
+                project, stdin=stdin, stderr=stderr
+            ),
+            b"q",
+        )
+    finally:
+        assert _runtime.release(active)
+
+    assert selected is None
+    lines = [line.rstrip() for line in rendered.splitlines()]
+    claude_row = next(line for line in lines if "Claude Code — claude" in line)
+    codex_row = next(line for line in lines if "Codex — codex" in line)
+    assert claude_row.endswith(f"active — since {since} · wake unhealthy")
+    assert codex_row.endswith(f"stale — owner pid {dead.pid} is not running")
+    assert "(bound thread)" not in rendered
+
+
+def test_pty_card_bound_thread_suffix_and_vacant_column_coexist(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, monkeypatch
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    (occupancy_runtime / "rt-codex-wake-state.json").write_text(
+        json.dumps(
+            {
+                "schema": roundtable.CODEX_WAKE_STATE_SCHEMA,
+                "bindings": {
+                    str(project): {
+                        "agent": "codex",
+                        "project": str(project),
+                        "threadId": "019ff37e-5071-7300-bdb4-bedd1537b0ad",
+                    }
+                },
+                "projects": {},
+            }
+        )
+    )
+    selection = {}
+
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project, stdin=stdin, stderr=stderr, selection_meta=selection
+        ),
+        b"\n",
+    )
+
+    assert selected == ("codex", "codex")
+    assert selection == {"resumeThreadId": "019ff37e-5071-7300-bdb4-bedd1537b0ad"}
+    row = next(line for line in rendered.splitlines() if "Codex — codex" in line)
+    assert "Codex — codex (bound thread)" in row
+    assert row.rstrip().endswith("vacant")
+
+
+def test_pty_enter_on_active_seat_offers_choice_and_cancel_writes_nothing(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    token = _runtime.claim(project, "claude", "claude", owner_pid=live_holder.pid)
+    lease_path = _runtime.seat_paths(project, "claude").lease
+    before = lease_path.read_bytes()
+    selection = {}
+
+    try:
+        selected, rendered = run_with_pty(
+            lambda stdin, stderr: roundtable.choose_seat_card(
+                project, stdin=stdin, stderr=stderr, selection_meta=selection
+            ),
+            b"\nq" + b"q",
+        )
+        after = lease_path.read_bytes()
+    finally:
+        assert _runtime.release(token)
+
+    assert selected is None
+    assert selection == {}
+    assert "Claude Code — claude is active (since " in rendered
+    assert "  j  jump to that surface" not in rendered  # no surface recorded
+    assert "  t  take over the seat  (the current session loses it)" in rendered
+    assert "  q  cancel" in rendered
+    assert after == before
+    assert not (project / ".roundtable" / "launcher.json").exists()
+    # cancelling returns to the card with the row still active
+    assert rendered.count("Claude Code — claude ") >= 2
+
+
+def test_pty_jump_is_navigation_only(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder, monkeypatch
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    token = _runtime.claim(project, "codex", "codex", owner_pid=live_holder.pid)
+    _runtime.record_seat_capability(
+        project,
+        "codex",
+        "codex",
+        session_id=token.session_id,
+        revision=token.revision,
+        surface={"kind": "herdr", "pane": "w1:p3"},
+    )
+    lease_path = _runtime.seat_paths(project, "codex").lease
+    before = lease_path.read_bytes()
+    jumps = []
+    monkeypatch.setattr(_launcher, "probe_capability_surface", lambda _surface: None)
+    monkeypatch.setattr(
+        roundtable,
+        "jump_to_seat",
+        lambda occupancy: jumps.append(occupancy.surface) or "jumped to pane w1:p3",
+    )
+
+    try:
+        selected, rendered = run_with_pty(
+            lambda stdin, stderr: roundtable.choose_seat_card(
+                project, stdin=stdin, stderr=stderr
+            ),
+            b"2\njq",
+        )
+        after = lease_path.read_bytes()
+    finally:
+        assert _runtime.release(token)
+
+    assert selected is None
+    assert jumps == [{"kind": "herdr", "pane": "w1:p3"}]
+    assert "Codex — codex is active (pane w1:p3)" in rendered
+    assert "  j  jump to that surface" in rendered
+    assert "jumped to pane w1:p3" in rendered
+    assert after == before
+
+
+def test_pty_takeover_replaces_holder_under_the_card_pid_then_launches(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder, monkeypatch
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    old = _runtime.claim(project, "claude", "claude", owner_pid=live_holder.pid)
+    monkeypatch.setattr(roundtable, "choose_project", lambda **_kwargs: project)
+    monkeypatch.setattr(roundtable, "ensure_harness_setup", lambda *_a, **_k: None)
+    exec_calls = []
+    environ = {}
+
+    result, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.onboard(
+            cwd=project,
+            home=tmp_path / "home",
+            stdin=stdin,
+            stderr=stderr,
+            environ=environ,
+            exec_runner=lambda path, argv: exec_calls.append((path, argv)) or 0,
+            chdir_runner=lambda _root: None,
+        ),
+        b"\nt",
+    )
+
+    target = fake_commands / "rt-claude"
+    assert result == 0
+    assert exec_calls == [(str(target), [str(target)])]
+    assert environ["RT_FROM"] == "claude"
+    assert "took over seat 'claude' from a Claude Code session" in rendered
+    inspection = _runtime.inspect_seat(project, "claude")
+    assert inspection.token.owner_pid == os.getpid()
+    assert inspection.token.session_id != old.session_id
+    assert _runtime.release(old) is False
+    assert _runtime.release(inspection.token)
+
+
+def test_pty_takeover_refusal_returns_to_the_card(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder, monkeypatch
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    token = _runtime.claim(project, "claude", "claude", owner_pid=live_holder.pid)
+    monkeypatch.setattr(roundtable, "choose_project", lambda **_kwargs: project)
+    monkeypatch.setattr(roundtable, "ensure_harness_setup", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        roundtable,
+        "take_over_seat",
+        lambda _root, _occupancy: (False, "seat 'claude' changed under you; nothing was taken over"),
+    )
+    exec_calls = []
+
+    try:
+        result, rendered = run_with_pty(
+            lambda stdin, stderr: roundtable.onboard(
+                cwd=project,
+                home=tmp_path / "home",
+                stdin=stdin,
+                stderr=stderr,
+                environ={},
+                exec_runner=lambda path, argv: exec_calls.append((path, argv)) or 0,
+                chdir_runner=lambda _root: None,
+            ),
+            b"\ntq",
+        )
+    finally:
+        assert _runtime.release(token)
+
+    assert result == 0
+    assert exec_calls == []
+    assert "seat 'claude' changed under you; nothing was taken over" in rendered
+    assert not (project / ".roundtable" / "launcher.json").exists()
+
+
+def test_pty_enter_on_stale_seat_proceeds_without_a_panel(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    dead = _subprocess.Popen(["/bin/sleep", "60"])
+    _runtime.claim(project, "claude", "claude", owner_pid=dead.pid)
+    dead.kill()
+    dead.wait()
+    selection = {}
+
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project, stdin=stdin, stderr=stderr, selection_meta=selection
+        ),
+        b"\n",
+    )
+
+    assert selected == ("claude", "claude")
+    assert selection == {}
+    assert "take over the seat" not in rendered
+    assert f"stale — owner pid {dead.pid} is not running" in rendered
+
+
+def test_pty_worktree_screen_keeps_the_listing_alongside_warnings(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime
+):
+    project = write_project(tmp_path / "project")
+    register_project(project, isolated_registry)
+    tool = fake_commands / "rt-worktree"
+    tool.write_text(
+        "#!/bin/sh\n"
+        "echo 'rt-worktree: warning: registry entry acme-old is unavailable' >&2\n"
+        "echo 'derived group key: g1'\n"
+        "echo '/tmp/acme-feature branch=feature uuid=u1 seats=none'\n"
+    )
+    tool.chmod(0o755)
+
+    selected, rendered = run_with_pty(
+        lambda stdin, stderr: roundtable.choose_seat_card(
+            project, stdin=stdin, stderr=stderr
+        ),
+        b"w\nq",
+    )
+
+    assert selected is None
+    assert "derived group key: g1" in rendered
+    assert "/tmp/acme-feature branch=feature" in rendered
+    assert "warning: registry entry acme-old is unavailable" in rendered
+    assert rendered.index("derived group key: g1") < rendered.index("warning: registry")
+    assert "Press Enter to return." in rendered

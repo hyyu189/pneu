@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -476,36 +477,83 @@ def test_launch_preserves_explicit_rt_from_without_lease_context(
     assert "ignoring Roundtable seat environment" not in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("status", "expected"),
-    [
-        ("active_healthy", "active"),
-        ("active_unhealthy", "unhealthy"),
-    ],
-)
-def test_occupied_seat_is_a_clear_selection_error(
-    tmp_path, monkeypatch, status, expected
+@pytest.fixture
+def occupancy_runtime(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    runtime.mkdir(mode=0o700)
+    monkeypatch.setenv("RT_RUNTIME_DIR", str(runtime))
+    monkeypatch.setenv("RT_CODEX_RUNTIME_DIR", str(runtime))
+    monkeypatch.setattr(_rtlauncher, "iter_states", lambda: [])
+    monkeypatch.setattr(_rtlauncher, "_probe_owner_process", lambda _pid: {})
+    return runtime
+
+
+@pytest.fixture
+def live_holder():
+    child = subprocess.Popen(["/bin/sleep", "60"])
+    try:
+        yield child
+    finally:
+        child.kill()
+        child.wait()
+
+
+def test_occupied_seat_refusal_names_holder_and_next_action(
+    tmp_path, occupancy_runtime, live_holder
 ):
-    project = (tmp_path / "project").resolve()
+    project = kit.write_project(
+        tmp_path / "project",
+        [kit.Seat("claude", "claude-code", instances=("claude", "claude-build"))],
+    )
+    token = _rtruntime.claim(project, "claude-build", "claude", owner_pid=live_holder.pid)
+    try:
+        with pytest.raises(_rtlauncher.SelectionError) as captured:
+            _rtlauncher.claim_launch_seat(project, "claude", "claude")
+    finally:
+        assert _rtruntime.release(token)
 
-    class Occupied(RuntimeError):
-        def __init__(self):
-            self.inspection = SimpleNamespace(
-                status=status,
-                detail=f"seat is {status}",
-                token=SimpleNamespace(agent_id="claude-build"),
-            )
+    lines = str(captured.value).splitlines()
+    since = _rtlauncher._render_since(token.record["claimedAt"])
+    # who holds it (the sibling seat of the same harness), and what was asked
+    assert lines[0] == (
+        f"rt-claude: seat 'claude-build' in {project} is held by a Claude Code "
+        f"session started {since} (wake unhealthy); requested seat 'claude'."
+    )
+    # what to do next
+    assert lines[1] == (
+        "  Return to it there, or run `pneu` and take the seat over from the card."
+    )
+    # the forensics survive as the trailing detail, not the whole message
+    assert lines[2] == (
+        f"  (owner pid {live_holder.pid} is running; wake adapter has no heartbeat)"
+    )
+    assert "tty=" not in str(captured.value)
+    assert "tmux=" not in str(captured.value)
 
-    def occupied(*_args, **_kwargs):
-        raise Occupied
 
-    monkeypatch.setattr(_rtlauncher, "SeatOccupied", Occupied)
-    monkeypatch.setattr(_rtlauncher, "claim", occupied)
+def test_occupied_seat_refusal_and_card_share_one_holder_reading(
+    tmp_path, occupancy_runtime, live_holder, monkeypatch
+):
+    project = kit.write_project(tmp_path / "project", [kit.CODEX])
+    token = _rtruntime.claim(project, "codex", "codex", owner_pid=live_holder.pid)
+    _rtruntime.record_seat_capability(
+        project,
+        "codex",
+        "codex",
+        session_id=token.session_id,
+        revision=token.revision,
+        surface={"kind": "tmux", "target": "build:1.0"},
+    )
+    try:
+        occupancy = _rtlauncher.inspect_seat_occupancy(project, "codex", "codex")
+        with pytest.raises(_rtlauncher.SelectionError) as captured:
+            _rtlauncher.claim_launch_seat(project, "codex", "codex")
+    finally:
+        assert _rtruntime.release(token)
 
-    with pytest.raises(_rtlauncher.SelectionError, match=expected) as captured:
-        _rtlauncher.claim_launch_seat(project, "claude", "claude")
-    assert "seat 'claude-build'" in str(captured.value)
-    assert "requested seat 'claude'" in str(captured.value)
+    assert occupancy.row_text().startswith("active — tmux build:1.0")
+    assert occupancy.holder_phrase() in str(captured.value).splitlines()[0]
+    assert "a Codex session in tmux build:1.0" in str(captured.value)
 
 
 def test_owner_process_location_formats_tty_and_tmux_ancestor():
@@ -533,35 +581,6 @@ def test_owner_process_location_formatter_omits_every_failed_probe():
         process_output=None,
         tmux_output=None,
     ) == ""
-
-
-def test_occupied_seat_omits_process_location_when_probes_fail(
-    tmp_path, monkeypatch
-):
-    project = (tmp_path / "project").resolve()
-
-    class Occupied(RuntimeError):
-        def __init__(self):
-            self.inspection = SimpleNamespace(
-                status="active_healthy",
-                detail="owner pid 430 is running",
-                token=SimpleNamespace(agent_id="codex", owner_pid=430),
-            )
-
-    monkeypatch.setattr(_rtlauncher, "SeatOccupied", Occupied)
-    monkeypatch.setattr(
-        _rtlauncher,
-        "claim",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(Occupied()),
-    )
-    monkeypatch.setattr(_rtlauncher, "_owner_process_location", lambda _pid: "")
-
-    with pytest.raises(_rtlauncher.SelectionError) as captured:
-        _rtlauncher.claim_launch_seat(project, "codex", "codex")
-
-    assert str(captured.value).endswith("owner pid 430 is running")
-    assert "tty=" not in str(captured.value)
-    assert "tmux=" not in str(captured.value)
 
 
 def test_explicit_identity_must_belong_to_selected_project_and_harness(

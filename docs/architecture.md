@@ -78,9 +78,16 @@ delivery; fail closed on unsupported harness protocol behavior.
 `bin/pneu` (with `roundtable` as byte-identical alias) is the project-first
 selector: a pure-view seat card that re-reads registry, mailboxes, leases,
 and the rc-host record on every redraw and mutates nothing by being looked
-at. `pneu worktree add/open` manages registered linked trees under
-`<repo-parent>/<repo-name>-worktree/`, with surface backends (Herdr, tmux,
-print) writing only advisory navigation records after a lease is active.
+at. Each seat row carries its occupancy (vacant / active with the holder's
+locus / stale / ambiguous) from one resolver in `_rtlauncher.py` that the
+direct `rt-<harness>` and `pneu worktree open` refusals share; Enter on an
+active seat offers jump (surface navigation only), a guarded takeover (a
+fenced compare-and-replace of exactly the holder's lease under the card's own
+pid, which the exec'd launcher re-enters), or cancel. The screen-level
+contract is [`ux/launcher.md`](ux/launcher.md). `pneu worktree add/open`
+manages registered linked trees under `<repo-parent>/<repo-name>-worktree/`,
+with surface backends (Herdr, tmux, print) writing only advisory navigation
+records after a lease is active.
 `pneu rc-host enable` is the expert, project-anchored opt-in for Claude
 phone/web worktree spawn (per-project LaunchAgent plus that project's
 untracked `.claude/settings.local.json` hooks — never global). `rt-doctor`

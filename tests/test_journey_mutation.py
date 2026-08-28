@@ -41,11 +41,11 @@ MUTATIONS = (
         filename="rt-worktree",
         needle=(
             '    if selection.kind != "print":\n'
-            "        _require_launchable_seat(target, agent_id)"
+            "        _require_launchable_seat(target, agent_id, harness, name)"
         ),
         replacement=(
             "    if True:\n"
-            "        _require_launchable_seat(target, agent_id)"
+            "        _require_launchable_seat(target, agent_id, harness, name)"
         ),
         selector="print_fallback_prints_over_an_active_seat",
     ),

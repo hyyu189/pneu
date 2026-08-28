@@ -339,7 +339,9 @@ def test_open_journey_refuses_an_already_active_seat_before_spawning(
             repository,
         )
         assert code == 2
-        assert "seat 'codex' is already active" in stderr
+        assert "seat 'codex'" in stderr and "is held by a Codex session" in stderr
+        assert "run `pneu`, choose " in stderr
+        assert "take the seat over from the card" in stderr
         assert not (tmp_path / "launcher.pid").exists()
         assert not seat_paths(target, "codex", root=runtime).surface.exists()
     finally:
