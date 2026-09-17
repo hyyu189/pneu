@@ -326,17 +326,93 @@ def test_takeover_fails_closed_when_the_seat_changed_under_the_fence(
     assert inspect_seat(project, "claude").status == "vacant"
 
 
+@pytest.mark.parametrize("mismatched_field", ["session_id", "revision"])
 def test_claim_replace_fence_rejects_a_mismatched_generation(
-    runtime, project, holder
+    runtime, project, holder, mismatched_field
 ):
     token = claim(project, "codex", "codex", owner_pid=holder.pid)
+    fence = {"session_id": token.session_id, "revision": token.revision}
+    fence[mismatched_field] = "wrong-generation"
 
-    with pytest.raises(_rtruntime.SeatOccupied):
-        claim(project, "codex", "codex", replace_fence=(token.session_id, "stale-rev"))
+    with pytest.raises(_rtruntime.FenceRejected):
+        claim(
+            project,
+            "codex",
+            "codex",
+            replace_fence=(fence["session_id"], fence["revision"]),
+        )
     with pytest.raises(_rtruntime.RuntimeStateError):
         claim(project, "codex", "codex", replace_fence=("only-one",))  # type: ignore[arg-type]
     assert inspect_seat(project, "codex").token.session_id == token.session_id
     assert release(token)
+
+
+def test_old_takeover_fence_cannot_replace_a_new_stale_generation(
+    runtime, project, holder
+):
+    old = claim(project, "codex", "codex", owner_pid=holder.pid)
+    assert release(old)
+    replacement = claim(project, "codex", "codex", owner_pid=holder.pid)
+    holder.kill()
+    holder.wait()
+    assert inspect_seat(project, "codex").status == "stale"
+    lease_path = _rtruntime.seat_paths(project, "codex").lease
+    before = lease_path.read_bytes()
+
+    with pytest.raises(_rtruntime.FenceRejected):
+        claim(
+            project,
+            "codex",
+            "codex",
+            replace_fence=(old.session_id, old.revision),
+        )
+
+    assert lease_path.read_bytes() == before
+    assert inspect_seat(project, "codex").token == replacement
+
+
+@pytest.mark.parametrize("mismatched_field", ["session_id", "revision"])
+def test_stale_takeover_requires_both_fence_fields_to_match(
+    runtime, project, holder, mismatched_field
+):
+    token = claim(project, "codex", "codex", owner_pid=holder.pid)
+    holder.kill()
+    holder.wait()
+    lease_path = _rtruntime.seat_paths(project, "codex").lease
+    before = lease_path.read_bytes()
+    fence = {"session_id": token.session_id, "revision": token.revision}
+    fence[mismatched_field] = "wrong-generation"
+
+    with pytest.raises(_rtruntime.FenceRejected):
+        claim(
+            project,
+            "codex",
+            "codex",
+            replace_fence=(fence["session_id"], fence["revision"]),
+        )
+
+    assert lease_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("guarded", [False, True])
+def test_stale_generation_can_be_replaced_without_a_fence_or_with_its_exact_fence(
+    runtime, project, holder, guarded
+):
+    token = claim(project, "codex", "codex", owner_pid=holder.pid)
+    holder.kill()
+    holder.wait()
+
+    replacement = claim(
+        project,
+        "codex",
+        "codex",
+        replace_fence=(token.session_id, token.revision) if guarded else None,
+    )
+
+    assert replacement.owner_pid == os.getpid()
+    assert replacement.session_id != token.session_id
+    assert release(token) is False
+    assert release(replacement)
 
 
 def fake_runner(calls, outputs=None):

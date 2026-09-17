@@ -765,7 +765,7 @@ def _require_launchable_seat(
         verb = "Resume it there" if occupancy.phone else "Return to it there"
         raise WorktreeError(
             occupied_seat_refusal(
-                "rt-worktree",
+                None,
                 project,
                 occupancy,
                 next_action=(

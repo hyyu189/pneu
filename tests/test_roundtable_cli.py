@@ -1600,6 +1600,151 @@ def test_pty_jump_is_navigation_only(
     assert after == before
 
 
+@pytest.mark.parametrize("target_stale", [False, True])
+@pytest.mark.parametrize("holder_configured", [False, True])
+def test_pty_same_harness_holder_blocks_another_row_without_launching(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder,
+    monkeypatch, target_stale, holder_configured,
+):
+    project = write_project(
+        tmp_path / "project",
+        {"claude": ("claude-code", ["claude", "claude-build"] if holder_configured else ["claude"])},
+    )
+    register_project(project, isolated_registry)
+    if target_stale:
+        dead = _subprocess.Popen(["/bin/sleep", "60"])
+        _runtime.claim(project, "claude", "claude", owner_pid=dead.pid)
+        dead.kill()
+        dead.wait()
+    token = _runtime.claim(project, "claude-build", "claude", owner_pid=live_holder.pid)
+    _runtime.record_seat_capability(
+        project, "claude-build", "claude",
+        session_id=token.session_id, revision=token.revision,
+        surface={"kind": "herdr", "pane": "w1:p3"},
+    )
+    lease_path = _runtime.seat_paths(project, "claude-build").lease
+    before = lease_path.read_bytes()
+    target_path = _runtime.seat_paths(project, "claude").lease
+    target_before = target_path.read_bytes() if target_stale else None
+    monkeypatch.setattr(_launcher, "probe_capability_surface", lambda _surface: None)
+    monkeypatch.setattr(roundtable, "choose_project", lambda **_kwargs: project)
+    monkeypatch.setattr(roundtable, "ensure_harness_setup", lambda *_a, **_k: None)
+    jumps = []
+    monkeypatch.setattr(
+        roundtable, "jump_to_seat",
+        lambda occupancy: jumps.append(occupancy.surface) or "jumped to pane w1:p3",
+    )
+    exec_calls = []
+
+    try:
+        with pytest.raises(_runtime.SeatOccupied) as blocked:
+            _runtime.claim(project, "claude", "claude")
+        assert blocked.value.inspection.token.agent_id == "claude-build"
+        result, rendered = run_with_pty(
+            lambda stdin, stderr: roundtable.onboard(
+                cwd=project, home=tmp_path / "home", stdin=stdin, stderr=stderr,
+                environ={},
+                exec_runner=lambda path, argv: exec_calls.append((path, argv)) or 0,
+                chdir_runner=lambda _root: None,
+            ),
+            b"1\ntj\ntqq",
+        )
+        assert lease_path.read_bytes() == before
+        assert (target_path.read_bytes() if target_path.exists() else None) == target_before
+    finally:
+        assert _runtime.release(token)
+
+    assert result == 0
+    assert exec_calls == []
+    assert jumps == [{"kind": "herdr", "pane": "w1:p3"}]
+    row = next(line for line in rendered.splitlines() if "Claude Code — claude " in line)
+    assert "active — held by seat 'claude-build' — pane w1:p3" in row
+    assert "Claude Code — claude is blocked by seat 'claude-build'" in rendered
+    assert "Only seat 'claude-build' can take over this session." in rendered
+    assert "  t  take over the seat" not in rendered
+    assert "  q  cancel" in rendered
+    assert not (project / ".roundtable" / "launcher.json").exists()
+
+
+def test_pty_same_harness_ambiguous_holder_keeps_card_open(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder, monkeypatch,
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    token = _runtime.claim(project, "claude-build", "claude", owner_pid=live_holder.pid)
+    original = _runtime._pid_state
+    monkeypatch.setattr(
+        _runtime, "_pid_state",
+        lambda pid: "ambiguous" if pid == live_holder.pid else original(pid),
+    )
+    lease_path = _runtime.seat_paths(project, "claude-build").lease
+    before = lease_path.read_bytes()
+    try:
+        with pytest.raises(_runtime.SeatAmbiguous):
+            _runtime.claim(project, "claude", "claude")
+        selected, rendered = run_with_pty(
+            lambda stdin, stderr: roundtable.choose_seat_card(
+                project, stdin=stdin, stderr=stderr,
+            ),
+            b"\nq",
+        )
+        assert lease_path.read_bytes() == before
+    finally:
+        monkeypatch.setattr(_runtime, "_pid_state", original)
+        assert _runtime.release(token)
+
+    assert selected is None
+    assert "ambiguous — held by seat 'claude-build'" in rendered
+    assert "cannot launch" in rendered
+    assert "take over the seat" not in rendered
+
+
+def test_card_ignores_stale_same_harness_and_live_other_harness_holders(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder,
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    dead = _subprocess.Popen(["/bin/sleep", "60"])
+    _runtime.claim(project, "claude-build", "claude", owner_pid=dead.pid)
+    dead.kill()
+    dead.wait()
+    other = _runtime.claim(project, "codex", "codex", owner_pid=live_holder.pid)
+    try:
+        occupancy = roundtable._seat_occupancies(project, [("claude", "claude")])[
+            ("claude", "claude")
+        ]
+        assert occupancy.state == "vacant"
+        claimed = _runtime.claim(project, "claude", "claude")
+        assert _runtime.release(claimed)
+    finally:
+        assert _runtime.release(other)
+
+
+def test_pty_phone_registration_without_surface_does_not_offer_jump(
+    tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder, monkeypatch,
+):
+    project = _two_seat_project(tmp_path, isolated_registry)
+    token = _runtime.claim(project, "claude", "claude", owner_pid=live_holder.pid)
+    monkeypatch.setattr(_launcher, "iter_states", lambda: [{"lastRegistration": {
+        "projectRoot": str(project), "agent": "claude", "sessionId": token.session_id,
+    }}])
+    lease_path = _runtime.seat_paths(project, "claude").lease
+    before = lease_path.read_bytes()
+    try:
+        selected, rendered = run_with_pty(
+            lambda stdin, stderr: roundtable.choose_seat_card(
+                project, stdin=stdin, stderr=stderr,
+            ),
+            b"\njqq",
+        )
+        assert lease_path.read_bytes() == before
+    finally:
+        assert _runtime.release(token)
+
+    assert selected is None
+    assert "Claude Code — claude is active (phone session since " in rendered
+    assert "  j  jump to that surface" not in rendered
+    assert "  t  take over the seat" in rendered
+
+
 def test_pty_takeover_replaces_holder_under_the_card_pid_then_launches(
     tmp_path, isolated_registry, fake_commands, occupancy_runtime, live_holder, monkeypatch
 ):

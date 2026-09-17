@@ -34,6 +34,7 @@ from _rtruntime import (
     SeatOccupied,
     arm_codex_launch_intent,
     claim,
+    harness_lease_records,
     inspect_seat,
     read_seat_capability,
     record_seat_capability,
@@ -277,6 +278,10 @@ class SeatOccupancy:
         return getattr(self.inspection, "token", None)
 
     @property
+    def holder_agent_id(self) -> str:
+        return getattr(self.token, "agent_id", self.agent_id)
+
+    @property
     def detail(self) -> str:
         value = getattr(self.inspection, "detail", "")
         return value if isinstance(value, str) else ""
@@ -291,6 +296,7 @@ class SeatOccupancy:
         return (
             self.state == "active"
             and token is not None
+            and self.holder_agent_id == self.agent_id
             and isinstance(getattr(token, "session_id", None), str)
             and bool(getattr(token, "revision", None))
         )
@@ -332,9 +338,17 @@ class SeatOccupancy:
 
         if self.state == "vacant":
             return "vacant"
+        holder = (
+            f"held by seat {self.holder_agent_id!r}"
+            if self.holder_agent_id != self.agent_id
+            else ""
+        )
         if self.state in {"stale", "ambiguous"}:
-            return f"{self.state} — {self.detail}" if self.detail else self.state
+            detail = "; ".join(part for part in (holder, self.detail) if part)
+            return f"{self.state} — {detail}" if detail else self.state
         text = "active"
+        if holder:
+            text += f" — {holder}"
         locus = self.locus
         if locus:
             text += f" — {locus}"
@@ -515,8 +529,9 @@ def occupancy_from_inspection(
             holder_harness=holder_harness,
             since=since,
         )
-    surface = _recorded_surface(root, agent_id, token)
-    phone = surface is None and _phone_session_registered(root, agent_id, token)
+    holder_agent = getattr(token, "agent_id", agent_id)
+    surface = _recorded_surface(root, holder_agent, token)
+    phone = surface is None and _phone_session_registered(root, holder_agent, token)
     tmux_location = None
     tty = None
     if surface is None and not phone and probe:
@@ -549,10 +564,18 @@ def inspect_seat_occupancy(
     *,
     probe: bool = True,
 ) -> SeatOccupancy:
-    """Read-only: inspect one seat and interpret its holder and locus."""
+    """Read-only: include same-harness holders that would block ``claim``."""
 
     try:
         inspection = inspect_seat(root, agent_id)
+        if inspection.status in {"vacant", "stale"}:
+            for record in harness_lease_records(root, harness):
+                if record["agentId"] == agent_id:
+                    continue
+                sibling = inspect_seat(root, record["agentId"])
+                if sibling.status in {"active_healthy", "active_unhealthy", "ambiguous"}:
+                    inspection = sibling
+                    break
     except RuntimeStateError as error:
         inspection = _AmbiguousInspection(str(error))
     return occupancy_from_inspection(root, agent_id, harness, inspection, probe=probe)
@@ -566,7 +589,7 @@ class _AmbiguousInspection:
 
 
 def occupied_seat_refusal(
-    tool: str,
+    tool: str | None,
     root: Path,
     occupancy: SeatOccupancy,
     *,
@@ -578,7 +601,8 @@ def occupied_seat_refusal(
     holder = occupancy.holder_phrase()
     if occupancy.wake_unhealthy:
         holder += " (wake unhealthy)"
-    first = f"{tool}: seat {occupancy.agent_id!r} in {root} is held by {holder}"
+    prefix = f"{tool}: " if tool else ""
+    first = f"{prefix}seat {occupancy.agent_id!r} in {root} is held by {holder}"
     if requested_agent and requested_agent != occupancy.agent_id:
         first += f"; requested seat {requested_agent!r}"
     lines = [first + ".", f"  {next_action or occupancy.next_action()}"]

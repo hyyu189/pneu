@@ -311,7 +311,6 @@ card, in the same design language as the Codex guarded handoff:
 
 ```text
 Claude Code — claude is active (phone session since 09:58)
-  j  jump to that surface
   t  take over the seat  (the current session loses it)
   q  cancel
 ```
@@ -321,7 +320,12 @@ Claude Code — claude is active (phone session since 09:58)
   recorded but unreachable, the line reads `(recorded surface pane w1:p3 is
   not reachable: …)` and `j` does nothing. Jump focuses the Herdr tab/
   workspace showing the pane, or `select-window`/`select-pane` (plus
-  `switch-client` inside tmux) for a tmux target; it writes nothing.
+  `switch-client` inside tmux) for a tmux target; it writes nothing. The phone
+  session above has no recorded surface, so it offers no `j` action.
+- A legacy lease held by another agent of the same harness also marks the
+  requested row active and names the actual holder. Its panel offers `j`
+  only if that holder's surface is reachable, and `q`. It offers no
+  cross-agent `t`: takeover is available only from the holder's own seat.
 - `t` is printed only when the runtime established liveness (an `ambiguous`
   seat is never takeover-eligible). It is performed after the harness setup
   step, immediately before `execv`: the card process replaces exactly the
@@ -569,15 +573,15 @@ guarded-handoff:
 
 ```text
 Claude Code — claude is active (phone session since 09:58)
-  j  jump to that surface
   t  take over the seat  (the current session loses it)
   q  cancel
 ```
 
 Three rules for that panel:
 
-- **jump** appears only when a surface record exists and names a reachable
-  surface. It is navigation, not a claim: nothing about the lease changes.
+- **jump** appears only when a surface record belongs to the exact lease and
+  names a reachable surface. The phone session above has no such surface,
+  so no `j` action appears. Jump changes no lease state.
 - **take over** is a guarded action, not a force flag. It reuses the existing
   fenced replacement path and states in one line what the current holder
   loses. A seat whose liveness cannot be established safely is not
