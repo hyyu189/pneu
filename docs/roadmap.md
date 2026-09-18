@@ -25,6 +25,20 @@ Honest seat occupancy on the switchboard:
 No protocol redesign. The screen-level specification is
 [`ux/launcher.md`](ux/launcher.md) §5.4–5.6.
 
+## Phase 1a — Claude Code and Codex native admission
+
+Before Phase 2 or further harness expansion, validate the user's actual
+native entry paths under [ADR 0005](adr/0005-native-admission-validation.md).
+First run the bounded interface spike: exact visible-root targeting,
+busy/approval/compaction deferral, atomic admission, reconnect versus cold
+resume, and duplicate/uncertain-outcome recovery. Record evidence and gaps
+in [native admission](native-admission.md); do not infer support from labs.
+
+Only then select the smallest implementation increment and validate a real
+two-harness development/review/reply cycle, including continuation after
+restart. The spike itself does not authorize that implementation or broad
+decomposition. Preserve maildir, lease, fencing, and recovery contracts.
+
 ## Phase 2 — one home per fact
 
 - Fix the packaging boundary first, so module decomposition is cheap
@@ -46,10 +60,10 @@ No protocol redesign. The screen-level specification is
 - Migration from the legacy scaffold, not abrupt deletion.
 - The global pneu skill reduced to stable communication behavior.
 
-## Phase 4 — native adapter spikes
+## Phase 4 — further native adapter spikes
 
-- Map the existing Codex bridge onto current official App Server primitives;
-  prove same-thread binding and busy-turn non-interference.
+- Extend the Claude Code and Codex integrations only after the Phase 1a
+  evidence and implementation gates.
 - Implement Herdr as a surface adapter (focus/jump/open-worktree/badges —
   no mailbox drain, no wake ownership).
 - Prototype DeepSeek Harness as a native out-of-tree plugin integration.

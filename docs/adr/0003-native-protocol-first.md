@@ -1,6 +1,8 @@
 # ADR 0003 — native protocol first
 
 - Status: accepted, 2026-08-27
+- Interface ranking and integration sequence below superseded by
+  [ADR 0005](0005-native-admission-validation.md); native semantics remain.
 
 ## Context
 

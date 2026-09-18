@@ -4,6 +4,14 @@ pneu's durable maildir core and its harness wake adapters have different
 compatibility boundaries. Delivery can succeed while an offline or unsupported
 harness remains unwoken.
 
+## Claude Code and Codex native admission
+
+The [Phase 1a capability and evidence matrix](native-admission.md) records
+the 2026-09-18 narrow native-interface spike. It distinguishes documentation
+and source, isolated real-binary experiments, local process observations,
+and real visible-root acceptance. It does not promote either harness or
+certify the historical daemon route described in the onboarding matrix.
+
 ## Harness onboarding matrix
 
 `roundtable-setup` configures harnesses already installed by the user. It does
