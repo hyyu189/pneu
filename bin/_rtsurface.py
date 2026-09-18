@@ -304,6 +304,91 @@ def probe_capability_surface(
         ) from error
 
 
+def focus_capability_surface(
+    surface: Mapping[str, Any],
+    *,
+    environ: Mapping[str, str] | None = None,
+    runner=subprocess.run,
+) -> str:
+    """Bring the recorded surface to the front; navigation only.
+
+    Nothing about the seat changes: no lease, binding, or record is written.
+    Herdr has no pane-level focus verb, so the pane's tab (and workspace) is
+    focused after resolving them from the pane itself.  tmux selects the
+    window and pane; inside a tmux client it also switches that client.
+    Returns the human label of what was focused.
+    """
+
+    kind = surface.get("kind")
+    address = capability_surface_arguments(surface)
+    selected = os.environ if environ is None else environ
+    reference = address[-1]
+    if kind == "herdr":
+        get_command = capability_surface_command(
+            surface, ["pane", "get", reference], environ=selected
+        )
+        payload = _json_output(
+            "herdr",
+            get_command,
+            _run_checked("herdr", get_command, environ=selected, runner=runner),
+        )
+        result_object = payload.get("result")
+        pane_object = (
+            result_object.get("pane") if isinstance(result_object, dict) else None
+        )
+        tab = _capability_text(
+            pane_object.get("tab_id") if isinstance(pane_object, dict) else None
+        )
+        workspace = _capability_text(
+            pane_object.get("workspace_id") if isinstance(pane_object, dict) else None
+        )
+        if tab is None:
+            raise SurfaceError(
+                "herdr surface response did not name the tab showing pane "
+                f"{reference}"
+            )
+        if workspace is not None:
+            _run_checked(
+                "herdr",
+                capability_surface_command(
+                    surface, ["workspace", "focus", workspace], environ=selected
+                ),
+                environ=selected,
+                runner=runner,
+            )
+        _run_checked(
+            "herdr",
+            capability_surface_command(
+                surface, ["tab", "focus", tab], environ=selected
+            ),
+            environ=selected,
+            runner=runner,
+        )
+        return f"pane {reference}"
+    if kind == "tmux":
+        for arguments in (
+            ["select-window", *address],
+            ["select-pane", *address],
+        ):
+            _run_checked(
+                "tmux",
+                capability_surface_command(surface, arguments, environ=selected),
+                environ=selected,
+                runner=runner,
+            )
+        if selected.get("TMUX"):
+            _run_checked(
+                "tmux",
+                capability_surface_command(
+                    surface, ["switch-client", *address], environ=selected
+                ),
+                environ=selected,
+                runner=runner,
+            )
+        return f"tmux {reference}"
+    raise SurfaceError(f"unsupported capability surface kind: {kind!r}")
+
+
 def launcher_shell_command(
     launcher: Path,
     agent_id: str,

@@ -1,9 +1,10 @@
 # UX-SPEC — the `pneu` entry surface
 
-> Status: current, as built in 1.3.5. Every screen, string, and mutation below
-> was read out of `bin/pneu` and `bin/_rtlauncher.py`, not out of memory. The
-> §5 to-be section is the only part that describes behavior that does not
-> exist.
+> Status: current, as built in 1.3.5 plus the roadmap Phase 1 occupancy UX
+> (2026-08-28). Every screen, string, and mutation below was read out of
+> `bin/pneu` and `bin/_rtlauncher.py`, not out of memory. In §5, items
+> 5.1–5.3 describe behavior that does not exist; 5.4–5.6 are the decision of
+> record for the occupancy UX and are now built (see §1.4, §1.7, §1.9, §3).
 
 This is the first front-to-back UX spec in this repository and the format
 other surface specs should copy: **screens**, then **what each rendered
@@ -16,7 +17,9 @@ welcome, and the seat card. Sources: `bin/pneu` (`main`, `onboard`,
 `choose_project`, `seat_inventory`, `_addable_harnesses`, `_render_seat_card`,
 `choose_seat`, `choose_seat_card`, `show_first_run_welcome`) and
 `bin/_rtlauncher.py` (`HARNESS_LABELS`, `COMMANDS`, `harness_bin`,
-`harness_unavailable_detail`, `configured_sender_ids`, `project_at_or_above`).
+`harness_unavailable_detail`, `configured_sender_ids`, `project_at_or_above`,
+and the occupancy resolver `SeatOccupancy` / `inspect_seat_occupancy` /
+`occupied_seat_refusal` / `jump_to_seat` / `take_over_seat`).
 
 **Everything in this document is written to stderr.** Only `help`, `guide`,
 and `version` write to stdout. `pneu 2>/dev/null` therefore shows nothing at
@@ -129,9 +132,9 @@ exits 0 without launching anything.
 ```text
 pneu — acme
 seats
- > Claude Code — claude
-   Codex — codex (bound thread)
-   Hermes — hermes
+ > Claude Code — claude          active — phone session since 09:58
+   Codex — codex (bound thread)  stale — owner pid 41822 is not running
+   Hermes — hermes               vacant
    unavailable: Grok Build — not configured in this project — press a to add
 active worktrees: 2
 unread mail: claude=3 codex=0 hermes=0
@@ -143,18 +146,27 @@ Layout facts that matter for anyone editing this renderer:
 
 - the screen is cleared and homed (`\x1b[2J\x1b[H`) on every redraw, so the
   card never scrolls;
-- seat rows are `" {marker} {label} — {agent}"` — one leading space, then
-  `>` for the cursor row or a space, then a space. Unavailable rows carry
-  three leading spaces and no marker, and can never be selected;
+- seat rows are `" {marker} {label} — {agent}{bound}"`, padded to the widest
+  row name plus two spaces, then the occupancy column — one leading space,
+  then `>` for the cursor row or a space, then a space. Unavailable rows
+  carry three leading spaces and no marker, and can never be selected;
+- the occupancy column is one of `vacant`, `active`, `stale — <detail>`, or
+  `ambiguous — <detail>`, re-read from the seat lease on every redraw. An
+  active row adds the holder's locus when the runtime knows it — `pane
+  w1:p3` or `tmux build:1.0` from a surface record, `phone session since
+  09:58` for a Claude phone/web session, `tmux build:editor since 09:58` or
+  `tty ttys017 since 09:58` from a process probe, or just `since 09:58` —
+  and `· wake unhealthy` when the owner runs but its wake adapter has no
+  live heartbeat. An unknown locus renders `active` alone; nothing is
+  guessed;
 - the label is the human name (`Claude Code`, `Grok Build`), not the harness
   key;
 - ` · a add seat` is present in the footer only when at least one installed
   harness has no seat in this project;
 - the three status lines are always rendered, including on an empty project;
-- **no row shows whether the seat is occupied.** A seat with a live owner
-  renders identically to a vacant one; the only lease-derived signal on the
-  card is the `(bound thread)` suffix, and that appears precisely when the
-  seat is *not* live. §5.4 is the accepted fix.
+- `(bound thread)` and the occupancy column never compete: the suffix appears
+  only on a vacant or stale Codex seat (§1.7), so a bound-resumable row reads
+  `Codex — codex (bound thread)  vacant`.
 
 ### 1.5 Unavailable rows — two kinds
 
@@ -233,6 +245,9 @@ keystroke. Its possible contents:
 | `p` failed | the last line of `rt-rc-host`'s output |
 | Enter with no seats | `No configured seat yet; press a to add one` |
 | Enter, handoff refused | the last line of `rt-codex-wake handoff`'s output |
+| `j` on the active-seat panel succeeded | `jumped to pane w1:p3` / `jumped to tmux build:1.0` |
+| `j` failed | `jump failed: <surface error>` |
+| `t` refused | `seat 'claude' changed under you; nothing was taken over (…)`, `seat 'claude' has ambiguous runtime state; nothing was taken over (…)`, or `could not take over seat 'claude': …` |
 
 The ` (bound thread)` suffix appears on a Codex seat row when **all** of these
 hold, re-evaluated on every redraw (`_bound_codex_thread`):
@@ -282,11 +297,48 @@ refactor:
 Press Enter to return.
 ```
 
-One wrinkle, recorded because it is as-built and surprising: `_run_card_command`
-resolves its output as `(stderr or stdout)`, and `rt-worktree list` prints the
-listing on stdout while printing registry warnings on stderr. A host with any
-registry warning therefore sees the warnings under `w` **instead of** the
-sibling list, not alongside it. The same precedence governs the `p` notice.
+`w` runs `rt-worktree list` through `_run_card_listing`, which keeps stdout
+as the screen body and appends stderr (registry warnings) after a blank line,
+so a host with warnings sees the sibling list *and* the warnings. (Before
+Phase 1 the screen used `(stderr or stdout)` and the warnings displaced the
+list.) The `p` notice and the Codex handoff notice still use
+`_run_card_command`'s `(stderr or stdout)` precedence: for them the last
+line of the failing stream is the notice.
+
+**Enter on an active seat** does not launch. The card resolves occupancy
+before it launches, and an active seat opens an inline decision under the
+card, in the same design language as the Codex guarded handoff:
+
+```text
+Claude Code — claude is active (phone session since 09:58)
+  t  take over the seat  (the current session loses it)
+  q  cancel
+```
+
+- `j` is printed only when a surface record exists for this exact lease and
+  a probe (`rt-surface probe` semantics) still answers. When a surface is
+  recorded but unreachable, the line reads `(recorded surface pane w1:p3 is
+  not reachable: …)` and `j` does nothing. Jump focuses the Herdr tab/
+  workspace showing the pane, or `select-window`/`select-pane` (plus
+  `switch-client` inside tmux) for a tmux target; it writes nothing. The phone
+  session above has no recorded surface, so it offers no `j` action.
+- A legacy lease held by another agent of the same harness also marks the
+  requested row active and names the actual holder. Its panel offers `j`
+  only if that holder's surface is reachable, and `q`. It offers no
+  cross-agent `t`: takeover is available only from the holder's own seat.
+- `t` is printed only when the runtime established liveness (an `ambiguous`
+  seat is never takeover-eligible). It is performed after the harness setup
+  step, immediately before `execv`: the card process replaces exactly the
+  holder's lease `(sessionId, revision)` under the project claim lock with a
+  lease owned by its own pid, and `rt-<harness>` re-enters that lease through
+  `_same_process_lease` because `execv` keeps the pid. The displaced session
+  keeps running; its watcher fails its next fenced renewal and mail stops
+  reaching it. Any change under the fence refuses and returns to the card.
+- `q` returns to the card; nothing is written on the way in or out.
+
+A stale seat opens no panel: Enter proceeds exactly as before, and the
+launcher's ordinary stale replacement applies. A stale or vacant Codex seat
+with a bound thread still resumes it (§1.7).
 
 `a` prints one inline prompt line instead of a screen:
 
@@ -337,6 +389,7 @@ nothing across keystrokes.
 | row order | fixed harness order, then configuration order within a harness | `HARNESS_ORDER` = claude, codex, hermes, grok |
 | cursor position | the last seat launched from this project | `lastSeat` in `.roundtable/launcher.json`; index 0 when absent or unmatched |
 | ` (bound thread)` | a resumable Codex thread for a non-live seat | `<runtime>/rt-codex-wake-state.json` × project registry × `inspect_seat` |
+| occupancy column | who holds the seat and where | `inspect_seat` for the state; `capability.json` (fenced to the lease) then `surface.json` (advisory, only if recorded after the claim) for a surface; rc-host `lastRegistration` or a `--sdk-url` owner command line for a phone session; `ps`/`tmux list-panes` probes for tty/tmux; `claimedAt` for the start time |
 | `unavailable:` rows | a harness with no launchable seat here | `seat_inventory` + `_addable_harnesses` |
 | unavailable detail | why, and the next action | `harness_unavailable_detail`, or the addable override string |
 | `active worktrees: N` | other available active registered projects sharing this project's derived group | `~/.pneu/projects.yaml` via `load_project_registry` |
@@ -361,7 +414,9 @@ count as `0`, and an rc-host state error renders `off`.
 | `a` | **appends one seat block** | `<project>/.roundtable/agents.yaml` |
 | `p` | enables or disables the project's phone host | `rc-hosts/<uuid>.json`, one per-project LaunchAgent, and the project's untracked `.claude/settings.local.json` |
 | `q` | nothing | returns exit 0 |
-| `Enter` | records the launched seat; for a bound thread, performs the Codex handoff first | `.roundtable/launcher.json` (git-ignored), then the Codex binding |
+| `Enter` | records the launched seat; for a bound thread, performs the Codex handoff first; on an active seat, opens the panel instead | `.roundtable/launcher.json` (git-ignored), then the Codex binding |
+| `j` / `q` on the panel | nothing | jump only drives the terminal surface |
+| `t` on the panel | **replaces the holder's lease** with one owned by the card process, fenced on the holder's `(sessionId, revision)` | the seat's `lease.json` in the host runtime, then the launch as for Enter |
 | Enter/`q` on the welcome | clears `welcomePending` | `.roundtable/launcher.json` |
 
 **`a` is the only write to durable, committed project state.** It is the one
@@ -426,10 +481,14 @@ configuration: the file is in the generated `.roundtable/.gitignore`.
 
 ---
 
-## 5. To-be — accepted design, not implemented
+## 5. To-be — accepted design
 
-These are design deltas awaiting scheduling. Nothing in this section
-describes 1.3.5 behavior, and this track shipped no change under `bin/`.
+Two groups. §5.1–5.3 are design deltas awaiting scheduling: nothing in
+them describes shipped behavior, and no change under `bin/` implements them.
+§5.4–5.6 were ruled 2026-08-18 and built 2026-08-28 in roadmap Phase 1 under
+`bin/` (`pneu`, `_rtlauncher.py`, `_rtruntime.py`, `_rtsurface.py`,
+`rt-worktree`); their as-built rendering is in §1.4, §1.7, §1.9, §2, and §3,
+and their text below remains the decision of record.
 
 ### 5.1 Census the roster at project birth
 
@@ -474,10 +533,10 @@ to get back to work, and got a raw lease refusal with no options and no
 indication that the holder was their own phone session. Every piece of what
 they needed to know existed in the runtime; none of it reached the screen.
 
-**As built:** the card renders no occupancy at all, and the refusal comes
-later, from inside `rt-<harness>` after the card has already exited.
+**As built before Phase 1:** the card rendered no occupancy at all, and the
+refusal came later, from inside `rt-<harness>` after the card had exited.
 
-**To be:** each seat row carries its occupancy state — **vacant**, **active**,
+**Ruling (built, §1.4):** each seat row carries its occupancy state — **vacant**, **active**,
 or **stale** — and, when the runtime knows it, the owner's locus:
 
 ```text
@@ -502,26 +561,27 @@ mutually exclusive by construction.
 
 ### 5.5 Enter on an active seat must offer a choice, not a dead end
 
-**As built:** the card does not check occupancy before Enter. It records the
-seat, `execv`s `rt-<harness>`, and the launcher's `claim_launch_seat` raises
-`SeatOccupied`, which the harness wrapper prints and exits on. The card is
-gone by then, so there is nothing to return to and no option to pick.
+**As built before Phase 1:** the card did not check occupancy before Enter.
+It recorded the seat, `execv`ed `rt-<harness>`, and the launcher's
+`claim_launch_seat` raised `SeatOccupied`, which the harness wrapper printed
+and exited on. The card was gone by then, so there was nothing to return to
+and no option to pick.
 
-**To be:** the card resolves occupancy before it launches, and an active seat
+**Ruling (built, §1.9):** the card resolves occupancy before it launches, and an active seat
 opens a decision, in the same design language as the existing Codex
 guarded-handoff:
 
 ```text
 Claude Code — claude is active (phone session since 09:58)
-  j  jump to that surface
   t  take over the seat  (the current session loses it)
   q  cancel
 ```
 
 Three rules for that panel:
 
-- **jump** appears only when a surface record exists and names a reachable
-  surface. It is navigation, not a claim: nothing about the lease changes.
+- **jump** appears only when a surface record belongs to the exact lease and
+  names a reachable surface. The phone session above has no such surface,
+  so no `j` action appears. Jump changes no lease state.
 - **take over** is a guarded action, not a force flag. It reuses the existing
   fenced replacement path and states in one line what the current holder
   loses. A seat whose liveness cannot be established safely is not
@@ -535,8 +595,8 @@ it does now.
 ### 5.6 Refusals outside the card must name the holder and the next action
 
 Non-card contexts still refuse in one line: `pneu` with a non-TTY stderr, a
-direct `rt-claude`, `pneu worktree open`, a script. Today that line is
-forensics:
+direct `rt-claude`, `pneu worktree open`, a script. Before Phase 1 that line
+was forensics:
 
 ```text
 rt-claude: seat 'claude' is active in <home>/Code/acme; owner pid 41822 is running; wake heartbeat age=7.3s
@@ -546,8 +606,11 @@ rt-claude: seat 'claude' is active in <home>/Code/acme; owner pid 41822 is runni
 controlling tty or a tmux pane. A phone/web session has neither, so in the
 incident above it contributed nothing and the user was left with a pid.
 
-**To be:** the refusal answers who, where, and what next, and keeps the
-forensics as a trailing detail rather than the whole message:
+**Ruling (built, `occupied_seat_refusal`):** the refusal answers who, where,
+and what next, and keeps the forensics as a trailing detail rather than the
+whole message. As built the first line also names the project root, and
+`pneu worktree open` uses the same three lines, with "run pneu, choose
+<name>, and take the seat over from the card" as its next action:
 
 ```text
 rt-claude: seat 'claude' is held by a Claude phone session started 09:58.

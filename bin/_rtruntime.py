@@ -1234,6 +1234,14 @@ def orphaned_runtime_projects(
     return result
 
 
+def _fence_matches(record: dict[str, Any], fence: tuple[str, str]) -> bool:
+    session_id, revision = fence
+    return (
+        record.get("sessionId") == session_id
+        and str(record.get("revision")) == str(revision)
+    )
+
+
 def claim(
     project: Path | str,
     agent_id: str,
@@ -1241,10 +1249,31 @@ def claim(
     *,
     owner_pid: int | None = None,
     session_id: str | None = None,
+    replace_fence: tuple[str, str] | None = None,
 ) -> LeaseToken:
+    """Claim one seat lease, replacing only a stale lease by default.
+
+    ``replace_fence`` is the guarded takeover: only the existing lease whose
+    ``(sessionId, revision)`` equals the fence may be replaced, whether active
+    or stale, under the project claim lock and seat state lock.  A changed or
+    missing target generation raises ``FenceRejected``; an active sibling seat
+    of the same harness still raises ``SeatOccupied``, and ambiguous liveness
+    still raises ``SeatAmbiguous``: takeover never widens what a claim may
+    displace.
+    """
+
     canonical = canonical_project(project)
     _agent_key(agent_id)
     _validate_harness(harness)
+    if replace_fence is not None:
+        if (
+            not isinstance(replace_fence, tuple)
+            or len(replace_fence) != 2
+            or any(not isinstance(item, str) or not item for item in replace_fence)
+        ):
+            raise RuntimeStateError(
+                "replace_fence must be a (session_id, revision) pair of non-empty strings"
+            )
     pid = owner_pid if owner_pid is not None else os.getpid()
     if session_id is not None and (
         not isinstance(session_id, str) or not session_id
@@ -1264,16 +1293,31 @@ def claim(
     with _locked(paths.claim_lock):
         _write_project_meta(paths, canonical)
         for record in _read_agent_records(paths, canonical):
+            same_agent = record["agentId"] == agent_id
+            same_harness = record["harness"] == harness
+            if not (same_agent or same_harness):
+                continue
+            if (
+                replace_fence is not None
+                and same_agent
+                and not _fence_matches(record, replace_fence)
+            ):
+                raise FenceRejected(
+                    f"seat {agent_id!r} in {canonical} is no longer held by the "
+                    "lease being taken over"
+                )
             inspection = _inspection_from_record(
                 record,
                 canonical,
                 heartbeat_ttl=DEFAULT_HEARTBEAT_TTL,
             )
-            same_agent = record["agentId"] == agent_id
-            same_harness = record["harness"] == harness
-            if not (same_agent or same_harness):
-                continue
             if inspection.status in {"active_healthy", "active_unhealthy"}:
+                if (
+                    replace_fence is not None
+                    and same_agent
+                    and _fence_matches(record, replace_fence)
+                ):
+                    continue
                 raise SeatOccupied(inspection)
             if inspection.status == "ambiguous":
                 raise SeatAmbiguous(inspection)
@@ -1285,15 +1329,28 @@ def claim(
             existing = _read_json(paths.lease)
             if existing is not None:
                 _validate_record(existing, canonical, agent_id)
+                if replace_fence is not None and not _fence_matches(
+                    existing, replace_fence
+                ):
+                    raise FenceRejected(
+                        f"seat {agent_id!r} in {canonical} is no longer held by the "
+                        "lease being taken over"
+                    )
                 inspection = _inspection_from_record(
                     existing,
                     canonical,
                     heartbeat_ttl=DEFAULT_HEARTBEAT_TTL,
                 )
                 if inspection.status in {"active_healthy", "active_unhealthy"}:
-                    raise SeatOccupied(inspection)
+                    if replace_fence is None:
+                        raise SeatOccupied(inspection)
                 if inspection.status == "ambiguous":
                     raise SeatAmbiguous(inspection)
+            elif replace_fence is not None:
+                raise FenceRejected(
+                    f"seat {agent_id!r} in {canonical} is no longer held by the "
+                    "lease being taken over"
+                )
             record = {
                 "schema": LEASE_SCHEMA,
                 "projectRoot": str(canonical),

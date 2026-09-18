@@ -23,8 +23,12 @@ from _rtlauncher import (
     HARNESS_LABELS,
     harness_bin,
     harness_unavailable_detail,
+    inspect_seat_occupancy,
+    jump_reachability,
+    jump_to_seat,
     project_at_or_above,
     run_onboarding_init,
+    take_over_seat,
 )
 from _rtlib import (
     ProjectRegistryError,
@@ -37,6 +41,7 @@ from _rtlib import (
 )
 from _rtrchost import RCHostError, load_state_for_project
 from _rtruntime import RuntimeStateError, inspect_seat, runtime_root
+from _rtsurface import SurfaceError
 
 
 ALIASES = {
@@ -1120,12 +1125,22 @@ def _phone_access_on(root: Path) -> bool:
         return False
 
 
+def _seat_occupancies(root: Path, seats: list[tuple[str, str]]) -> dict:
+    """Read-only occupancy of every seat row, fresh on each redraw."""
+
+    return {
+        (harness, agent): inspect_seat_occupancy(root, agent, harness)
+        for harness, agent in seats
+    }
+
+
 def _render_seat_card(
     root: Path,
     seats: list[tuple[str, str]],
     unavailable: list[tuple[str, str]],
     addable: list[str],
     bound_threads: dict[tuple[str, str], str],
+    occupancies: dict,
     cursor: int,
     *,
     stderr,
@@ -1134,13 +1149,19 @@ def _render_seat_card(
     print("\x1b[2J\x1b[H", end="", file=stderr)
     print(f"pneu — {root.name}", file=stderr)
     print("seats", file=stderr)
+    names = []
+    for harness, agent in seats:
+        bound = " (bound thread)" if (harness, agent) in bound_threads else ""
+        names.append(f"{HARNESS_LABELS[harness]} — {agent}{bound}")
+    width = max((len(name) for name in names), default=0) + 2
     for index, (harness, agent) in enumerate(seats):
         marker = ">" if index == cursor else " "
-        bound = " (bound thread)" if (harness, agent) in bound_threads else ""
-        print(
-            f" {marker} {HARNESS_LABELS[harness]} — {agent}{bound}",
-            file=stderr,
-        )
+        occupancy = occupancies.get((harness, agent))
+        state = occupancy.row_text() if occupancy is not None else ""
+        row = f" {marker} {names[index]}"
+        if state:
+            row = f" {marker} {names[index]:<{width}}{state}"
+        print(row.rstrip(), file=stderr)
     for harness, detail in unavailable:
         if harness in addable:
             detail = "not configured in this project — press a to add"
@@ -1193,6 +1214,76 @@ def _run_card_command(name: str, arguments: list[str], root: Path) -> tuple[int,
         return 2, str(error)
     detail = (result.stderr or result.stdout).strip()
     return result.returncode, detail
+
+
+def _run_card_listing(name: str, arguments: list[str], root: Path) -> tuple[int, str]:
+    """Run a read-only listing and keep its stdout; warnings follow, not replace."""
+
+    target = sibling(name)
+    try:
+        result = subprocess.run(
+            [str(target), *arguments],
+            cwd=root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+    except OSError as error:
+        return 2, str(error)
+    listing = (result.stdout or "").strip()
+    warnings = (result.stderr or "").strip()
+    if listing and warnings:
+        return result.returncode, f"{listing}\n\n{warnings}"
+    return result.returncode, listing or warnings
+
+
+def _choose_active_seat_action(
+    occupancy,
+    *,
+    stdin,
+    stderr,
+) -> str:
+    """Enter on an active seat: j jump / t take over / q cancel.
+
+    Rendering and cancel write nothing.  ``j`` is offered only when a recorded
+    surface answers a probe; ``t`` only when liveness is established.
+    """
+
+    title = f"{HARNESS_LABELS[occupancy.harness]} — {occupancy.agent_id}"
+    if occupancy.holder_agent_id != occupancy.agent_id:
+        title += f" is blocked by seat {occupancy.holder_agent_id!r}"
+    else:
+        title += " is active"
+    locus = occupancy.locus
+    if locus:
+        title += f" ({locus})"
+    reachable, reason = jump_reachability(occupancy)
+    print(title, file=stderr)
+    if reachable:
+        print("  j  jump to that surface", file=stderr)
+    elif occupancy.surface is not None:
+        print(
+            f"  (recorded surface {occupancy.surface_label} is not reachable: {reason})",
+            file=stderr,
+        )
+    if occupancy.takeover_eligible:
+        print("  t  take over the seat  (the current session loses it)", file=stderr)
+    elif occupancy.holder_agent_id != occupancy.agent_id:
+        print(
+            f"  Only seat {occupancy.holder_agent_id!r} can take over this session.",
+            file=stderr,
+        )
+    print("  q  cancel", file=stderr)
+    stderr.flush()
+    while True:
+        key = _read_card_key(stdin)
+        if key == "q":
+            return "cancel"
+        if key == "j" and reachable:
+            return "jump"
+        if key == "t" and occupancy.takeover_eligible:
+            return "takeover"
 
 
 def _show_reference(text: str, *, stdin, stderr) -> None:
@@ -1279,12 +1370,14 @@ def choose_seat_card(
         selection_meta.clear()
     while True:
         bound_threads = _bound_codex_threads(root, seats)
+        occupancies = _seat_occupancies(root, seats)
         _render_seat_card(
             root,
             seats,
             unavailable,
             addable,
             bound_threads,
+            occupancies,
             cursor,
             stderr=stderr,
             notice=notice,
@@ -1318,7 +1411,7 @@ def choose_seat_card(
         elif key == "p":
             notice = _toggle_phone_access(root)
         elif key == "w":
-            code, detail = _run_card_command("rt-worktree", ["list"], root)
+            code, detail = _run_card_listing("rt-worktree", ["list"], root)
             _show_reference(
                 detail or f"pneu worktree list exited {code}",
                 stdin=stdin,
@@ -1333,6 +1426,27 @@ def choose_seat_card(
                 notice = "No configured seat yet; press a to add one"
                 continue
             selected = seats[cursor]
+            occupancy = occupancies.get(selected)
+            if occupancy is not None and occupancy.state == "ambiguous":
+                notice = f"seat {occupancy.agent_id!r}: {occupancy.row_text()}; cannot launch"
+                continue
+            if occupancy is not None and occupancy.state == "active":
+                action = _choose_active_seat_action(
+                    occupancy,
+                    stdin=stdin,
+                    stderr=stderr,
+                )
+                if action == "cancel":
+                    continue
+                if action == "jump":
+                    try:
+                        notice = jump_to_seat(occupancy)
+                    except SurfaceError as error:
+                        notice = f"jump failed: {error}"
+                    continue
+                if selection_meta is not None:
+                    selection_meta["takeover"] = occupancy
+                return selected
             thread_id = bound_threads.get(selected)
             if thread_id and selection_meta is not None:
                 selection_meta["resumeThreadId"] = thread_id
@@ -1417,6 +1531,13 @@ def onboard(
                     )
                     continue
                 launch_arguments = ["resume", thread_id]
+            takeover = selection_meta.get("takeover")
+            if rich_card and takeover is not None:
+                taken, detail = take_over_seat(root, takeover)
+                if not taken:
+                    card_notice = detail
+                    continue
+                print(detail, file=stderr)
             remember_last_seat(root, harness, agent_id)
             environ["RT_FROM"] = agent_id
             chdir_runner(root)

@@ -33,6 +33,7 @@ from _rtlib import (
     resolve_project_mailbox_checked,
     unregister_project,
 )
+from _rtlauncher import occupancy_from_inspection, occupied_seat_refusal
 from _rtsurface import SurfaceError, detect_surface, launch_surface
 from _rtruntime import (
     RuntimeStateError,
@@ -755,12 +756,23 @@ def _wait_for_active_seat(
         time.sleep(min(OPEN_ACTIVATION_POLL_SECONDS, remaining))
 
 
-def _require_launchable_seat(project: Path, agent_id: str) -> None:
+def _require_launchable_seat(
+    project: Path, agent_id: str, harness: str, name: str
+) -> None:
     inspection = inspect_seat(project, agent_id)
     if inspection.status in {"active_healthy", "active_unhealthy"}:
+        occupancy = occupancy_from_inspection(project, agent_id, harness, inspection)
+        verb = "Resume it there" if occupancy.phone else "Return to it there"
         raise WorktreeError(
-            f"seat {agent_id!r} is already active in {project}: "
-            f"{inspection.status} ({inspection.detail})"
+            occupied_seat_refusal(
+                None,
+                project,
+                occupancy,
+                next_action=(
+                    f"{verb}, or run `pneu`, choose {name}, and take the seat "
+                    "over from the card."
+                ),
+            )
         )
     if inspection.status == "ambiguous":
         raise WorktreeError(
@@ -797,7 +809,7 @@ def _worktree_open(args, *, cwd: Path, stdout, stderr) -> int:
     selection = detect_surface(args.surface, environ=os.environ)
     activation_timeout = None
     if selection.kind != "print":
-        _require_launchable_seat(target, agent_id)
+        _require_launchable_seat(target, agent_id, harness, name)
         if not args.no_wait:
             activation_timeout = _activation_timeout(os.environ)
     launch = launch_surface(

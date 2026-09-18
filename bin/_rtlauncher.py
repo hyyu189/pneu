@@ -7,10 +7,14 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import uuid
+from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from _rtlib import (
     ProjectRegistryError,
@@ -21,18 +25,29 @@ from _rtlib import (
     load_project_registry,
     resolve_project_mailbox_checked,
 )
+from _rtrchost import RCHostError, iter_states
 from _rtruntime import (
+    FenceRejected,
     RuntimeStateError,
+    SEAT_SURFACE_SCHEMA,
     SeatAmbiguous,
     SeatOccupied,
     arm_codex_launch_intent,
     claim,
+    harness_lease_records,
     inspect_seat,
+    read_seat_capability,
     record_seat_capability,
     release,
     runtime_root,
+    seat_paths,
 )
-from _rtsurface import SurfaceError, capability_surface_from_environment
+from _rtsurface import (
+    SurfaceError,
+    capability_surface_from_environment,
+    focus_capability_surface,
+    probe_capability_surface,
+)
 
 
 COMMANDS = {
@@ -95,23 +110,23 @@ def _best_effort_process_output(command: list[str]) -> str | None:
     return result.stdout if result.returncode == 0 else None
 
 
-def _format_owner_process_location(
+def _parse_owner_process_probes(
     owner_pid: int,
     *,
     tty_output: str | None,
     process_output: str | None,
     tmux_output: str | None,
-) -> str:
-    """Format best-effort TTY/tmux evidence from already captured outputs."""
+) -> dict[str, str]:
+    """Reduce already captured TTY/tmux probe outputs to structured evidence."""
 
-    fragments = []
+    evidence: dict[str, str] = {}
     if tty_output is not None:
         tty_name = tty_output.strip()
         if tty_name.startswith("/dev/"):
             tty_name = tty_name[len("/dev/") :]
         if tty_name in {"", "?", "??", "-"}:
             tty_name = "none"
-        fragments.append(f"tty={tty_name}")
+        evidence["tty"] = tty_name
 
     ancestors = {owner_pid}
     parents: dict[int, int] = {}
@@ -144,18 +159,45 @@ def _format_owner_process_location(
             except ValueError:
                 continue
             if pane_pid in ancestors:
-                fragments.append(f"tmux={location}")
+                evidence["tmux"] = location
                 break
-    return "; ".join(fragments)
+    return evidence
 
 
-def _owner_process_location(owner_pid: int) -> str:
-    """Locate an occupied seat without making launcher refusal depend on it."""
+def _format_owner_process_location(
+    owner_pid: int,
+    *,
+    tty_output: str | None,
+    process_output: str | None,
+    tmux_output: str | None,
+) -> str:
+    """Format best-effort TTY/tmux evidence from already captured outputs."""
+
+    evidence = _parse_owner_process_probes(
+        owner_pid,
+        tty_output=tty_output,
+        process_output=process_output,
+        tmux_output=tmux_output,
+    )
+    return "; ".join(
+        f"{name}={evidence[name]}" for name in ("tty", "tmux") if name in evidence
+    )
+
+
+def _probe_owner_process(owner_pid: int) -> dict[str, str]:
+    """Best-effort ``tty``/``tmux``/``command`` evidence for a live owner pid.
+
+    Every probe is short and optional: a failed probe simply contributes no
+    evidence, so neither the card nor a launcher refusal depends on it.
+    """
 
     if not isinstance(owner_pid, int) or isinstance(owner_pid, bool) or owner_pid <= 0:
-        return ""
+        return {}
     tty_output = _best_effort_process_output(
         ["/bin/ps", "-o", "tty=", "-p", str(owner_pid)]
+    )
+    command_output = _best_effort_process_output(
+        ["/bin/ps", "-o", "command=", "-p", str(owner_pid)]
     )
     process_output = None
     tmux_output = None
@@ -173,12 +215,463 @@ def _owner_process_location(owner_pid: int) -> str:
                 "#{pane_pid} #{session_name}:#{window_name}",
             ]
         )
-    return _format_owner_process_location(
+    evidence = _parse_owner_process_probes(
         owner_pid,
         tty_output=tty_output,
         process_output=process_output,
         tmux_output=tmux_output,
     )
+    if command_output is not None and command_output.strip():
+        evidence["command"] = command_output.strip()
+    return evidence
+
+
+def _owner_process_location(owner_pid: int) -> str:
+    """Locate an occupied seat without making launcher refusal depend on it."""
+
+    evidence = _probe_owner_process(owner_pid)
+    return "; ".join(
+        f"{name}={evidence[name]}" for name in ("tty", "tmux") if name in evidence
+    )
+
+
+# ---------------------------------------------------------------------------
+# Seat occupancy: one holder/locus interpretation shared by the seat card,
+# the direct launcher refusals, and `pneu worktree open`.
+# ---------------------------------------------------------------------------
+
+#: Command-line markers of a Claude phone/web (Remote Control) session.
+PHONE_SESSION_MARKERS = frozenset({"--sdk-url"})
+OCCUPANCY_STATES = {
+    "vacant": "vacant",
+    "stale": "stale",
+    "active_healthy": "active",
+    "active_unhealthy": "active",
+}
+SURFACE_RECORD_MAX_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class SeatOccupancy:
+    """Who holds a seat and where, derived from runtime facts only.
+
+    ``state`` is one of ``vacant``, ``active``, ``stale``, ``ambiguous``. The
+    locus fields are navigation metadata read from the lease, the fenced
+    capability record, the advisory surface record, the rc-host registration,
+    and short process probes; none of them is ownership or liveness evidence,
+    and every one of them may be absent.
+    """
+
+    harness: str
+    agent_id: str
+    inspection: Any
+    state: str
+    holder_harness: str | None = None
+    phone: bool = False
+    surface: dict[str, str] | None = None
+    tmux_location: str | None = None
+    tty: str | None = None
+    since: str | None = None
+
+    @property
+    def token(self):
+        return getattr(self.inspection, "token", None)
+
+    @property
+    def holder_agent_id(self) -> str:
+        return getattr(self.token, "agent_id", self.agent_id)
+
+    @property
+    def detail(self) -> str:
+        value = getattr(self.inspection, "detail", "")
+        return value if isinstance(value, str) else ""
+
+    @property
+    def wake_unhealthy(self) -> bool:
+        return getattr(self.inspection, "status", None) == "active_unhealthy"
+
+    @property
+    def takeover_eligible(self) -> bool:
+        token = self.token
+        return (
+            self.state == "active"
+            and token is not None
+            and self.holder_agent_id == self.agent_id
+            and isinstance(getattr(token, "session_id", None), str)
+            and bool(getattr(token, "revision", None))
+        )
+
+    @property
+    def holder_label(self) -> str:
+        if not self.holder_harness:
+            return "another"
+        return HARNESS_LABELS.get(self.holder_harness, self.holder_harness)
+
+    @property
+    def surface_label(self) -> str | None:
+        if not isinstance(self.surface, dict):
+            return None
+        kind = self.surface.get("kind")
+        if kind == "herdr":
+            return f"pane {self.surface.get('pane')}"
+        if kind == "tmux":
+            return f"tmux {self.surface.get('target')}"
+        return None
+
+    @property
+    def locus(self) -> str | None:
+        if self.surface_label:
+            return self.surface_label
+        parts = []
+        if self.phone:
+            parts.append("phone session")
+        elif self.tmux_location:
+            parts.append(f"tmux {self.tmux_location}")
+        elif self.tty:
+            parts.append(f"tty {self.tty}")
+        if self.since:
+            parts.append(f"since {self.since}")
+        return " ".join(parts) or None
+
+    def row_text(self) -> str:
+        """The occupancy column of one seat-card row."""
+
+        if self.state == "vacant":
+            return "vacant"
+        holder = (
+            f"held by seat {self.holder_agent_id!r}"
+            if self.holder_agent_id != self.agent_id
+            else ""
+        )
+        if self.state in {"stale", "ambiguous"}:
+            detail = "; ".join(part for part in (holder, self.detail) if part)
+            return f"{self.state} — {detail}" if detail else self.state
+        text = "active"
+        if holder:
+            text += f" — {holder}"
+        locus = self.locus
+        if locus:
+            text += f" — {locus}"
+        if self.wake_unhealthy:
+            text += " · wake unhealthy"
+        return text
+
+    def holder_phrase(self) -> str:
+        """``a Claude phone session started 09:58`` and friends."""
+
+        label = self.holder_label
+        if self.phone:
+            head = (
+                "a Claude phone session"
+                if self.holder_harness in {None, "claude"}
+                else f"a {label} phone session"
+            )
+        elif self.surface_label:
+            head = f"a {label} session in {self.surface_label}"
+        elif self.tmux_location:
+            head = f"a {label} session in tmux {self.tmux_location}"
+        elif self.tty:
+            head = f"a {label} session on tty {self.tty}"
+        else:
+            head = f"a {label} session"
+        if not self.holder_harness:
+            head = head.replace("a another session", "another session", 1)
+        if self.since and not self.surface_label:
+            head += f" started {self.since}"
+        return head
+
+    def next_action(self) -> str:
+        verb = "Resume it there" if self.phone else "Return to it there"
+        return f"{verb}, or run `pneu` and take the seat over from the card."
+
+
+def _render_since(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    local = parsed.astimezone()
+    today = datetime.now(timezone.utc).astimezone().date()
+    if local.date() == today:
+        return local.strftime("%H:%M")
+    return local.strftime("%Y-%m-%d %H:%M")
+
+
+def _read_small_json(path: Path) -> dict | None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    try:
+        with os.fdopen(descriptor, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_size > SURFACE_RECORD_MAX_BYTES
+            ):
+                return None
+            payload = json.loads(handle.read(SURFACE_RECORD_MAX_BYTES + 1))
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _addressable_surface(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    kind = value.get("kind")
+    reference = value.get({"herdr": "pane", "tmux": "target"}.get(kind, ""))
+    if not isinstance(reference, str) or not reference or "\0" in reference:
+        return None
+    return {
+        name: item
+        for name, item in value.items()
+        if isinstance(name, str) and isinstance(item, str)
+    }
+
+
+def _recorded_surface(root: Path, agent_id: str, token) -> dict[str, str] | None:
+    """The surface showing this exact lease: fenced capability, then advisory."""
+
+    session_id = getattr(token, "session_id", None)
+    revision = getattr(token, "revision", None)
+    if not isinstance(session_id, str) or revision is None:
+        return None
+    try:
+        capability = read_seat_capability(root, agent_id)
+    except (RuntimeStateError, OSError):
+        capability = None
+    if (
+        isinstance(capability, dict)
+        and capability.get("roundtableSessionId") == session_id
+        and str(capability.get("leaseRevision")) == str(revision)
+    ):
+        surface = _addressable_surface(capability.get("surface"))
+        if surface is not None:
+            return surface
+    try:
+        payload = _read_small_json(seat_paths(root, agent_id).surface)
+    except (RuntimeStateError, OSError, ValueError):
+        return None
+    if payload is None or payload.get("schema") != SEAT_SURFACE_SCHEMA:
+        return None
+    if (
+        payload.get("projectRoot") != str(root)
+        or payload.get("agentId") != agent_id
+        or payload.get("harness") != getattr(token, "harness", None)
+    ):
+        return None
+    record = getattr(token, "record", None) or {}
+    recorded_at = payload.get("recordedAt")
+    claimed_at = record.get("claimedAt") if isinstance(record, dict) else None
+    # The advisory record carries no lease fence; only a record written after
+    # this lease was claimed can describe the session holding it.
+    if (
+        not isinstance(recorded_at, str)
+        or not isinstance(claimed_at, str)
+        or recorded_at < claimed_at
+    ):
+        return None
+    return _addressable_surface(payload.get("surface"))
+
+
+def _phone_session_registered(root: Path, agent_id: str, token) -> bool:
+    """A Claude phone/web session registers its adopted lease with rc-host."""
+
+    session_id = getattr(token, "session_id", None)
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    try:
+        states = iter_states()
+    except (RCHostError, OSError):
+        return False
+    for state in states:
+        registration = state.get("lastRegistration") if isinstance(state, dict) else None
+        if (
+            isinstance(registration, dict)
+            and registration.get("sessionId") == session_id
+            and registration.get("agent") == agent_id
+            and registration.get("projectRoot") == str(root)
+        ):
+            return True
+    return False
+
+
+def occupancy_from_inspection(
+    root: Path,
+    agent_id: str,
+    harness: str,
+    inspection,
+    *,
+    probe: bool = True,
+) -> SeatOccupancy:
+    """Interpret one ``inspect_seat`` result as holder + locus."""
+
+    status = getattr(inspection, "status", None)
+    state = OCCUPANCY_STATES.get(status, "ambiguous")
+    token = getattr(inspection, "token", None)
+    holder_harness = getattr(token, "harness", None)
+    if not isinstance(holder_harness, str):
+        holder_harness = None
+    record = getattr(token, "record", None)
+    since = _render_since(record.get("claimedAt")) if isinstance(record, dict) else None
+    if state != "active" or token is None:
+        return SeatOccupancy(
+            harness,
+            agent_id,
+            inspection,
+            state,
+            holder_harness=holder_harness,
+            since=since,
+        )
+    holder_agent = getattr(token, "agent_id", agent_id)
+    surface = _recorded_surface(root, holder_agent, token)
+    phone = surface is None and _phone_session_registered(root, holder_agent, token)
+    tmux_location = None
+    tty = None
+    if surface is None and not phone and probe:
+        evidence = _probe_owner_process(getattr(token, "owner_pid", 0))
+        command = evidence.get("command", "")
+        if PHONE_SESSION_MARKERS & set(command.split()):
+            phone = True
+        else:
+            tmux_location = evidence.get("tmux") or None
+            observed_tty = evidence.get("tty")
+            tty = observed_tty if observed_tty and observed_tty != "none" else None
+    return SeatOccupancy(
+        harness,
+        agent_id,
+        inspection,
+        state,
+        holder_harness=holder_harness,
+        phone=phone,
+        surface=surface,
+        tmux_location=tmux_location,
+        tty=tty,
+        since=since,
+    )
+
+
+def inspect_seat_occupancy(
+    root: Path,
+    agent_id: str,
+    harness: str,
+    *,
+    probe: bool = True,
+) -> SeatOccupancy:
+    """Read-only: include same-harness holders that would block ``claim``."""
+
+    try:
+        inspection = inspect_seat(root, agent_id)
+        if inspection.status in {"vacant", "stale"}:
+            for record in harness_lease_records(root, harness):
+                if record["agentId"] == agent_id:
+                    continue
+                sibling = inspect_seat(root, record["agentId"])
+                if sibling.status in {"active_healthy", "active_unhealthy", "ambiguous"}:
+                    inspection = sibling
+                    break
+    except RuntimeStateError as error:
+        inspection = _AmbiguousInspection(str(error))
+    return occupancy_from_inspection(root, agent_id, harness, inspection, probe=probe)
+
+
+@dataclass(frozen=True)
+class _AmbiguousInspection:
+    detail: str
+    status: str = "ambiguous"
+    token: Any = None
+
+
+def occupied_seat_refusal(
+    tool: str | None,
+    root: Path,
+    occupancy: SeatOccupancy,
+    *,
+    requested_agent: str | None = None,
+    next_action: str | None = None,
+) -> str:
+    """Three lines: who holds the seat, what to do next, then the forensics."""
+
+    holder = occupancy.holder_phrase()
+    if occupancy.wake_unhealthy:
+        holder += " (wake unhealthy)"
+    prefix = f"{tool}: " if tool else ""
+    first = f"{prefix}seat {occupancy.agent_id!r} in {root} is held by {holder}"
+    if requested_agent and requested_agent != occupancy.agent_id:
+        first += f"; requested seat {requested_agent!r}"
+    lines = [first + ".", f"  {next_action or occupancy.next_action()}"]
+    if occupancy.detail:
+        lines.append(f"  ({occupancy.detail})")
+    return "\n".join(lines)
+
+
+def jump_reachability(occupancy: SeatOccupancy) -> tuple[bool, str | None]:
+    """Whether ``j`` may be offered: a recorded surface that still answers."""
+
+    if occupancy.surface is None:
+        return False, None
+    try:
+        probe_capability_surface(occupancy.surface)
+    except SurfaceError as error:
+        return False, str(error)
+    return True, None
+
+
+def jump_to_seat(occupancy: SeatOccupancy) -> str:
+    """Navigate to the surface showing the holder; the lease is untouched."""
+
+    if occupancy.surface is None:
+        raise SurfaceError(
+            f"seat {occupancy.agent_id!r} has no recorded surface to jump to"
+        )
+    return f"jumped to {focus_capability_surface(occupancy.surface)}"
+
+
+def take_over_seat(root: Path, occupancy: SeatOccupancy) -> tuple[bool, str]:
+    """Guarded takeover: replace exactly the holder's lease under its fence.
+
+    The new lease is owned by this process.  A launcher reached through
+    ``os.execv`` keeps the pid, so ``rt-<harness>`` re-enters it through
+    ``_same_process_lease`` and the seat is never unowned in between.  Any
+    change under the fence -- a new holder, a vanished lease, ambiguous
+    liveness -- is a refusal, never a second owner.
+    """
+
+    agent_id = occupancy.agent_id
+    token = occupancy.token
+    if not occupancy.takeover_eligible or token is None:
+        return False, (
+            f"seat {agent_id!r} is not takeover-eligible: "
+            f"{occupancy.detail or occupancy.state}"
+        )
+    try:
+        claim(
+            root,
+            agent_id,
+            occupancy.harness,
+            replace_fence=(token.session_id, str(token.revision)),
+        )
+    except SeatOccupied as error:
+        return False, (
+            f"seat {agent_id!r} changed under you; nothing was taken over "
+            f"({error.inspection.detail})"
+        )
+    except SeatAmbiguous as error:
+        return False, (
+            f"seat {agent_id!r} has ambiguous runtime state; nothing was taken "
+            f"over ({error.inspection.detail})"
+        )
+    except FenceRejected:
+        return False, f"seat {agent_id!r} changed under you; nothing was taken over"
+    except (RuntimeStateError, OSError) as error:
+        return False, f"could not take over seat {agent_id!r}: {error}"
+    return True, f"took over seat {agent_id!r} from {occupancy.holder_phrase()}"
 
 
 LEASE_CONTEXT_ENV_NAMES = tuple(
@@ -602,22 +1095,16 @@ def claim_launch_seat(root: Path | None, harness: str, agent_id: str | None):
         if token is None:
             token = claim(root, agent_id, harness)
     except SeatOccupied as error:
-        status = error.inspection.status
-        condition = "unhealthy" if status == "active_unhealthy" else "active"
         token = getattr(error.inspection, "token", None)
         owner = getattr(token, "agent_id", None)
         occupied = owner if isinstance(owner, str) and owner else agent_id
-        request_detail = (
-            f"; requested seat {agent_id!r}"
-            if occupied != agent_id
-            else ""
+        occupancy = occupancy_from_inspection(
+            root, occupied, harness, error.inspection
         )
-        location = _owner_process_location(getattr(token, "owner_pid", 0))
-        location_detail = f"; {location}" if location else ""
         raise SelectionError(
-            f"rt-{harness}: seat {occupied!r} is {condition} in {root}"
-            f"{request_detail}; "
-            f"{error.inspection.detail}{location_detail}"
+            occupied_seat_refusal(
+                f"rt-{harness}", root, occupancy, requested_agent=agent_id
+            )
         ) from error
     except SeatAmbiguous as error:
         raise SelectionError(

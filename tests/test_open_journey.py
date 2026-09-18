@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import hashlib
 import importlib.util
 from importlib.machinery import SourceFileLoader
@@ -330,7 +331,13 @@ def test_open_journey_refuses_an_already_active_seat_before_spawning(
         tmp_path,
         "#!/bin/sh\nexit 0\n",
     )
+    monkeypatch.setattr("_rtlauncher._probe_owner_process", lambda _pid: {})
     token = claim(target, "codex", "codex")
+    since = (
+        datetime.fromisoformat(token.record["claimedAt"])
+        .astimezone()
+        .strftime("%H:%M")
+    )
 
     try:
         code, _stdout, stderr = _open_with_fake_launcher(
@@ -339,7 +346,12 @@ def test_open_journey_refuses_an_already_active_seat_before_spawning(
             repository,
         )
         assert code == 2
-        assert "seat 'codex' is already active" in stderr
+        assert stderr.splitlines()[0] == (
+            f"rt-worktree: seat 'codex' in {target} is held by a Codex session "
+            f"started {since} (wake unhealthy)."
+        )
+        assert "run `pneu`, choose " in stderr
+        assert "take the seat over from the card" in stderr
         assert not (tmp_path / "launcher.pid").exists()
         assert not seat_paths(target, "codex", root=runtime).surface.exists()
     finally:
