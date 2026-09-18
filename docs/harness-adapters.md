@@ -5,6 +5,11 @@
 > preserve native harness session semantics; standardize only the
 > coordination boundary pneu actually owns (ADR 0003).
 
+[ADR 0005](adr/0005-native-admission-validation.md) supersedes the historical
+interface ranking and integration order. Claude Code and Codex native
+admission comes first; see the [capability evidence](native-admission.md).
+The candidates below do not authorize additional harness work in that spike.
+
 ## Native protocol first
 
 When a harness provides a maintained native control protocol, use it. Do not
@@ -90,20 +95,21 @@ Operation semantics stay distinct — never one generic `wake()`:
 | --- | --- | --- |
 | notify | client/surface notification | mail exists; no turn change |
 | append context | `thread/inject_items` | model-visible history for a later admitted request; **not wake** |
-| start work | `turn/start` | admit new work on an idle thread |
+| start or steer work | `turn/start` | starts if idle, steers if active; not an atomic idle-only operation |
 | steer work | `turn/steer` | add input to a specific active turn; interruptive |
 | resume | `thread/resume` | load the exact durable thread |
 
 **Busy-turn safety.** Ordinary mail during an active human turn is never
 silently steered into that turn. Admission can race and `turn/start` can
-behave as start-or-steer in current implementations (upstream issue open),
-so until an atomic idle-only admission contract is validated:
+behave as start-or-steer in the tested implementations; see
+[Phase 1a evidence](native-admission.md). Apply this policy:
 
 ```text
-idle thread     → start a concise pneu activation turn
-active thread   → notify only; leave mail durable
-urgent explicit → turn/steer with exact active-turn precondition
-unloaded thread → deliver; resume on user return unless background explicit
+atomic gate unproven → defer automatic ordinary-mail input; leave mail durable
+proven gate accepts → start a concise pneu activation turn
+active thread       → notify only; leave mail durable
+urgent explicit     → turn/steer with exact active-turn precondition
+unloaded thread     → deliver; resume on user return unless background explicit
 ```
 
 **Connection strategy**, in order: the supported shared/local App Server

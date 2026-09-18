@@ -57,11 +57,11 @@ atomic write of a message file into the recipient's `new/` directory *is* the
 delivery. An offline seat loses nothing; the core works in an ordinary
 terminal.
 
-**Wake** is an adapter layered on top, and it uses whatever the harness
-natively provides — including a daemon. Codex's wake path runs through the
-shared app-server daemon precisely because that is the native mechanism Codex
-offers; that is correct, not a compromise. "pneu opposes daemons" is a false
-belief: *delivery* does not depend on one.
+**Wake** is an adapter layered on top and may use a harness-owned service.
+The harness owns its runtime; native use must not depend on a replacement
+host or a global client-routing override. Historical service machinery is
+not evidence of current native attachment support, or authorization to
+restore it (ADR 0005). Delivery remains independent of such services.
 
 Delivery, notification, wake, seen, acknowledged, and replied are distinct
 states and must never be collapsed into one "sent". The UI never claims "the

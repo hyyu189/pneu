@@ -6,6 +6,12 @@
 > [`roadmap.md`](roadmap.md); the dated audit behind this rebaseline is
 > [`audit/baseline-2026-08-27.md`](audit/baseline-2026-08-27.md).
 
+The service design described below is the shipped implementation, not a
+current Desktop attachment guarantee. [Phase 1a evidence](native-admission.md)
+separates current native interfaces from that historical route;
+[ADR 0005](adr/0005-native-admission-validation.md) forbids restoring it as
+a substitute for proving native attachment. The spike changes no runtime path.
+
 ## Delivery core
 
 Per-project maildir delivery is the fact source. `rt-say` publishes with an
@@ -55,10 +61,11 @@ surfaces, alarms) live only in this runtime, never in committed documents.
   capability record, revalidated per call. The bound thread is the seat's
   control entry: any client driving that exact thread operates the same
   seat; a `/btw` side child, a fork, or an unrelated thread resolves to
-  nothing. `pneu setup apply` joins Codex Desktop to the pneu daemon through
-  the supported upstream switch so one host owns every thread; the daemon's
-  connection domain is machine-wide, so seat isolation is entirely pneu's
-  lease/fence/binding layer.
+  nothing. The shipped setup contains the historical Desktop-to-daemon
+  routing mechanism; current Desktop participation is not established by
+  that implementation. Its intended machine-wide connection domain relies
+  on pneu's lease/fence/binding layer for seat isolation. Do not activate
+  the mechanism to work around the native admission gaps in Phase 1a.
 - **Hermes** — a packaged lifecycle plugin, inert unless launched with a
   complete fenced environment; arms on session reset; delivers via the
   native background-notification rail.
