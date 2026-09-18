@@ -48,16 +48,24 @@ def run_with_pty(callback, input_bytes: bytes):
     stdin = os.fdopen(os.dup(slave), "r", encoding="utf-8", buffering=1)
     stderr = os.fdopen(os.dup(slave), "w", encoding="utf-8", buffering=1)
     output = bytearray()
-    stopped = threading.Event()
+    writer_done = threading.Event()
+    reader_errors = []
 
     def drain_master():
-        while not stopped.is_set():
-            ready, _write, _error = select.select([master], [], [], 0.05)
+        while True:
+            # Only an empty queue observed after writing finished ends drain.
+            draining = writer_done.is_set()
+            ready, _write, _error = select.select(
+                [master], [], [], 0 if draining else 0.05
+            )
             if not ready:
+                if draining:
+                    break
                 continue
             try:
                 chunk = os.read(master, 4096)
-            except OSError:
+            except OSError as error:
+                reader_errors.append(error)
                 break
             if not chunk:
                 break
@@ -65,18 +73,58 @@ def run_with_pty(callback, input_bytes: bytes):
 
     reader = threading.Thread(target=drain_master, daemon=True)
     reader.start()
-    os.write(master, input_bytes)
     try:
+        os.write(master, input_bytes)
         result = callback(stdin, stderr)
         stderr.flush()
     finally:
-        stdin.close()
-        stderr.close()
-        os.close(slave)
-        stopped.set()
-        reader.join(timeout=1)
-    os.close(master)
+        try:
+            stdin.close()
+            stderr.close()
+            writer_done.set()
+            reader.join(timeout=1)
+            assert not reader.is_alive(), "PTY reader did not finish draining"
+            if reader_errors:
+                raise reader_errors[0]
+        finally:
+            # Keep the slave open until drain completes: Darwin can discard
+            # unread output when its last slave descriptor closes.
+            os.close(slave)
+            os.close(master)
     return result, output.decode(errors="replace")
+
+
+def test_run_with_pty_drains_queued_output_after_callback_returns(monkeypatch):
+    allow_reader = threading.Event()
+
+    class DelayedReader(threading.Thread):
+        def __init__(self, *, target, **kwargs):
+            def delayed_target():
+                assert allow_reader.wait(timeout=5), "reader was never released"
+                target()
+
+            super().__init__(target=delayed_target, **kwargs)
+
+        def join(self, timeout=None):
+            # Deliberately schedule the reader after the callback and writer
+            # streams close. Buffered output must be drained before returning.
+            allow_reader.set()
+            super().join(timeout=timeout)
+
+    real_read = os.read
+    monkeypatch.setattr(threading, "Thread", DelayedReader)
+    monkeypatch.setattr(os, "read", lambda fd, size: real_read(fd, min(size, 64)))
+    # Fits in the PTY buffer without a reader, but requires multiple reads.
+    expected = "screen: " + "x" * 128 + "jumped to pane w1:p3"
+
+    def callback(_stdin, stderr):
+        stderr.write(expected)
+        return 17
+
+    result, rendered = run_with_pty(callback, b"")
+
+    assert result == 17
+    assert rendered == expected
 
 
 def write_project(path: Path, seats=None) -> Path:
