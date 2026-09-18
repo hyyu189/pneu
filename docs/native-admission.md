@@ -13,7 +13,8 @@ The production maildir, lease, fencing, wake, and recovery code is unchanged.
 - **O**: read-only observation of the installed host; no delivery claim.
 - **V**: a message observed in the intended visible root, with its native
   identity established. A new visible test root is distinct from attaching
-  to the user's already-open root.
+  to the user's already-open root. Label user-reported terminal evidence
+  separately from independently captured UI evidence.
 - **Unverified**: no sufficient evidence; not a pass.
 
 The installed standalone Codex is `0.155.1`; the Desktop backend is
@@ -32,8 +33,9 @@ current owner evidence, and pneu lease fence separately on each operation.
 
 | Question | Claude Code | Codex |
 | --- | --- | --- |
+| Idle receive in a new visible test root | **V, user-reported terminal evidence:** `idle-1` appeared through the Channel and Claude replied. Its `probe_observed` call was recorded later, during the busy-case continuation; no application ACK is claimed. This is the newly launched test root, not attachment to a pre-existing session. | L: isolated threads receive input and complete synthetic turns. A new native visible-root receive test remains **V: unverified**. |
 | Reach an already-open visible root | D: peer inbox addresses existing sessions; full external wire contract was not established. Channels require startup opt-in. O: `agents --json` works, but no confirmed pre-existing Claude visible root in this worktree. **V: unverified.** | O: Desktop owns a stdio app-server with no TCP listener or named Unix listener observed. The current CLI thread's inherited identity resolves to a live writer owner, also with no such listener. A supported endpoint to those owners remains unverified. **V: unverified.** Another backend using the same stored ID is not attach. |
-| Ordinary mail during busy human work | D: peer messages can enter between tools, which violates strict deferral. Channels document queuing but do not establish a boundary after the human task or queued human input. **V: unverified.** | S/L: after observing idle, a synthetic human turn starts; `turn/start.toolOutput` then joins that same turn and appears in its next model request. Strict deferral fails in both tested binaries. **V: unverified.** |
+| Ordinary mail during busy human work | V/O: `busy-1` was emitted after the same native session reported busy; the user-reported trace shows its event during the sleep task and two probe calls before the final human-task reply. Local instrumentation confirms the calls. **Strict deferral is not established**; native turn/context boundaries remain unverified. D: peer messages can enter between tools. | S/L: after observing idle, a synthetic human turn starts; `turn/start.toolOutput` then joins that same turn and appears in its next model request. Strict deferral fails in both tested binaries. **V: unverified.** |
 | Waiting for approval | O: Claude inventory can omit status on background rows; missing state remains unknown. Channel permission relay is a separate capability and is not enabled by the probe. **V: unverified.** | S: active flags distinguish `waitingOnApproval` / `waitingOnUserInput`; these are busy. A mail client must not answer approval requests. **V: unverified.** |
 | Compaction | D: native hooks expose compaction lifecycle. External receipt state must survive context replacement. Strict deferral and identity continuity in the visible root are **unverified**. | S: native compaction preserves the thread, but does not add atomic mail admission. Visible-root compact/receive ordering is **unverified**. |
 | Idle check versus admission | No documented atomic per-message idle condition was established for peer messaging, Channels, or monitors. Deferral by external polling alone is insufficient. | S/L: the race is reproduced. Core has `start_turn_if_idle`; public `TurnStartParams` does not expose it. `turnTrigger` classifies a start; it is not an admission fence. |
@@ -167,18 +169,55 @@ disposable Claude window when done; its stdio probe exits with it.
 
 The user reported opening the disposable native Claude window. The supported
 inventory found exactly one interactive root at that test directory, idle.
-The probe completed MCP initialization and wrote `idle-1` to stdout. At the
-recorded check there was no `probe_observed` call, and native inventory still
-reported idle. This is **O plus user-reported startup**, not a V receipt or
-a successful wake. No matching native debug log existed to identify the
-reason; the computer-use tool could not read the terminal UI.
+The probe completed MCP initialization and wrote `idle-1` to stdout. The
+user subsequently supplied terminal evidence showing the Channel event and
+Claude's reply: "Probe idle-1 received. No action taken, since it didn't ask
+for any work." This establishes **V, user-reported idle receipt and response
+in the newly launched visible test root**. The agent did not independently
+capture the UI; the computer-use tool could not read that terminal app.
 
-MCP initialization alone does not establish Channel registration or policy
-eligibility. A user check of `/mcp` and native Channel notices is required
-to resolve this attempt. Already-open-root attach, visible delivery, busy,
-approval and compaction behavior therefore remain unverified. Do not turn
-the absent observation into either a no-injection guarantee or a diagnosed
-upstream failure.
+The initial local probe journal contained no `probe_observed` call. Model
+receipt, a conversational response, an instrumented observation and a pneu
+application ACK remain separate facts. In this case, zero observation calls
+did not mean the model had not seen the event. A later idle inventory result
+also cannot establish that no turn ran between observations.
+
+The same terminal excerpt included a warning that no MCP server was
+configured with the selected name, despite the visible event and response.
+The user then checked `/mcp`: `pneu-probe` was connected, dynamically
+configured, with tools capability and one discovered tool. Connection and
+tool discovery are therefore confirmed by user-reported UI evidence;
+the later busy case below also exercised the tool. The startup warning's
+cause is unresolved; no matching native debug log was available. It does
+not establish that the Channel was unavailable, nor does this receipt prove
+universal Channel eligibility.
+
+For the busy case, the user asked Claude to run `sleep 15`, then separately
+run `printf 'HUMAN_DONE\n'`, then reply `HUMAN_DONE`. A local driver matched
+the previously recorded native session ID, PID and exact test cwd, waited
+for `status=busy`, and emitted `busy-1`. This was an observed-state test,
+not an atomic admission operation. To repeat manually, check the known root
+with `inspect --expected-session-id`, then emit while that task is busy.
+
+The user-reported terminal sequence was: first shell command; the Channel
+event; a continuation listing two probe calls and one shell command; final
+`HUMAN_DONE` plus a narrative about the probe. The local journal confirms
+one `probe_observed` call for `busy-1`, then one for the earlier `idle-1`,
+on the same probe-process generation. Both return `application_ack=false`.
+This establishes busy-event receipt and actual tool invocation, not
+exactly-once task processing or a pneu acknowledgement.
+
+Claude's narrative said it waited until the shell task finished before
+recording the probes. That self-report is not native scheduling evidence:
+the visible trace lists probe handling before the requested final human-task
+reply. A shell command completing without interruption does not establish
+ordinary-mail isolation from the ongoing human task. This case cannot pass
+the strict-deferral gate. Exact native turn IDs, input-context timing and
+ordering against a second queued human prompt remain unverified.
+
+Already-open-root attach, approval/compaction deferral, the idle-to-busy
+race and native reconnect remain unverified for Claude. These two visible
+receipts do not promote the integration or establish application processing.
 
 ## Responsibilities and smallest next increment
 
