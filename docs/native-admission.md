@@ -240,6 +240,10 @@ can verify trusted same-root tool binding without pretending to solve idle
 wake. Keep automatic ordinary-mail push unavailable until the gaps below
 are addressed. Do not use Stop-hook polling to keep a task alive indefinitely.
 
+That separately scoped increment is now implemented as
+[explicit native inbox/status](native-inbox.md). Its query evidence does not
+change the automatic admission results above.
+
 The narrow upstream needs are:
 
 - Codex: expose Core's atomic idle-only admission with explicit accepted/busy

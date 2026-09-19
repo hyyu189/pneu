@@ -1878,6 +1878,11 @@ def test_layout_path_invariant_covers_every_production_source() -> None:
 # fails.
 ALLOWED_NON_LAYOUT_LITERALS = {
     "bin/pneu": {"inbox": 'the "inbox" CLI subcommand alias for rt-inbox'},
+    "bin/rt-native": {"inbox": "the explicit native query operation name"},
+    "bin/_rtnative.py": {
+        "inbox": "the explicit native query operation name",
+        "messages": "the JSON result field containing existing rt-inbox records",
+    },
 }
 
 

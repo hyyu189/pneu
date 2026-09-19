@@ -12,6 +12,28 @@ and source, isolated real-binary experiments, local process observations,
 and real visible-root acceptance. It does not promote either harness or
 certify the historical daemon route described in the onboarding matrix.
 
+## Explicit native queries
+
+The [native inbox/status implementation](native-inbox.md) was exercised on
+2026-09-18 on macOS. These are new visible native CLI roots, not attachment
+to a pre-existing Desktop conversation. Herdr provided only the test terminal
+surface and user-input automation; it is not part of query delivery.
+
+| Evidence | Claude Code 2.1.277 | Codex 0.155.1 |
+| --- | --- | --- |
+| Unit/contract tests | Hook root/subagent checks, kernel transport checks, one-use tickets, lease and project conflicts, read-only mail snapshots | Per-call root/thread equality, explicit bind, old wake-binding rejection, lease/project conflicts, read-only snapshots |
+| Isolated real binary | SessionStart and PreToolUse kernel peer validation passed; ordinary Bash factory attempt refused. Local mock model only. | No-hook native shell bind, status, repeated inbox, and actual spawned subagent refusal passed. Local mock model only. |
+| Real visible native root | Passed: project SessionStart binding, two status and two inbox calls, same synthetic ID/body and pending state. A native subagent was refused before its command ran; root status still worked. Native manual approval remained in control. | Passed: explicit native shell bind, two status and two inbox calls, same synthetic ID/body and pending state. A spawned native subagent was refused, then root status/inbox still worked. |
+
+The two substantive mail files and two quiet receipts were byte-identical
+before/after the visible queries, all four remained in `new/`, and `cur/`
+contained no mail. Both roots reported bound/active separately from
+`native_busy: unknown`. Terminal output and runtime root associations were
+captured locally; raw logs, session identifiers and private paths are not
+published. Existing-session attach, approval/compaction continuity and
+automatic receive remain unverified. Claude's kernel peer check is currently
+specific to the observed macOS transport and fails closed elsewhere.
+
 ## Harness onboarding matrix
 
 `roundtable-setup` configures harnesses already installed by the user. It does
