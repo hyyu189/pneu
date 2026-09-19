@@ -34,6 +34,27 @@ published. Existing-session attach, approval/compaction continuity and
 automatic receive remain unverified. Claude's kernel peer check is currently
 specific to the observed macOS transport and fails closed elsewhere.
 
+## Explicit native send/ACK evidence
+
+The [send/ACK interface](native-inbox.md#explicit-send-and-acknowledgement)
+uses the same native root authorization and shared maildir core. Evidence on
+2026-09-18 is capability-specific:
+
+| Evidence | Claude Code 2.1.277 | Codex 0.155.1 |
+| --- | --- | --- |
+| Unit/contract | Complete ticket parameters, literal shell data, root/fence isolation, guarded writes, partial ACK and response-loss recovery | Root/thread equality, root/fence isolation, guarded writes, shared maildir recovery |
+| Isolated real binary with local mock model | Passed status/inbox/send/ACK/repeated ACK with real SessionStart/PreToolUse transport. Manual approval requests were handled by a test driver that approved only the exact expected command. Complex body/note preserved; one original archived and one quiet receipt, unchanged by repeated ACK. | Not completed with `workspace-write` and `on-request`: macOS sandbox denied the `/bin/ps` process inspection required for identity. Binding returned unsupported; send/ACK did not commit. |
+| Two real visible native roots | Explicit send/request-processing/reply/ACK round trip unverified. | Explicit send/request-processing/reply/ACK round trip unverified. |
+
+The isolated Claude approval actor was the test driver, not a human. It did
+not bypass native permission mode or return permission allow from the hook.
+The Codex refusal was retained without lowering sandbox policy. Process
+inspection must be available to authenticate the native caller; elevated
+per-command operation remains unverified in this matrix. These results do not
+promote visible send/ACK support, existing-session attach, native busy
+observation, approval/compaction continuity or automatic receive. Raw logs and
+runtime identifiers remain local; the isolated test processes were stopped.
+
 ## Harness onboarding matrix
 
 `roundtable-setup` configures harnesses already installed by the user. It does

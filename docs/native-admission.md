@@ -241,8 +241,8 @@ wake. Keep automatic ordinary-mail push unavailable until the gaps below
 are addressed. Do not use Stop-hook polling to keep a task alive indefinitely.
 
 That separately scoped increment is now implemented as
-[explicit native inbox/status](native-inbox.md). Its query evidence does not
-change the automatic admission results above.
+[explicit native inbox/status and send/ACK](native-inbox.md). These explicit
+operations do not change the automatic admission results above.
 
 The narrow upstream needs are:
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Explicit native-root inbox/status queries; no receive loop or mail mutation."""
+"""Explicit native-root inbox, status, send and acknowledgement; no receive loop."""
 from __future__ import annotations
 
 import argparse
@@ -17,7 +17,7 @@ import time
 
 from _rtcodex import CodexRuntimeError, _process_parent_and_uid
 from _rtlib import find_project_root
-from _rtnative import NativeQueryError, bind_native, query
+from _rtnative import NativeQueryError, bind_native, mutate, query
 from _rtruntime import (
     RuntimeStateError, _atomic_json, _ensure_private_dir, _read_json,
     runtime_root,
@@ -141,11 +141,113 @@ def managed_command(command):
     )
 
 
+def literal_words(command):
+    """Accept literal POSIX words only, including quoted multiline bodies.
+
+    shlex alone loses the distinction between quoted data and expansions.
+    Reject expansions/operators before decoding, then quote every decoded word
+    in the hook rewrite. A body can never become shell syntax in that rewrite.
+    """
+    if not isinstance(command, str) or "\0" in command:
+        return None
+    quote = None
+    words = []
+    word = []
+    started = False
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                word.append(char)
+        elif char == "\\":
+            index += 1
+            if index >= len(command) or command[index] in "\n\r":
+                return None
+            if quote == '"' and command[index] not in '$`"\\':
+                word.append("\\")
+            word.append(command[index])
+            started = True
+        elif quote == '"':
+            if char == '"':
+                quote = None
+            elif char in "$`":
+                return None
+            else:
+                word.append(char)
+        elif char in "'\"":
+            quote = char
+            started = True
+        elif char in "\n\r;&|><`$()#*?[]{}~":
+            return None
+        elif char in " \t":
+            if started:
+                words.append("".join(word))
+                word = []
+                started = False
+        else:
+            word.append(char)
+            started = True
+        index += 1
+    if quote is not None:
+        return None
+    if started:
+        words.append("".join(word))
+    return words
+
+
+def mutation_parameters(operation, arguments):
+    if arguments and arguments[0] == "--":
+        arguments = arguments[1:]
+    if operation == "send" and len(arguments) == 3:
+        return dict(zip(("target", "kind", "body"), arguments))
+    if operation == "ack" and len(arguments) in {1, 2}:
+        refs = arguments[0].split(",")
+        if any(not ref or ref != ref.strip() for ref in refs) or len(set(refs)) != len(refs):
+            raise NativeQueryError("unsupported", "ack requires unique, exact comma-separated refs")
+        return {"refs": refs, "body": arguments[1] if len(arguments) == 2 else ""}
+    raise NativeQueryError("unsupported", "use send TARGET KIND BODY or ack REF[,REF] [BODY]")
+
+
+def native_command(command):
+    operation = query_command(command)
+    if operation:
+        return operation, {}
+    words = literal_words(command)
+    if words is None:
+        return None
+    for prefix in (["rt-native"], [str(SCRIPT)], [sys.executable, str(SCRIPT)]):
+        if words[:len(prefix)] != prefix:
+            continue
+        tail = words[len(prefix):]
+        if not tail or tail[0] not in {"send", "ack"}:
+            return None
+        try:
+            parameters = mutation_parameters(tail[0], tail[1:])
+        except NativeQueryError:
+            return None
+        # The public invocation has no model-provided ticket or identity flags.
+        if tail[1:2] and tail[1].startswith("--") and tail[1] != "--":
+            return None
+        return tail[0], parameters
+    return None
+
+
+def operation_arguments(operation, parameters):
+    if operation == "send":
+        return [parameters["target"], parameters["kind"], parameters["body"]]
+    if operation == "ack":
+        return [",".join(parameters["refs"]), parameters["body"]]
+    return []
+
+
 def ticket_directory():
     return runtime_root() / "native-query-tickets"
 
 
-def issue_ticket(project, native_id, owner, operation, tool_use_id):
+def issue_ticket(project, native_id, owner, operation, tool_use_id, parameters=None):
     if not isinstance(tool_use_id, str) or not tool_use_id:
         raise NativeQueryError("unsupported", "native hook omitted tool_use_id")
     status = query(project, "claude", native_id, "status", owner_pid=owner)
@@ -156,13 +258,14 @@ def issue_ticket(project, native_id, owner, operation, tool_use_id):
     _atomic_json(directory / (ticket + ".json"), {
         "schema": "roundtable.native-query-ticket.v1", "project": str(project),
         "nativeSessionId": native_id, "ownerPid": owner, "operation": operation,
+        "parameters": parameters or {},
         "lease": status["lease"], "expires": time.time() + TICKET_TTL,
         "toolUseId": tool_use_id,
     })
     return ticket
 
 
-def consume_ticket(project, ticket, operation, owner):
+def consume_ticket(project, ticket, operation, owner, parameters=None):
     if not re.fullmatch(r"[0-9a-f]{64}", ticket):
         raise NativeQueryError("unbound", "invalid native query ticket")
     path = ticket_directory() / (ticket + ".json")
@@ -179,7 +282,7 @@ def consume_ticket(project, ticket, operation, owner):
     if not isinstance(value, dict) or value.get("schema") != "roundtable.native-query-ticket.v1":
         raise NativeQueryError("unbound", "invalid native query ticket record")
     if (value.get("project") != str(project) or value.get("operation") != operation
-            or value.get("ownerPid") != owner):
+            or value.get("ownerPid") != owner or value.get("parameters") != (parameters or {})):
         raise NativeQueryError("conflict", "native query ticket does not match this invocation")
     if not isinstance(value.get("toolUseId"), str) or not value["toolUseId"]:
         raise NativeQueryError("unbound", "native query ticket has no originating tool call")
@@ -197,6 +300,8 @@ def consume_ticket(project, ticket, operation, owner):
     native_id = value.get("nativeSessionId")
     if os.environ.get("CLAUDE_CODE_SESSION_ID") not in (None, "", native_id):
         raise NativeQueryError("conflict", "Claude native identity conflicts with the query ticket")
+    if operation in {"send", "ack"}:
+        return mutate(project, "claude", native_id, operation, parameters, environ=env, owner_pid=owner)
     return query(project, "claude", native_id, operation, environ=env, owner_pid=owner)
 
 
@@ -207,6 +312,7 @@ def run_hook(harness, project, payload):
     if event not in {"SessionStart", "PreToolUse"}:
         return {}
     operation = None
+    parameters = {}
     if event == "PreToolUse":
         if harness != "claude" or payload.get("tool_name") != "Bash":
             return {}
@@ -217,11 +323,12 @@ def run_hook(harness, project, payload):
         if managed_command(command):
             if payload.get("agent_id"):
                 raise NativeQueryError("unsupported", "subagent queries cannot use the root seat")
-            if query_command(command) is None:
-                raise NativeQueryError("unsupported", "use one literal rt-native inbox or status command; internal entry points are not model tools")
-        operation = query_command(command)
-        if operation is None:
+            if native_command(command) is None:
+                raise NativeQueryError("unsupported", "use one literal rt-native inbox, status, send or ack command; internal entry points are not model tools")
+        invocation = native_command(command)
+        if invocation is None:
             return {}
+        operation, parameters = invocation
     cwd = payload.get("cwd")
     if not isinstance(cwd, str) or Path(cwd).resolve() != project:
         raise NativeQueryError("conflict", "native hook cwd does not match the enabled project")
@@ -240,9 +347,13 @@ def run_hook(harness, project, payload):
             raise NativeQueryError("unsupported", "this native SessionStart source cannot bind a seat")
         bind_native(project, harness, native_id, owner)
         return {}
-    ticket = issue_ticket(project, native_id, owner, operation, payload.get("tool_use_id"))
+    ticket = issue_ticket(project, native_id, owner, operation, payload.get("tool_use_id"), parameters)
     updated = dict(payload["tool_input"])
-    updated["command"] = shlex.join([sys.executable, str(SCRIPT), operation, "--ticket", ticket])
+    arguments = operation_arguments(operation, parameters)
+    updated["command"] = shlex.join([
+        sys.executable, str(SCRIPT), operation, "--ticket", ticket,
+        *(["--", *arguments] if arguments else []),
+    ])
     # Preserve native permission policy; never return permissionDecision=allow.
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}
 
@@ -263,16 +374,23 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="action", required=True)
     sub.add_parser("bind", help="explicitly bind the calling Codex root; inbox/status never bind")
-    for operation in ("inbox", "status"):
+    for operation in ("inbox", "status", "send", "ack"):
         cmd = sub.add_parser(operation)
         cmd.add_argument("--ticket", help=argparse.SUPPRESS)
+        if operation in {"send", "ack"}:
+            cmd.add_argument("arguments", nargs=argparse.REMAINDER,
+                             help="TARGET KIND BODY" if operation == "send" else "REF[,REF] [BODY]")
     for action in ("hooks", "hook"):
         cmd = sub.add_parser(action)
         cmd.add_argument("harness", choices=("claude", "codex"))
         cmd.add_argument("--project", required=True, type=Path)
     args = parser.parse_args()
     payload = {}
+    parameters = {}
+    result = None
     try:
+        if args.action in {"send", "ack"}:
+            parameters = mutation_parameters(args.action, args.arguments)
         if args.action == "hooks":
             result = hook_config(args.harness, args.project.resolve())
         elif args.action == "hook":
@@ -291,16 +409,33 @@ def main():
             if args.action == "bind":
                 result = bind_native(project, "codex", codex_identity(os.environ), native_owner("codex"))
             elif args.ticket:
-                result = consume_ticket(project, args.ticket, args.action, native_owner("claude"))
+                result = consume_ticket(project, args.ticket, args.action, native_owner("claude"), parameters)
             else:
                 native_id = codex_identity(os.environ)
-                result = query(project, "codex", native_id, args.action, owner_pid=native_owner("codex"))
+                if args.action in {"send", "ack"}:
+                    result = mutate(project, "codex", native_id, args.action, parameters, owner_pid=native_owner("codex"))
+                else:
+                    result = query(project, "codex", native_id, args.action, owner_pid=native_owner("codex"))
         print(json.dumps(result, ensure_ascii=False, indent=2))
-        return 0
+        sys.stdout.flush()
+        return 0 if result.get("mutation", {}).get("status", "committed") == "committed" else 1
     except (NativeQueryError, RuntimeStateError, CodexRuntimeError, OSError, ValueError) as error:
+        if result is not None and "mutation" in result:
+            # The response can fail after mail publication. Preserve the exact
+            # outcome and IDs on stderr; do not manufacture a safe-to-resend
+            # failure. If both output streams fail, maildir remains authoritative.
+            result["response_error"] = str(error)
+            print(json.dumps(result, ensure_ascii=False, indent=2), file=sys.stderr)
+            return 1
         status = error.status if isinstance(error, NativeQueryError) else "unsupported"
         result = {"schema": "roundtable.native-query.v1", "binding": {"status": status},
                   "native_busy": "unknown", "error": str(error)}
+        if args.action in {"send", "ack"}:
+            result.update(schema="roundtable.native-mutation.v1", operation=args.action,
+                          mutation={"status": "not_committed"})
+            for field in ("refs", "target"):
+                if field in parameters:
+                    result["mutation"][field] = parameters[field]
         if args.action == "hook":
             # A failed optional registration cannot break native startup. A
             # failed query preflight blocks just that tool call, with a reason.

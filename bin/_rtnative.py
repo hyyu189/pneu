@@ -1,4 +1,4 @@
-"""Explicit native-root inbox reads using the existing seat capability/fence.
+"""Explicit native-root operations using the existing seat capability/fence.
 
 The CLI establishes harness-specific per-call root identity. This module
 associates that identity with the existing lease and reads durable mail only
@@ -12,6 +12,7 @@ import os
 import json
 import subprocess
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -277,6 +278,61 @@ def _read_inbox(project, agent, environ):
     return messages
 
 
+@contextmanager
+def authorized_native(project, harness, native_id, *, environ=None, owner_pid=None):
+    """Keep root binding and claim serialization through the entire operation."""
+    canonical, agent = _identity(project, harness, native_id)
+    record, token = _bound_capability(
+        canonical, agent, harness, native_id, owner_pid=owner_pid
+    )
+    with _existing_shared_lock(runtime_root() / HOST_BIND_LOCK):
+        _assert_unique_native_root(canonical, agent, harness, native_id)
+        with seat_shared_guard(canonical, agent, token.session_id, token.revision):
+            record, token = _bound_capability(
+                canonical, agent, harness, native_id, owner_pid=owner_pid
+            )
+            _environment_matches(canonical, token, environ)
+            yield canonical, agent, record, token
+
+
+def mutate(project, harness, native_id, operation, parameters, *, environ=None, owner_pid=None):
+    """Use native authorization directly, without fabricating a legacy wake binding."""
+    from _rtmail import mutate_mail
+
+    if operation not in {"send", "ack"}:
+        raise NativeQueryError("unsupported", "native mutation operation is unsupported")
+    result = None
+    try:
+        with authorized_native(project, harness, native_id, environ=environ, owner_pid=owner_pid) as (
+            canonical, agent, record, token
+        ):
+            result = _result(record, token)
+            result["schema"] = "roundtable.native-mutation.v1"
+            result["operation"] = operation
+            result["mutation"] = mutate_mail(canonical, agent, operation, parameters)
+            # Do not erase a committed/partial outcome if an owner exits while
+            # the operation finishes. The durable result still needs recovery.
+            try:
+                current, _ = _bound_capability(
+                    canonical, agent, harness, native_id, owner_pid=owner_pid
+                )
+                if current["nativeQuery"] != record["nativeQuery"]:
+                    raise NativeQueryError("stale", "native binding changed during the mutation")
+            except (NativeQueryError, RuntimeStateError, OSError, ValueError) as error:
+                result["binding"]["status"] = "stale"
+                result["binding"]["error"] = str(error)
+            return result
+    except (NativeQueryError, RuntimeStateError, OSError, ValueError) as error:
+        if result is not None and "mutation" in result:
+            result["binding"]["status"] = "stale"
+            result["binding"]["error"] = str(error)
+            return result
+        if isinstance(error, NativeQueryError):
+            raise
+        status = "stale" if isinstance(error, FenceRejected) else "unsupported"
+        raise NativeQueryError(status, str(error)) from error
+
+
 def query(
     project: Path | str,
     harness: str,
@@ -290,29 +346,18 @@ def query(
     if operation not in {"inbox", "status"}:
         raise NativeQueryError("unsupported", "native query operation is unsupported")
     try:
-        canonical, agent = _identity(project, harness, native_id)
-        record, token = _bound_capability(
-            canonical, agent, harness, native_id, owner_pid=owner_pid
-        )
-        # Existing-lock acquisition never creates or repairs runtime state.
-        # Reading under the same host lock catches pre-existing conflicting
-        # mappings and excludes a native bind until the snapshot is complete.
-        with _existing_shared_lock(runtime_root() / HOST_BIND_LOCK):
-            _assert_unique_native_root(canonical, agent, harness, native_id)
-            with seat_shared_guard(canonical, agent, token.session_id, token.revision):
-                record, token = _bound_capability(
-                    canonical, agent, harness, native_id, owner_pid=owner_pid
-                )
-                _environment_matches(canonical, token, environ)
-                result = _result(record, token)
-                if operation == "inbox":
-                    result["messages"] = _read_inbox(canonical, agent, environ)
-                current, _ = _bound_capability(
-                    canonical, agent, harness, native_id, owner_pid=owner_pid
-                )
-                if current["nativeQuery"] != record["nativeQuery"]:
-                    raise NativeQueryError("stale", "native binding changed during the query")
-                return result
+        with authorized_native(project, harness, native_id, environ=environ, owner_pid=owner_pid) as (
+            canonical, agent, record, token
+        ):
+            result = _result(record, token)
+            if operation == "inbox":
+                result["messages"] = _read_inbox(canonical, agent, environ)
+            current, _ = _bound_capability(
+                canonical, agent, harness, native_id, owner_pid=owner_pid
+            )
+            if current["nativeQuery"] != record["nativeQuery"]:
+                raise NativeQueryError("stale", "native binding changed during the query")
+            return result
     except NativeQueryError:
         raise
     except FenceRejected as error:

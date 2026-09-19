@@ -11,8 +11,14 @@ current Desktop attachment guarantee. [Phase 1a evidence](native-admission.md)
 separates current native interfaces from that historical route;
 [ADR 0005](adr/0005-native-admission-validation.md) forbids restoring it as
 a substitute for proving native attachment. The spike changes no runtime path.
-The subsequent [explicit native queries](native-inbox.md) reuse the maildir,
+The subsequent [explicit native operations](native-inbox.md) reuse the maildir,
 lease and capability records with project-scoped native identity hooks.
+`rt-native send/ack` retain native binding and claim guards through shared
+publication/archive helpers and a single project mailbox lock. Full-parameter
+Claude tickets preserve native approval; Codex uses per-call root identity
+without creating a legacy wake binding. Explicit ACK retry reconciles existing
+quiet receipts before completing an interrupted archive. Inbox/status remain
+read-only, including quiet receipts.
 
 ## Delivery core
 
