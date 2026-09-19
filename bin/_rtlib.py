@@ -678,7 +678,7 @@ def _structural_registry_warnings(warnings):
 
 
 def _resolve_native_fence(canonical, tool, values, fix):
-    """Resolve an absent ambient fence from the caller's native session.
+    """Validate native identity before filling an absent ambient fence.
 
     A Codex tool process is a child of the shared app-server, not of the seat
     launcher, so ``RT_*`` never reaches it.  The native thread id does, and it
@@ -715,16 +715,29 @@ def _resolve_native_fence(canonical, tool, values, fix):
             f"{tool}: fenced project {configured_root} does not match the "
             f"bound seat project {capability.project_root}{fix}"
         )
+    resolved_values = capability.environment()
+    for name in ("RT_SESSION_ID", "RT_LEASE_REVISION"):
+        configured_value = values.get(name, "")
+        if configured_value and configured_value != resolved_values[name]:
+            raise SystemExit(
+                f"{tool}: {name} does not match this native session's "
+                f"bound seat fence{fix}"
+            )
     return backfill_environment(capability)
 
 
 def authenticate_fenced_sender(project, tool):
     """Authenticate the sender's exact launcher lease.
 
+    When native Codex identity is present, it must agree with every supplied
+    fence field. Without it, the historical launcher-environment contract is
+    retained; a valid fence alone does not prove a native root session.
+
     Cross-project target authorization is deliberately separate and happens
     through ``resolve_project_address`` plus the target's own agents document.
     """
 
+    from _rtcapability import native_thread_id
     from _rtruntime import RuntimeStateError, inspect_seat, load_validated_lease
 
     fix = "\n  fix: run `rt-doctor` from the project, then relaunch the seat"
@@ -736,7 +749,7 @@ def authenticate_fenced_sender(project, tool):
         "RT_LEASE_REVISION": os.environ.get("RT_LEASE_REVISION", "").strip(),
     }
     missing = [name for name, value in values.items() if not value]
-    if missing:
+    if missing or native_thread_id() is not None:
         resolved = _resolve_native_fence(canonical, tool, values, fix)
         if resolved is not None:
             values.update(resolved)
@@ -3732,13 +3745,13 @@ def project_for_current_workspace():
     return None
 
 
-def find_project_root(tool, *, allow_cmux_workspace=False):
+def find_project_root(tool, *, allow_cmux_workspace=False, allow_environment=True):
     """Find a project without consulting a terminal API by default.
 
     Core maildir commands use explicit configuration, cwd, or the documented
     fallback. Only cmux adapter commands opt into workspace-based discovery.
     """
-    override = os.environ.get("ROUNDTABLE_PROJECT_DIR")
+    override = os.environ.get("ROUNDTABLE_PROJECT_DIR") if allow_environment else None
     if override:
         root = Path(override).expanduser().resolve()
         if is_project_root(root):
@@ -3750,7 +3763,7 @@ def find_project_root(tool, *, allow_cmux_workspace=False):
         if is_project_root(candidate):
             return candidate
 
-    fallback = fallback_project_root()
+    fallback = fallback_project_root() if allow_environment else None
     if fallback and is_project_root(fallback):
         return fallback
 

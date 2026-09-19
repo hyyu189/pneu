@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Explicit native-root inbox/status queries; no receive loop or mail mutation."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shlex
+import socket
+import struct
+import subprocess
+import sys
+import time
+
+from _rtcodex import CodexRuntimeError, _process_parent_and_uid
+from _rtlib import find_project_root
+from _rtnative import NativeQueryError, bind_native, query
+from _rtruntime import (
+    RuntimeStateError, _atomic_json, _ensure_private_dir, _read_json,
+    runtime_root,
+)
+
+SCRIPT = Path(__file__).resolve()
+TICKET_TTL = 60
+
+
+def native_owner(harness):
+    """Find the nearest same-user native owner, never a shared shell env PID."""
+    pid = os.getppid()
+    seen = set()
+    for _ in range(32):
+        if pid <= 1 or pid in seen:
+            break
+        seen.add(pid)
+        parent, uid = _process_parent_and_uid(pid)
+        if uid != os.getuid():
+            break
+        proc = subprocess.run(
+            ["/bin/ps", "-p", str(pid), "-o", "comm="],
+            capture_output=True, text=True, check=False,
+        )
+        executable = Path(proc.stdout.strip())
+        # Claude's standalone binary lives at versions/<version>.
+        name = executable.name
+        is_claude = name == "claude" or (
+            executable.parent.name == "versions"
+            and executable.parent.parent.name == "claude"
+        )
+        is_codex = name == "codex" or name.startswith("codex-")
+        if is_claude or is_codex:
+            if (harness == "claude" and is_claude) or (harness == "codex" and is_codex):
+                return pid
+            break
+        pid = parent
+    raise NativeQueryError("unsupported", "native owner is not in this tool's process lineage")
+
+
+def codex_identity(environ):
+    thread = environ.get("CODEX_THREAD_ID", "").strip()
+    root = environ.get("CODEX_SESSION_ID", "").strip()
+    if not thread or not root:
+        raise NativeQueryError("unsupported", "per-call Codex thread and root session identity are required")
+    if thread != root:
+        raise NativeQueryError("unsupported", "Codex subagents cannot read a root seat")
+    return thread
+
+
+def require_hook_transport(harness, owner):
+    """Authenticate Claude's native hook output channels on Darwin.
+
+    Claude's exercised command-hook transport uses native-owned Unix socket
+    pairs for stdout and stderr. The kernel peer PID distinguishes that
+    dispatch from an ordinary Bash invocation supplying its own hook JSON.
+    Neither an inherited environment variable nor a self-created socket pair
+    can establish this peer. Unsupported transports fail closed.
+
+    Codex uses native-shell identity and does not bind through hooks.
+    """
+    if harness != "claude":
+        return
+    if sys.platform != "darwin":
+        raise NativeQueryError(
+            "unsupported", "Claude native hook transport requires Darwin peer PID support"
+        )
+    for descriptor in (1, 2):
+        duplicate = None
+        try:
+            duplicate = os.dup(descriptor)
+            channel = socket.socket(fileno=duplicate)
+            duplicate = None  # The socket now owns this duplicate.
+            with channel:
+                raw = channel.getsockopt(0, 2, struct.calcsize("i"))
+            if len(raw) != struct.calcsize("i"):
+                raise NativeQueryError("unsupported", "native hook peer PID is unavailable")
+            peer = struct.unpack("i", raw)[0]
+            if peer <= 0 or peer != owner:
+                raise NativeQueryError(
+                    "unsupported", "hook output is not connected directly to the native owner"
+                )
+        except OSError as error:
+            raise NativeQueryError(
+                "unsupported", "Claude native hook output transport cannot be authenticated"
+            ) from error
+        finally:
+            if duplicate is not None:
+                os.close(duplicate)
+
+
+def query_command(command):
+    """Recognize only one literal query; shell syntax and free-form flags fail."""
+    if not isinstance(command, str):
+        return None
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return None
+    prefixes = (["rt-native"], [str(SCRIPT)], [sys.executable, str(SCRIPT)])
+    for prefix in prefixes:
+        if len(parts) == len(prefix) + 1 and parts[:-1] == prefix and parts[-1] in {"inbox", "status"}:
+            # shlex alone also accepts trailing shell comments and newlines.
+            if any(c in command for c in "\n\r;&|><`$"):
+                return None
+            return parts[-1]
+    return None
+
+
+def managed_command(command):
+    """Identify a direct CLI call without treating mentions as invocations."""
+    if not isinstance(command, str):
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(parts) and (
+        parts[0] in {"rt-native", str(SCRIPT)}
+        or (len(parts) > 1 and parts[0] == sys.executable and parts[1] == str(SCRIPT))
+    )
+
+
+def ticket_directory():
+    return runtime_root() / "native-query-tickets"
+
+
+def issue_ticket(project, native_id, owner, operation, tool_use_id):
+    if not isinstance(tool_use_id, str) or not tool_use_id:
+        raise NativeQueryError("unsupported", "native hook omitted tool_use_id")
+    status = query(project, "claude", native_id, "status", owner_pid=owner)
+    directory = ticket_directory()
+    _ensure_private_dir(directory.parent)
+    _ensure_private_dir(directory)
+    ticket = secrets.token_hex(32)
+    _atomic_json(directory / (ticket + ".json"), {
+        "schema": "roundtable.native-query-ticket.v1", "project": str(project),
+        "nativeSessionId": native_id, "ownerPid": owner, "operation": operation,
+        "lease": status["lease"], "expires": time.time() + TICKET_TTL,
+        "toolUseId": tool_use_id,
+    })
+    return ticket
+
+
+def consume_ticket(project, ticket, operation, owner):
+    if not re.fullmatch(r"[0-9a-f]{64}", ticket):
+        raise NativeQueryError("unbound", "invalid native query ticket")
+    path = ticket_directory() / (ticket + ".json")
+    # Atomic rename makes each native tool ticket usable once, including failures.
+    claimed = path.with_name(path.name + ".claimed." + secrets.token_hex(8))
+    try:
+        os.rename(path, claimed)
+    except FileNotFoundError:
+        raise NativeQueryError("unbound", "native query ticket is missing or already used") from None
+    try:
+        value = _read_json(claimed)
+    finally:
+        claimed.unlink(missing_ok=True)
+    if not isinstance(value, dict) or value.get("schema") != "roundtable.native-query-ticket.v1":
+        raise NativeQueryError("unbound", "invalid native query ticket record")
+    if (value.get("project") != str(project) or value.get("operation") != operation
+            or value.get("ownerPid") != owner):
+        raise NativeQueryError("conflict", "native query ticket does not match this invocation")
+    if not isinstance(value.get("toolUseId"), str) or not value["toolUseId"]:
+        raise NativeQueryError("unbound", "native query ticket has no originating tool call")
+    if not isinstance(value.get("expires"), (int, float)) or value["expires"] < time.time():
+        raise NativeQueryError("unbound", "native query ticket expired")
+    env = dict(os.environ)
+    lease = value.get("lease", {})
+    if not isinstance(lease, dict):
+        raise NativeQueryError("unbound", "invalid native query ticket lease")
+    for field, key in (("RT_SESSION_ID", "sessionId"), ("RT_LEASE_REVISION", "revision")):
+        expected = lease.get(key)
+        if not expected or (env.get(field) and env[field] != expected):
+            raise NativeQueryError("conflict", "native ticket and inherited lease disagree")
+        env[field] = expected
+    native_id = value.get("nativeSessionId")
+    if os.environ.get("CLAUDE_CODE_SESSION_ID") not in (None, "", native_id):
+        raise NativeQueryError("conflict", "Claude native identity conflicts with the query ticket")
+    return query(project, "claude", native_id, operation, environ=env, owner_pid=owner)
+
+
+def run_hook(harness, project, payload):
+    if harness != "claude":
+        raise NativeQueryError("unsupported", "Codex binds from its native shell with rt-native bind")
+    event = payload.get("hook_event_name")
+    if event not in {"SessionStart", "PreToolUse"}:
+        return {}
+    operation = None
+    if event == "PreToolUse":
+        if harness != "claude" or payload.get("tool_name") != "Bash":
+            return {}
+        tool_input = payload.get("tool_input")
+        command = tool_input.get("command") if isinstance(tool_input, dict) else None
+        # Native hook dispatch does not itself invoke Bash/PreToolUse. Reject
+        # model calls to hook factories or copied tickets before any execution.
+        if managed_command(command):
+            if payload.get("agent_id"):
+                raise NativeQueryError("unsupported", "subagent queries cannot use the root seat")
+            if query_command(command) is None:
+                raise NativeQueryError("unsupported", "use one literal rt-native inbox or status command; internal entry points are not model tools")
+        operation = query_command(command)
+        if operation is None:
+            return {}
+    cwd = payload.get("cwd")
+    if not isinstance(cwd, str) or Path(cwd).resolve() != project:
+        raise NativeQueryError("conflict", "native hook cwd does not match the enabled project")
+    native_id = payload.get("session_id")
+    if not isinstance(native_id, str) or not native_id.strip():
+        raise NativeQueryError("unsupported", "native hook omitted session_id")
+    if any(payload.get(name) for name in (
+        "agent_id", "parent_thread_id", "parentThreadId", "forked_from_id",
+        "forkedFromId", "sourceThreadId", "source_thread_id", "ephemeral",
+    )):
+        raise NativeQueryError("unsupported", "subagent queries cannot use the root seat")
+    owner = native_owner(harness)
+    require_hook_transport(harness, owner)
+    if event == "SessionStart":
+        if payload.get("source") not in {"startup", "resume", "clear", "compact"}:
+            raise NativeQueryError("unsupported", "this native SessionStart source cannot bind a seat")
+        bind_native(project, harness, native_id, owner)
+        return {}
+    ticket = issue_ticket(project, native_id, owner, operation, payload.get("tool_use_id"))
+    updated = dict(payload["tool_input"])
+    updated["command"] = shlex.join([sys.executable, str(SCRIPT), operation, "--ticket", ticket])
+    # Preserve native permission policy; never return permissionDecision=allow.
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": updated}}
+
+
+def hook_config(harness, project):
+    if harness != "claude":
+        raise NativeQueryError("unsupported", "Codex needs no hooks; use rt-native bind in the root shell")
+    command = shlex.join([sys.executable, str(SCRIPT), "hook", harness, "--project", str(project)])
+    hooks = {"SessionStart": [{"matcher": "startup|resume|clear|compact", "hooks": [{
+        "type": "command", "command": command,
+    }]}]}
+    if harness == "claude":
+        hooks["PreToolUse"] = [{"matcher": "Bash", "hooks": [{"type": "command", "command": command}]}]
+    return {"hooks": hooks}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("bind", help="explicitly bind the calling Codex root; inbox/status never bind")
+    for operation in ("inbox", "status"):
+        cmd = sub.add_parser(operation)
+        cmd.add_argument("--ticket", help=argparse.SUPPRESS)
+    for action in ("hooks", "hook"):
+        cmd = sub.add_parser(action)
+        cmd.add_argument("harness", choices=("claude", "codex"))
+        cmd.add_argument("--project", required=True, type=Path)
+    args = parser.parse_args()
+    payload = {}
+    try:
+        if args.action == "hooks":
+            result = hook_config(args.harness, args.project.resolve())
+        elif args.action == "hook":
+            raw = sys.stdin.read(65537)
+            if len(raw) > 65536:
+                raise NativeQueryError("unsupported", "native hook input exceeds size limit")
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                raise NativeQueryError("unsupported", "native hook input is not an object")
+            result = run_hook(args.harness, args.project.resolve(), payload)
+        else:
+            try:
+                project = Path(find_project_root("rt-native", allow_environment=False)).resolve()
+            except SystemExit:
+                raise NativeQueryError("unbound", "current cwd has no pneu project anchor; run from the enabled project") from None
+            if args.action == "bind":
+                result = bind_native(project, "codex", codex_identity(os.environ), native_owner("codex"))
+            elif args.ticket:
+                result = consume_ticket(project, args.ticket, args.action, native_owner("claude"))
+            else:
+                native_id = codex_identity(os.environ)
+                result = query(project, "codex", native_id, args.action, owner_pid=native_owner("codex"))
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 0
+    except (NativeQueryError, RuntimeStateError, CodexRuntimeError, OSError, ValueError) as error:
+        status = error.status if isinstance(error, NativeQueryError) else "unsupported"
+        result = {"schema": "roundtable.native-query.v1", "binding": {"status": status},
+                  "native_busy": "unknown", "error": str(error)}
+        if args.action == "hook":
+            # A failed optional registration cannot break native startup. A
+            # failed query preflight blocks just that tool call, with a reason.
+            print(json.dumps(result), file=sys.stderr)
+            return 2 if isinstance(payload, dict) and payload.get("hook_event_name") == "PreToolUse" else 0
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

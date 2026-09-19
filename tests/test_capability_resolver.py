@@ -25,7 +25,7 @@ sys.path.insert(0, str(BIN))
 
 import _rtcapability
 import _rtruntime
-from _rtlib import register_project, resolve_project_mailbox
+from _rtlib import authenticate_fenced_sender, register_project, resolve_project_mailbox
 
 
 def load_script(name: str, module_name: str):
@@ -284,6 +284,95 @@ def test_fenced_tool_refuses_for_a_btw_child_thread(host, tmp_path):
     assert refused.returncode != 0
     assert "not the bound Codex seat thread" in refused.stderr
     assert not inbox_files(project, "claude")
+
+
+@pytest.mark.parametrize("thread_id", ["other-root", "fork-thread", "subagent-thread"])
+def test_complete_inherited_fence_does_not_bypass_native_identity(
+    host, tmp_path, thread_id
+):
+    project = write_project(tmp_path / "project")
+    token, _store, _binding = bind_seat(host, project)
+    environment = {
+        **tool_environment(host, thread_id=thread_id),
+        **_rtcapability.SeatCapability(token).environment(),
+    }
+
+    refused = run_tool(
+        "rt-inbox", ["--fenced", "-f", "json"], cwd=project, env=environment
+    )
+
+    assert refused.returncode != 0
+    assert "not the bound Codex seat thread" in refused.stderr
+    assert not refused.stdout
+
+
+def test_complete_fence_requires_binding_when_native_identity_is_present(host, tmp_path):
+    project = write_project(tmp_path / "project")
+    token = _rtruntime.claim(project, "codex", "codex")
+    environment = {
+        **tool_environment(host, thread_id="unbound-thread"),
+        **_rtcapability.SeatCapability(token).environment(),
+    }
+
+    refused = run_tool(
+        "rt-inbox", ["--fenced", "-f", "json"], cwd=project, env=environment
+    )
+
+    assert refused.returncode != 0
+    assert "no Codex thread binding is recorded" in refused.stderr
+    assert not refused.stdout
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("field", ["RT_SESSION_ID", "RT_LEASE_REVISION"])
+def test_native_resolution_rejects_conflicting_fence_without_backfill(
+    host, tmp_path, monkeypatch, field, partial
+):
+    project = write_project(tmp_path / "project")
+    token, _store, _binding = bind_seat(host, project)
+    environment = {
+        "CODEX_THREAD_ID": "thread-1",
+        **_rtcapability.SeatCapability(token).environment(),
+    }
+    environment[field] = "conflicting-fence"
+    if partial:
+        environment.pop("RT_FROM")
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    before = dict(os.environ)
+
+    with pytest.raises(SystemExit, match=field):
+        authenticate_fenced_sender(project, "rt-inbox")
+
+    assert dict(os.environ) == before
+
+
+def test_complete_native_fence_succeeds_when_all_identity_fields_match(host, tmp_path):
+    project = write_project(tmp_path / "project")
+    token, _store, _binding = bind_seat(host, project)
+    environment = {
+        **tool_environment(host, thread_id="thread-1"),
+        **_rtcapability.SeatCapability(token).environment(),
+    }
+
+    result = run_tool(
+        "rt-inbox", ["--fenced", "-f", "json"], cwd=project, env=environment
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == []
+
+
+@pytest.mark.parametrize("harness", ["claude", "hermes"])
+def test_legacy_launcher_fence_without_native_identity_still_authenticates(
+    host, tmp_path, monkeypatch, harness
+):
+    project = write_project(tmp_path / "project")
+    token = _rtruntime.claim(project, harness, harness)
+    for name, value in _rtcapability.SeatCapability(token).environment().items():
+        monkeypatch.setenv(name, value)
+
+    assert authenticate_fenced_sender(project, "rt-inbox") == harness
 
 
 def test_project_mismatch_refuses(host, tmp_path):

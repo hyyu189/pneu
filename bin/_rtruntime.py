@@ -1516,7 +1516,35 @@ def _validate_seat_capability(
     surface = payload.get("surface")
     if surface is not None:
         payload["surface"] = validate_capability_surface(surface)
+    native_query = payload.get("nativeQuery")
+    if native_query is not None:
+        payload["nativeQuery"] = validate_native_query_binding(native_query)
+        if native_query["harness"] != payload["harness"]:
+            raise RuntimeStateError("native query harness does not match seat")
     return payload
+
+
+def validate_native_query_binding(value: Any) -> dict[str, Any]:
+    """Validate a harness-proven root association on the existing capability."""
+
+    fields = {"harness", "nativeSessionId", "source", "ownerPid", "ownerStart"}
+    if not isinstance(value, dict) or set(value) != fields:
+        raise RuntimeStateError("native query binding fields are invalid")
+    if value.get("harness") not in {"claude", "codex"}:
+        raise RuntimeStateError("native query harness is unsupported")
+    source = {"claude": "session-start", "codex": "native-shell"}[value["harness"]]
+    if value.get("source") != source:
+        raise RuntimeStateError("native query binding source is invalid")
+    pid = value.get("ownerPid")
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        raise RuntimeStateError("native query owner PID is invalid")
+    return {
+        "harness": value["harness"],
+        "nativeSessionId": _capability_value(value.get("nativeSessionId"), "nativeSessionId"),
+        "source": source,
+        "ownerPid": pid,
+        "ownerStart": _capability_value(value.get("ownerStart"), "ownerStart"),
+    }
 
 
 def read_seat_capability(
@@ -1548,6 +1576,7 @@ def record_seat_capability(
     surface: Any = UNCHANGED,
     thread_id: Any = UNCHANGED,
     binding_revision: Any = UNCHANGED,
+    native_query: Any = UNCHANGED,
     claim_lock_held: bool = False,
 ) -> Path:
     """Associate a seat's native thread and surface capability with its lease.
@@ -1618,6 +1647,7 @@ def record_seat_capability(
                 "threadId": previous.get("threadId"),
                 "bindingRevision": previous.get("bindingRevision"),
                 "surface": previous.get("surface"),
+                "nativeQuery": previous.get("nativeQuery"),
                 "recordedAt": utc_now(),
             }
             if thread_id is not UNCHANGED:
@@ -1636,6 +1666,17 @@ def record_seat_capability(
                 payload["surface"] = (
                     None if surface is None else validate_capability_surface(surface)
                 )
+            if native_query is not UNCHANGED:
+                payload["nativeQuery"] = (
+                    None if native_query is None
+                    else validate_native_query_binding(native_query)
+                )
+                if payload["nativeQuery"] is not None and (
+                    payload["nativeQuery"]["harness"] != selected_harness
+                    or payload["nativeQuery"]["ownerPid"] != lease["ownerPid"]
+                    or payload["nativeQuery"]["ownerStart"] != lease["ownerStart"]
+                ):
+                    raise FenceRejected("native query owner does not match seat lease")
             _atomic_json(paths.capability, payload)
     return paths.capability
 

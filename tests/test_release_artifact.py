@@ -308,6 +308,7 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
         "docs/architecture.md",
         "docs/compatibility.md",
         "docs/install.md",
+        "docs/native-inbox.md",
         "docs/provenance/source-commits.tsv",
         "docs/release.md",
         "install",
@@ -326,6 +327,16 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
         for name in relative
     )
     assert f"wheels/{spec.filename}" in relative
+    project_wheel_name = next(
+        name for name in relative
+        if name.startswith(f"wheels/pneu-{VERSION}-")
+        and name.endswith("-py3-none-any.whl")
+    )
+    with zipfile.ZipFile(io.BytesIO(files[f"{root}/{project_wheel_name}"])) as wheel:
+        names = set(wheel.namelist())
+        assert "_rtnative.py" in names
+        assert f"pneu-{VERSION}.data/scripts/_rtnative.py" in names
+        assert f"pneu-{VERSION}.data/scripts/rt-native" in names
 
     forbidden = build_release.FORBIDDEN_COMPONENTS
     for name in relative:

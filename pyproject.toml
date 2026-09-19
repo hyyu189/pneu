@@ -40,13 +40,14 @@ roundtable-uninstall = "pneu_packaging.cli:uninstall_main"
 [tool.setuptools]
 include-package-data = false
 packages = ["pneu_packaging"]
-py-modules = ["_rtcapability", "_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtrchost", "_rtruntime", "_rtsurface"]
+py-modules = ["_rtcapability", "_rtcodex", "_rtlauncher", "_rtlib", "_rtmigrate", "_rtnative", "_rtrchost", "_rtruntime", "_rtsurface"]
 script-files = [
   "bin/_rtcapability.py",
   "bin/_rtcodex.py",
   "bin/_rtlauncher.py",
   "bin/_rtlib.py",
   "bin/_rtmigrate.py",
+  "bin/_rtnative.py",
   "bin/_rtrchost.py",
   "bin/_rtruntime.py",
   "bin/_rtsurface.py",
@@ -62,6 +63,7 @@ script-files = [
   "bin/rt-doctor",
   "bin/rt-hermes",
   "bin/rt-inbox",
+  "bin/rt-native",
   "bin/rt-openclaw",
   "bin/rt-openclaw-wake",
   "bin/rt-grok",
@@ -86,6 +88,7 @@ package-dir = { "" = "bin", "pneu_packaging" = "pneu_packaging" }
   "docs/compatibility.md",
   "docs/install.md",
   "docs/legacy-v1-keyboard.md",
+  "docs/native-inbox.md",
   "docs/release.md",
   "docs/wp21-quiet-ack-nudge-retirement.md",
 ]
