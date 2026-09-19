@@ -215,6 +215,7 @@ def test_wheel_contains_commands_helpers_templates_and_uninstaller(built_wheel):
     assert "pneu_packaging/setup.py" in names
     assert "pneu_packaging/migrate.py" not in names
     assert "_rtruntime.py" in names
+    assert "_rtmail.py" in names
     assert "_rtnative.py" in names
     assert "_rtsurface.py" in names
     assert any(name.endswith(".data/scripts/roundtable") for name in names)
@@ -224,6 +225,7 @@ def test_wheel_contains_commands_helpers_templates_and_uninstaller(built_wheel):
         name.endswith(".data/scripts/rt-codex-session-start") for name in names
     )
     assert any(name.endswith(".data/scripts/_rtlib.py") for name in names)
+    assert any(name.endswith(".data/scripts/_rtmail.py") for name in names)
     assert any(name.endswith(".data/scripts/_rtmigrate.py") for name in names)
     assert any(name.endswith(".data/scripts/_rtnative.py") for name in names)
     assert any(name.endswith(".data/scripts/_rtruntime.py") for name in names)
@@ -325,7 +327,7 @@ def test_clean_home_install_is_idempotent_and_uninstall_preserves_state(tmp_path
             str(prefix / "current" / "bin" / "python"),
             "-c",
             (
-                "import _rtcodex, _rtlauncher, _rtlib, _rtmigrate, _rtnative, "
+                "import _rtcodex, _rtlauncher, _rtlib, _rtmail, _rtmigrate, _rtnative, "
                 "_rtrchost, _rtruntime, _rtsurface; "
                 "print(_rtcodex.ROUND_ROOT)"
             ),

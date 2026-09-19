@@ -12,6 +12,7 @@ MANAGED_HELPERS = (
     "_rtcodex.py",
     "_rtlauncher.py",
     "_rtlib.py",
+    "_rtmail.py",
     "_rtmigrate.py",
     "_rtnative.py",
     "_rtrchost.py",
