@@ -12,6 +12,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import _rtmail as _mail
+
 from _rtlib import (
     MailEnvelopeError,
     ProjectAddress,
@@ -146,95 +148,7 @@ def release_lock(path):
 
 
 def configured_target(root, target, *, required=True, runtime=None):
-    """Resolve a configured target to (base agent, concrete instance)."""
-    doc = load_agents_doc(root, "rt-say")
-    agents = doc.get("agents") or {}
-    if not isinstance(agents, dict):
-        raise SystemExit(
-            "rt-say: invalid agents configuration: agents must be a mapping"
-        )
-    exact_candidates = []
-    base_candidates = []
-    valid_names = set()
-    for base, config in agents.items():
-        if not isinstance(base, str) or not AGENT_COMPONENT_RE.fullmatch(base):
-            raise SystemExit(
-                "rt-say: invalid agents configuration: invalid base agent "
-                f"{base!r}"
-            )
-        base_name = base
-        valid_names.add(base_name)
-        if not isinstance(config, dict):
-            raise SystemExit(
-                "rt-say: invalid agents configuration for "
-                f"{base_name}: expected a mapping"
-            )
-        instances = config.get("instances")
-        if instances is None or instances == []:
-            instances = [{"id": base_name}]
-        elif not isinstance(instances, list):
-            raise SystemExit(
-                "rt-say: invalid agents configuration for "
-                f"{base_name}: instances must be a list"
-            )
-        instance_names = []
-        for instance in instances:
-            if isinstance(instance, str):
-                instance_name = instance
-            elif isinstance(instance, dict):
-                instance_id = instance.get("id")
-                if not isinstance(instance_id, str) or not instance_id:
-                    raise SystemExit(
-                        "rt-say: invalid agents configuration for "
-                        f"{base_name}: every instance needs an id"
-                    )
-                instance_name = instance_id
-            else:
-                raise SystemExit(
-                    "rt-say: invalid agents configuration for "
-                    f"{base_name}: instance entries must be strings or mappings"
-                )
-            if not AGENT_COMPONENT_RE.fullmatch(instance_name):
-                raise SystemExit(
-                    "rt-say: invalid agents configuration for "
-                    f"{base_name}: invalid instance id {instance_name!r}"
-                )
-            instance_names.append(instance_name)
-            valid_names.add(instance_name)
-            if instance_name == target:
-                exact_candidates.append((base_name, instance_name))
-        if base_name == target:
-            base_candidates.append((base_name, instance_names))
-    if len(exact_candidates) == 1:
-        return exact_candidates[0]
-    if len(exact_candidates) > 1:
-        matches = ", ".join(
-            f"{base}/{instance}"
-            for base, instance in sorted(exact_candidates)
-        )
-        raise SystemExit(
-            f"rt-say: ambiguous configured agent or instance {target}: "
-            f"{matches}"
-        )
-    if len(base_candidates) > 1:
-        matches = ", ".join(base for base, _instances in base_candidates)
-        raise SystemExit(
-            f"rt-say: ambiguous configured base agent {target}: {matches}"
-        )
-    if len(base_candidates) == 1:
-        base_name, instance_names = base_candidates[0]
-        if len(instance_names) == 1:
-            return base_name, instance_names[0]
-        raise SystemExit(
-            f"rt-say: {target} has multiple instances; use one of: "
-            + ", ".join(sorted(set(instance_names)))
-        )
-    if not required and target in ((runtime or {}).get("agents") or {}):
-        return target, target
-    rendered = ", ".join(sorted(valid_names)) or "none configured"
-    raise SystemExit(
-        f"rt-say: unknown agent or instance: {target}; use one of: {rendered}"
-    )
+    return _mail.configured_target(root, target, required=required, runtime=runtime)
 
 
 def infer_sender_from_harness_env(root):
@@ -594,66 +508,11 @@ def fsync_directory(path):
 
 
 def ensure_inbox_gitignore():
-    """Atomically install the inbox-local ignore rule, repairing partial files."""
-    ignore_path = INBOX_DIR / ".gitignore"
-    tmp_path = INBOX_DIR / f".gitignore.tmp.{os.getpid()}.{time.time_ns()}"
-    created_tmp = False
-    try:
-        descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        created_tmp = True
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write("*\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, ignore_path)
-        created_tmp = False
-        fsync_directory(INBOX_DIR)
-    except OSError:
-        if created_tmp:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise
+    return _mail.ensure_inbox_gitignore(INBOX_DIR)
 
 
 def publish_maildir(target, msg_id, content, *, quiet_ack=False):
-    """Publish one immutable maildir message via tmp -> new atomic rename."""
-    validate_agent_component(target, "inbox target")
-    filename = f"{'ack-' if quiet_ack else ''}{msg_id}.md"
-    if Path(filename).name != filename or "/" in filename or "\x00" in filename:
-        raise SystemExit(f"rt-say: invalid inbox message filename: {filename}")
-
-    target_dir = INBOX_DIR / target
-    tmp_dir = target_dir / "tmp"
-    new_dir = target_dir / "new"
-    cur_dir = target_dir / "cur"
-    tmp_path = tmp_dir / filename
-    new_path = new_dir / filename
-    created_tmp = False
-    try:
-        for path in (tmp_dir, new_dir, cur_dir):
-            path.mkdir(parents=True, exist_ok=True)
-        ensure_inbox_gitignore()
-        descriptor = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        created_tmp = True
-        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        if new_path.exists():
-            raise FileExistsError(f"destination already exists: {new_path}")
-        os.rename(tmp_path, new_path)
-        created_tmp = False
-        fsync_directory(new_dir)
-    except OSError as error:
-        if created_tmp:
-            try:
-                tmp_path.unlink()
-            except OSError:
-                pass
-        raise SystemExit(f"rt-say: failed to publish inbox message {msg_id}: {error}") from error
-    return new_path
+    return _mail.publish_maildir(INBOX_DIR, target, msg_id, content, quiet_ack=quiet_ack)
 
 
 def read_runtime(refresh=False):

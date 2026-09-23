@@ -86,7 +86,7 @@ MUTATIONS = (
     ),
     Mutation(
         slug="ack-archives-out-of-new",
-        filename="rt-ack",
+        filename="_rtmail.py",
         needle="    source.unlink()\n    fsync_directory(new_dir)",
         replacement="    fsync_directory(new_dir)",
         selector="mail_journey",

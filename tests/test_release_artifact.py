@@ -334,6 +334,8 @@ def test_release_archive_is_deterministic_allowlisted_and_runtime_free(
     )
     with zipfile.ZipFile(io.BytesIO(files[f"{root}/{project_wheel_name}"])) as wheel:
         names = set(wheel.namelist())
+        assert "_rtmail.py" in names
+        assert f"pneu-{VERSION}.data/scripts/_rtmail.py" in names
         assert "_rtnative.py" in names
         assert f"pneu-{VERSION}.data/scripts/_rtnative.py" in names
         assert f"pneu-{VERSION}.data/scripts/rt-native" in names

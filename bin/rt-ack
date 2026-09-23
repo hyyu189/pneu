@@ -6,6 +6,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+import _rtmail as _mail
+
 from _rtlib import (
     MailEnvelopeError,
     find_project_root,
@@ -220,63 +222,7 @@ def inbound_origin_route(mailbox, ref, original_from, original_to):
 
 
 def archive_inbound(ref, recipient):
-    """Move one exact inbound ref from new/ to cur/ without clobbering.
-
-    A hard-link followed by unlink gives us a no-clobber publication and a
-    recoverable intermediate state. If a prior attempt stopped between those
-    operations, both names identify the same inode and this retry completes the
-    unlink. A source that disappears after the preflight is a compatibility
-    no-op only when the archive copy is already a regular file.
-    """
-
-    mail_root = MAILBOX.inbox_dir
-    inbox = mail_root / recipient
-    new_dir = inbox / "new"
-    cur_dir = inbox / "cur"
-    source = new_dir / f"{ref}.md"
-    destination = cur_dir / f"{ref}.md"
-
-    for directory in (mail_root, inbox, new_dir):
-        if directory.is_symlink():
-            raise OSError(f"maildir path is a symlink: {directory}")
-        if directory.exists() and not directory.is_dir():
-            raise OSError(f"maildir path is not a directory: {directory}")
-
-    source_stat = lstat_or_none(source)
-    destination_stat = lstat_or_none(destination)
-    if source_stat is None:
-        if destination_stat is None:
-            raise FileNotFoundError(
-                f"inbound mail disappeared before archive: {source}"
-            )
-        if not stat.S_ISREG(destination_stat.st_mode):
-            raise OSError(f"archive destination is not a regular file: {destination}")
-        return
-    if not stat.S_ISREG(source_stat.st_mode):
-        raise OSError(f"inbound mail is not a regular file: {source}")
-
-    cur_dir.mkdir(parents=True, exist_ok=True)
-    if cur_dir.is_symlink() or not cur_dir.is_dir():
-        raise OSError(f"archive directory is not a real directory: {cur_dir}")
-
-    destination_stat = lstat_or_none(destination)
-    if destination_stat is not None:
-        if not stat.S_ISREG(destination_stat.st_mode):
-            raise OSError(f"archive destination is not a regular file: {destination}")
-        if (source_stat.st_dev, source_stat.st_ino) != (
-            destination_stat.st_dev,
-            destination_stat.st_ino,
-        ):
-            raise FileExistsError(
-                f"refusing to overwrite conflicting archive: {destination}"
-            )
-        fsync_directory(cur_dir)
-    else:
-        os.link(source, destination, follow_symlinks=False)
-        fsync_directory(cur_dir)
-
-    source.unlink()
-    fsync_directory(new_dir)
+    return _mail.archive_inbound(MAILBOX, ref, recipient)
 
 
 def archive_refs(refs, recipient, receiver_uuid):

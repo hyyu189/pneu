@@ -34,6 +34,42 @@ published. Existing-session attach, approval/compaction continuity and
 automatic receive remain unverified. Claude's kernel peer check is currently
 specific to the observed macOS transport and fails closed elsewhere.
 
+## Explicit native send/ACK evidence
+
+The [send/ACK interface](native-inbox.md#explicit-send-and-acknowledgement)
+uses the same native root authorization and shared maildir core. Evidence
+includes isolated experiments on 2026-09-18 and a visible round trip on
+2026-09-21, both on macOS:
+
+| Evidence | Claude Code | Codex 0.155.1 |
+| --- | --- | --- |
+| Unit/contract | Complete ticket parameters, literal shell data, root/fence isolation, guarded writes, partial ACK and response-loss recovery | Root/thread equality, root/fence isolation, guarded writes, shared maildir recovery |
+| Isolated real binary with local mock model | 2.1.277 passed status/inbox/send/ACK/repeated ACK with real SessionStart/PreToolUse transport. Manual approval requests were handled by a test driver that approved only the exact expected command. Complex body/note preserved; one original archived and one quiet receipt, unchanged by repeated ACK. | Not completed with `workspace-write` and `on-request`: macOS sandbox denied the `/bin/ps` process inspection required for identity. Binding returned unsupported; send/ACK did not commit. |
+| Two real visible native roots | 2.1.278 passed: sent one request, explicitly read and verified the correlated arithmetic correction, then acknowledged the reply. Native auto mode approved the calls. | Passed: explicitly bound and read inbox, corrected the requested sentence, sent a reply with the request ID, then acknowledged the request. The native session started with `Full Access` / `Approve for me`. |
+
+The isolated Claude approval actor was the test driver, not a human. It did
+not bypass native permission mode or return permission allow from the hook.
+The isolated Codex refusal was retained without lowering sandbox policy.
+Process inspection must be available to authenticate the native caller;
+elevated per-command operation remains unverified in this matrix.
+
+Visible-session evidence is user-reported terminal output, corroborated by
+local terminal logs, native root/lease associations and durable maildir files;
+it is not independent GUI capture. The actual result corrected `2 + 2 = 5` to
+`2 + 2 = 4` without changing the rest of the sentence. Both original messages
+were archived to `cur/` with unchanged bodies. Exactly two quiet receipts
+remain in `new/`, with the correct sources, destinations and original refs;
+neither was acknowledged or cleared. The sessions used their native approval
+modes without an agent changing permissions. This is not evidence of human
+approval for each command or of success under `workspace-write`.
+
+This validates explicit send/read/process/reply/ACK between new native CLI
+roots in the tested configuration. Existing-session attach, native busy
+observation, approval/compaction continuity, restart boundaries and automatic
+receive remain unverified; `native_busy` remains `unknown`. No watcher, wake
+or keyboard message transport was used. Raw logs and runtime identifiers
+remain local; the isolated mock test processes were stopped.
+
 ## Harness onboarding matrix
 
 `roundtable-setup` configures harnesses already installed by the user. It does
